@@ -10,6 +10,7 @@
       "supportsTablet": true
     },
     "android": {
+      "package": "com.ourspace.app",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -19,6 +20,21 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "@react-native-community/datetimepicker",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "允许访问相册以选择照片",
+          "cameraPermission": "允许使用相机拍摄照片"
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "014e91f2-0b81-40ea-8881-f02a6de1df8f"
+      }
     }
   }
 }
