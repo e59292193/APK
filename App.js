@@ -37,8 +37,6 @@ function LoginScreen({ onLogin }) {
     }
 
     setLoading(true);
-
-    // Simulate brief delay for UX
     await new Promise((resolve) => setTimeout(resolve, 300));
 
     const expectedPassword = VALID_USERS[nickname.trim()];
@@ -55,20 +53,19 @@ function LoginScreen({ onLogin }) {
 
   return (
     <SafeAreaView style={loginStyles.container} edges={['top', 'bottom']}>
-      <StatusBar barStyle="light-content" backgroundColor="#2D3436" />
+      <StatusBar barStyle="light-content" backgroundColor="#1A1128" />
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         style={loginStyles.inner}
       >
-        {/* Decorative Header */}
         <View style={loginStyles.topSection}>
           <Text style={loginStyles.heartIcon}>💕</Text>
           <Text style={loginStyles.mainTitle}>momo和苞米的小世界</Text>
+          <Text style={loginStyles.subTitle}>属于我们的秘密花园</Text>
         </View>
 
-        {/* Login Form */}
         <View style={loginStyles.formCard}>
-          <Text style={loginStyles.formTitle}>欢迎回来</Text>
+          <Text style={loginStyles.formTitle}>欢迎回来 ✨</Text>
 
           <Text style={loginStyles.inputLabel}>昵称</Text>
           <TextInput
@@ -76,7 +73,7 @@ function LoginScreen({ onLogin }) {
             value={nickname}
             onChangeText={setNickname}
             placeholder="输入你的昵称"
-            placeholderTextColor="#B2BEC3"
+            placeholderTextColor="#C8B6D6"
             autoCapitalize="none"
             autoCorrect={false}
           />
@@ -87,7 +84,7 @@ function LoginScreen({ onLogin }) {
             value={password}
             onChangeText={setPassword}
             placeholder="输入密码"
-            placeholderTextColor="#B2BEC3"
+            placeholderTextColor="#C8B6D6"
             secureTextEntry={true}
           />
 
@@ -103,7 +100,7 @@ function LoginScreen({ onLogin }) {
             )}
           </TouchableOpacity>
 
-          <Text style={loginStyles.hintText}>专属账号，仅限两人使用</Text>
+          <Text style={loginStyles.hintText}>专属账号，仅限两人使用 💫</Text>
         </View>
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -117,7 +114,6 @@ export default function App() {
   const [currentTab, setCurrentTab] = useState('Capsule');
   const [initializing, setInitializing] = useState(true);
 
-  // Check stored login on app start
   useEffect(() => {
     checkLogin();
   }, []);
@@ -157,16 +153,14 @@ export default function App() {
     ]);
   };
 
-  // ─── Initializing Screen ───
   if (initializing) {
     return (
       <View style={appStyles.initContainer}>
-        <ActivityIndicator size="large" color="#6C5CE7" />
+        <ActivityIndicator size="large" color="#B48EDC" />
       </View>
     );
   }
 
-  // ─── Login Screen ───
   if (!isLoggedIn) {
     return (
       <SafeAreaProvider>
@@ -175,21 +169,23 @@ export default function App() {
     );
   }
 
-  // ─── Main App ───
   return (
     <SafeAreaProvider>
       <SafeAreaView style={appStyles.container} edges={['top']}>
-        <StatusBar barStyle="light-content" backgroundColor="#2D3436" />
+        <StatusBar barStyle="light-content" backgroundColor="#1A1128" />
 
         {/* Top User Bar */}
         <View style={appStyles.topBar}>
-          <Text style={appStyles.topBarText}>Hi, {userId} 💕</Text>
+          <View style={appStyles.topBarLeft}>
+            <Text style={appStyles.topBarGreeting}>Hi, {userId}</Text>
+            <Text style={appStyles.topBarHeart}>💕</Text>
+          </View>
           <TouchableOpacity onPress={handleLogout} style={appStyles.logoutButton}>
             <Text style={appStyles.logoutText}>退出</Text>
           </TouchableOpacity>
         </View>
 
-        {/* Screen Content — both tabs rendered, visibility toggled for state preservation */}
+        {/* Screen Content */}
         <View style={appStyles.screenContainer}>
           <View style={[appStyles.screenPage, currentTab === 'Capsule' ? appStyles.screenVisible : appStyles.screenHidden]}>
             <TimeCapsuleScreen userId={userId} onLogout={handleLogout} />
@@ -234,7 +230,7 @@ export default function App() {
 const loginStyles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#2D3436',
+    backgroundColor: '#1A1128',
   },
   inner: {
     flex: 1,
@@ -243,60 +239,70 @@ const loginStyles = StyleSheet.create({
   },
   topSection: {
     alignItems: 'center',
-    marginBottom: 36,
+    marginBottom: 40,
   },
   heartIcon: {
     fontSize: 56,
     marginBottom: 12,
   },
   mainTitle: {
-    fontSize: 28,
+    fontSize: 26,
     fontWeight: 'bold',
-    color: '#fff',
+    color: '#F5E6FF',
     marginBottom: 6,
+    letterSpacing: 1,
+  },
+  subTitle: {
+    fontSize: 13,
+    color: '#9B8EC4',
+    marginTop: 4,
   },
   formCard: {
-    backgroundColor: '#fff',
-    borderRadius: 20,
+    backgroundColor: 'rgba(255,255,255,0.95)',
+    borderRadius: 24,
     padding: 28,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.15,
-    shadowRadius: 12,
-    elevation: 8,
+    shadowColor: '#B48EDC',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.25,
+    shadowRadius: 20,
+    elevation: 10,
   },
   formTitle: {
     fontSize: 22,
     fontWeight: 'bold',
-    color: '#2D3436',
+    color: '#2D1B4E',
     textAlign: 'center',
     marginBottom: 24,
   },
   inputLabel: {
     fontSize: 13,
     fontWeight: '600',
-    color: '#636E72',
-    marginBottom: 6,
+    color: '#7B6B8A',
+    marginBottom: 8,
   },
   input: {
-    backgroundColor: '#F8F9FA',
-    borderRadius: 12,
+    backgroundColor: '#F8F2FF',
+    borderRadius: 16,
     padding: 14,
     fontSize: 16,
-    color: '#2D3436',
-    marginBottom: 16,
-    borderWidth: 1,
-    borderColor: '#EEE',
+    color: '#2D1B4E',
+    marginBottom: 18,
+    borderWidth: 0,
   },
   loginButton: {
-    backgroundColor: '#6C5CE7',
-    borderRadius: 14,
+    backgroundColor: '#B48EDC',
+    borderRadius: 16,
     paddingVertical: 16,
     alignItems: 'center',
     marginTop: 8,
+    shadowColor: '#B48EDC',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 4,
   },
   loginButtonDisabled: {
-    backgroundColor: '#A29BFE',
+    backgroundColor: '#C8B6D6',
   },
   loginButtonText: {
     color: '#fff',
@@ -307,7 +313,7 @@ const loginStyles = StyleSheet.create({
     textAlign: 'center',
     marginTop: 16,
     fontSize: 12,
-    color: '#B2BEC3',
+    color: '#B8A6C8',
   },
 });
 
@@ -317,33 +323,42 @@ const appStyles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: '#F8F9FA',
+    backgroundColor: '#FAF7FF',
   },
   container: {
     flex: 1,
-    backgroundColor: '#F8F9FA',
+    backgroundColor: '#FAF7FF',
   },
   topBar: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    backgroundColor: '#2D3436',
-    paddingHorizontal: 16,
-    paddingVertical: 8,
+    backgroundColor: '#1A1128',
+    paddingHorizontal: 20,
+    paddingVertical: 12,
   },
-  topBarText: {
-    color: '#DFE6E9',
-    fontSize: 13,
-    fontWeight: '500',
+  topBarLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  topBarGreeting: {
+    color: '#F5E6FF',
+    fontSize: 15,
+    fontWeight: '600',
+    letterSpacing: 0.5,
+  },
+  topBarHeart: {
+    fontSize: 14,
+    marginLeft: 6,
   },
   logoutButton: {
-    paddingHorizontal: 12,
-    paddingVertical: 4,
-    borderRadius: 8,
-    backgroundColor: 'rgba(255,255,255,0.12)',
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255,255,255,0.1)',
   },
   logoutText: {
-    color: '#E17055',
+    color: '#E8A0BF',
     fontSize: 12,
     fontWeight: '600',
   },
@@ -361,15 +376,14 @@ const appStyles = StyleSheet.create({
   },
   tabBar: {
     flexDirection: 'row',
-    backgroundColor: '#fff',
-    borderTopWidth: 1,
-    borderTopColor: '#E8E8E8',
-    paddingBottom: Platform.OS === 'ios' ? 24 : 6,
-    paddingTop: 6,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: -2 },
-    shadowOpacity: 0.06,
-    shadowRadius: 8,
+    backgroundColor: 'rgba(255,255,255,0.95)',
+    borderTopWidth: 0,
+    paddingBottom: Platform.OS === 'ios' ? 24 : 8,
+    paddingTop: 8,
+    shadowColor: '#B48EDC',
+    shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 12,
     elevation: 10,
   },
   tabItem: {
@@ -377,15 +391,15 @@ const appStyles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     paddingVertical: 6,
-    borderRadius: 12,
+    borderRadius: 16,
     marginHorizontal: 12,
   },
   tabItemActive: {
-    backgroundColor: '#F0EDFF',
+    backgroundColor: '#F3E8FF',
   },
   tabDivider: {
     width: 1,
-    backgroundColor: '#E8E8E8',
+    backgroundColor: '#EDE4F5',
     marginVertical: 4,
   },
   tabIcon: {
@@ -395,10 +409,10 @@ const appStyles = StyleSheet.create({
   tabLabel: {
     fontSize: 11,
     fontWeight: '500',
-    color: '#B2BEC3',
+    color: '#B8A6C8',
   },
   tabLabelActive: {
-    color: '#6C5CE7',
+    color: '#8B5FC7',
     fontWeight: '700',
   },
 });

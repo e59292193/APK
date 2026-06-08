@@ -16,9 +16,11 @@ import {
   ScrollView,
   LayoutAnimation,
   UIManager,
+  Image,
 } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { pickAndUploadImage } from '../lib/photoUtils';
+import { formatLocalDate, formatLocalTime, formatLocalDateTime, getCountdown } from '../lib/dateUtils';
 
 // Enable LayoutAnimation on Android
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
@@ -26,10 +28,12 @@ if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental
 }
 
 // Only import DateTimePicker on native platforms
-let DateTimePicker = null;
+let RNDateTimePicker = null;
+let DateTimePickerAndroid = null;
 if (Platform.OS !== 'web') {
   try {
-    DateTimePicker = require('@react-native-community/datetimepicker').default;
+    RNDateTimePicker = require('@react-native-community/datetimepicker').default;
+    DateTimePickerAndroid = require('@react-native-community/datetimepicker').DateTimePickerAndroid;
   } catch (e) {
     console.warn('DateTimePicker not available');
   }
@@ -43,40 +47,6 @@ function useCountdownTick() {
     return () => clearInterval(timer);
   }, []);
   return tick;
-}
-
-// ─── Countdown Formatter ───
-function getCountdown(unlockTime) {
-  const now = Date.now();
-  const target = new Date(unlockTime).getTime();
-  let diff = target - now;
-  if (diff <= 0) return null;
-
-  const days = Math.floor(diff / 86400000);
-  diff %= 86400000;
-  const hours = Math.floor(diff / 3600000);
-  diff %= 3600000;
-  const minutes = Math.floor(diff / 60000);
-  diff %= 60000;
-  const seconds = Math.floor(diff / 1000);
-
-  const parts = [];
-  if (days > 0) parts.push(`${days}天`);
-  parts.push(`${String(hours).padStart(2, '0')}时`);
-  parts.push(`${String(minutes).padStart(2, '0')}分`);
-  parts.push(`${String(seconds).padStart(2, '0')}秒`);
-  return parts.join(' ');
-}
-
-// ─── Date Helpers ───
-function formatDate(dateStr) {
-  const date = new Date(dateStr);
-  return `${date.getFullYear()}/${(date.getMonth() + 1).toString().padStart(2, '0')}/${date.getDate().toString().padStart(2, '0')}`;
-}
-
-function formatDateTime(dateStr) {
-  const date = new Date(dateStr);
-  return `${formatDate(dateStr)} ${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
 }
 
 function getCapsuleStatus(item) {
@@ -262,8 +232,56 @@ export default function TimeCapsuleScreen({ userId: propUserId }) {
     );
   };
 
-  const onDateChange = (event, selectedDate) => {
+  // ─── Android: imperative picker (date + time) ───
+  const showAndroidDateTimePicker = () => {
+    const currentDate = new Date(unlockDate);
+
+    if (DateTimePickerAndroid && DateTimePickerAndroid.open) {
+      DateTimePickerAndroid.open({
+        mode: 'date',
+        value: currentDate,
+        display: 'default',
+        minimumDate: new Date(Date.now() + 60000),
+        onValueChange: (_event, selectedDate) => {
+          if (selectedDate) {
+            const pickedDate = new Date(selectedDate);
+            // After date is picked, show time picker
+            if (DateTimePickerAndroid && DateTimePickerAndroid.open) {
+              DateTimePickerAndroid.open({
+                mode: 'time',
+                value: pickedDate,
+                display: 'default',
+                onValueChange: (_evt, selectedTime) => {
+                  if (selectedTime) {
+                    const finalDate = new Date(pickedDate);
+                    finalDate.setHours(selectedTime.getHours());
+                    finalDate.setMinutes(selectedTime.getMinutes());
+                    setUnlockDate(finalDate);
+                  }
+                },
+                onDismiss: () => {
+                  // User dismissed time picker, still use the picked date
+                  setUnlockDate(pickedDate);
+                },
+              });
+            }
+          }
+        },
+        onDismiss: () => {
+          // User dismissed date picker, do nothing
+        },
+      });
+    } else {
+      setShowDatePicker(true);
+    }
+  };
+
+  // ─── iOS: declarative picker onChange handler ───
+  const onIOSDateChange = (_event, selectedDate) => {
     setShowDatePicker(false);
+    if (_event.type === 'dismissed') {
+      return;
+    }
     if (selectedDate) {
       setUnlockDate(selectedDate);
     }
@@ -317,7 +335,7 @@ export default function TimeCapsuleScreen({ userId: propUserId }) {
           </View>
           <View style={styles.cardFooter}>
             <Text style={styles.footerText}>
-              由 {isMe ? '我' : item.creator_id} 封存于 {formatDate(item.created_at)}
+              由 {isMe ? '我' : item.creator_id} 封存于 {formatLocalDate(item.created_at)}
             </Text>
           </View>
         </View>
@@ -339,10 +357,10 @@ export default function TimeCapsuleScreen({ userId: propUserId }) {
           <Text style={styles.readySubtitle}>点击拆开信件</Text>
           <View style={styles.cardFooter}>
             <Text style={styles.footerText}>
-              由 {isMe ? '我' : item.creator_id} 于 {formatDate(item.created_at)} 封存
+              由 {isMe ? '我' : item.creator_id} 于 {formatLocalDate(item.created_at)} 封存
             </Text>
             <Text style={styles.footerText}>
-              原定解锁：{formatDateTime(item.unlock_time)}
+              原定解锁：{formatLocalDateTime(item.unlock_time)}
             </Text>
           </View>
         </TouchableOpacity>
@@ -362,24 +380,24 @@ export default function TimeCapsuleScreen({ userId: propUserId }) {
           <Text style={styles.contentText}>{item.content}</Text>
           {item.photo_url && (
             <View style={styles.capsulePhotoContainer}>
-              <img
-                src={item.photo_url}
-                alt="capsule photo"
+              <Image
+                source={{ uri: item.photo_url }}
                 style={{
                   width: '100%',
                   borderRadius: 12,
                   marginTop: 12,
                 }}
+                resizeMode="cover"
               />
             </View>
           )}
         </View>
         <View style={styles.cardFooter}>
           <Text style={styles.footerText}>
-            发送时间：{formatDateTime(item.created_at)}
+            发送时间：{formatLocalDateTime(item.created_at)}
           </Text>
           <Text style={styles.footerText}>
-            解锁时间：{formatDateTime(item.unlock_time)}
+            解锁时间：{formatLocalDateTime(item.unlock_time)}
           </Text>
         </View>
       </View>
@@ -414,22 +432,27 @@ export default function TimeCapsuleScreen({ userId: propUserId }) {
       )}
 
       {/* Capsules List */}
-      <FlatList
-        data={capsules}
-        renderItem={renderItem}
-        keyExtractor={(item) => item.id.toString()}
+      <ScrollView
         contentContainerStyle={styles.listContent}
+        showsVerticalScrollIndicator={false}
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#6C5CE7" />
         }
-        ListEmptyComponent={
+      >
+        {capsules.length === 0 ? (
           <View style={styles.emptyContainer}>
             <Text style={styles.emptyIcon}>📭</Text>
             <Text style={styles.emptyText}>还没有时光胶囊</Text>
             <Text style={styles.emptySubText}>点击右下角按钮，给未来写封信吧</Text>
           </View>
-        }
-      />
+        ) : (
+          capsules.map((item) => (
+            <React.Fragment key={item.id.toString()}>
+              {renderItem({ item })}
+            </React.Fragment>
+          ))
+        )}
+      </ScrollView>
 
       {/* FAB */}
       <TouchableOpacity
@@ -500,7 +523,7 @@ export default function TimeCapsuleScreen({ userId: propUserId }) {
                   <>
                     <TouchableOpacity
                       style={styles.dateSelector}
-                      onPress={() => setShowDatePicker(true)}
+                      onPress={Platform.OS === 'android' ? showAndroidDateTimePicker : () => setShowDatePicker(true)}
                     >
                       <Text style={styles.dateText2}>
                         📅 {unlockDate.getFullYear()}/{(unlockDate.getMonth() + 1).toString().padStart(2, '0')}/{unlockDate.getDate().toString().padStart(2, '0')}{' '}
@@ -509,12 +532,12 @@ export default function TimeCapsuleScreen({ userId: propUserId }) {
                       <Text style={styles.changeDateText}>点击修改</Text>
                     </TouchableOpacity>
 
-                    {showDatePicker && DateTimePicker && (
-                      <DateTimePicker
+                    {showDatePicker && RNDateTimePicker && Platform.OS === 'ios' && (
+                      <RNDateTimePicker
                         value={unlockDate}
                         mode="datetime"
-                        display={Platform.OS === 'ios' ? 'spinner' : 'default'}
-                        onChange={onDateChange}
+                        display="spinner"
+                        onValueChange={onIOSDateChange}
                         minimumDate={new Date(Date.now() + 60000)}
                       />
                     )}
@@ -559,145 +582,160 @@ export default function TimeCapsuleScreen({ userId: propUserId }) {
 }
 
 const styles = StyleSheet.create({
+  // ── Container ──
   container: {
     flex: 1,
-    backgroundColor: '#F8F9FA',
+    backgroundColor: '#FAF7FF',
   },
   center: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: '#F8F9FA',
+    backgroundColor: '#FAF7FF',
   },
   loadingText: {
     marginTop: 12,
-    color: '#636E72',
+    color: '#9B8EC4',
     fontSize: 16,
   },
+
+  // ── Header ──
   header: {
-    paddingTop: 16,
-    paddingBottom: 16,
-    paddingHorizontal: 20,
-    backgroundColor: '#2D3436',
-    borderBottomLeftRadius: 24,
-    borderBottomRightRadius: 24,
+    paddingTop: 20,
+    paddingBottom: 18,
+    paddingHorizontal: 22,
+    backgroundColor: '#1A1128',
+    borderBottomLeftRadius: 28,
+    borderBottomRightRadius: 28,
   },
   headerTitle: {
     fontSize: 28,
     fontWeight: 'bold',
-    color: '#fff',
+    color: '#F5E6FF',
+    letterSpacing: 1,
   },
   headerSubtitle: {
-    fontSize: 14,
-    color: '#DFE6E9',
+    fontSize: 13,
+    color: '#9B8EC4',
     marginTop: 4,
   },
   userBadge: {
     marginTop: 12,
-    backgroundColor: 'rgba(108,92,231,0.3)',
+    backgroundColor: 'rgba(180,142,220,0.2)',
     alignSelf: 'flex-start',
-    paddingHorizontal: 12,
-    paddingVertical: 4,
-    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 5,
+    borderRadius: 20,
   },
   userBadgeText: {
-    color: '#A29BFE',
+    color: '#D4B8F0',
     fontSize: 12,
     fontWeight: '600',
   },
+
+  // ── Error ──
   errorBanner: {
-    backgroundColor: '#FFEAA7',
+    backgroundColor: '#FFF3E0',
     padding: 10,
     alignItems: 'center',
   },
   errorText: {
-    color: '#D35400',
+    color: '#E65100',
     fontSize: 14,
   },
+
+  // ── List ──
   listContent: {
-    padding: 16,
+    padding: 18,
     paddingBottom: 100,
   },
+
+  // ── Card (shared) ──
   card: {
-    backgroundColor: '#fff',
-    borderRadius: 16,
-    marginBottom: 16,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 24,
+    marginBottom: 18,
     padding: 24,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
-    elevation: 3,
+    shadowColor: '#B48EDC',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.1,
+    shadowRadius: 12,
+    elevation: 4,
   },
+
+  // ── Card Locked ──
   cardLocked: {
-    borderLeftWidth: 4,
-    borderLeftColor: '#6C5CE7',
     alignItems: 'center',
+    paddingBottom: 28,
   },
   lockedIconRow: {
-    marginBottom: 12,
+    marginBottom: 14,
   },
   lockedIcon: {
-    fontSize: 40,
+    fontSize: 44,
   },
   lockedTitle: {
     fontSize: 16,
-    fontWeight: '600',
-    color: '#6C5CE7',
-    marginBottom: 16,
+    fontWeight: '700',
+    color: '#8B5FC7',
+    marginBottom: 18,
+    letterSpacing: 0.5,
   },
   countdownBox: {
-    backgroundColor: '#F0EDFF',
-    borderRadius: 12,
-    paddingVertical: 14,
-    paddingHorizontal: 20,
+    backgroundColor: '#F3E8FF',
+    borderRadius: 20,
+    paddingVertical: 18,
+    paddingHorizontal: 24,
     alignItems: 'center',
     width: '100%',
-    marginBottom: 16,
+    marginBottom: 18,
   },
   countdownLabel: {
     fontSize: 12,
-    color: '#6C5CE7',
-    marginBottom: 6,
+    color: '#A78DC4',
+    marginBottom: 8,
+    fontWeight: '500',
   },
   countdownText: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: '#6C5CE7',
-    letterSpacing: 1,
+    fontSize: 24,
+    fontWeight: '800',
+    color: '#8B5FC7',
+    letterSpacing: 2,
   },
+
+  // ── Card Ready ──
   cardReady: {
-    borderLeftWidth: 4,
-    borderLeftColor: '#FDCB6E',
     alignItems: 'center',
-    backgroundColor: '#FFFDF5',
+    paddingBottom: 28,
+    backgroundColor: '#FFFBF0',
   },
   readyIconRow: {
-    marginBottom: 12,
+    marginBottom: 14,
   },
   readyIcon: {
-    fontSize: 40,
+    fontSize: 44,
   },
   readyTitle: {
-    fontSize: 20,
+    fontSize: 22,
     fontWeight: 'bold',
-    color: '#F39C12',
+    color: '#E6A23C',
     marginBottom: 6,
   },
   readySubtitle: {
     fontSize: 15,
-    color: '#E17055',
+    color: '#D4845A',
     fontWeight: '500',
-    marginBottom: 16,
+    marginBottom: 18,
   },
+
+  // ── Card Opened ──
   cardOpened: {
-    borderLeftWidth: 4,
-    borderLeftColor: '#00B894',
+    paddingBottom: 28,
   },
   openedHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 14,
+    marginBottom: 16,
   },
   openedIcon: {
     fontSize: 22,
@@ -706,30 +744,31 @@ const styles = StyleSheet.create({
   openedTitle: {
     fontSize: 15,
     fontWeight: '600',
-    color: '#00B894',
+    color: '#7EB89E',
   },
   contentArea: {
-    backgroundColor: '#F8F9FA',
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 14,
+    backgroundColor: '#F8F5FF',
+    borderRadius: 18,
+    padding: 18,
+    marginBottom: 16,
   },
   contentText: {
     fontSize: 15,
-    color: '#2D3436',
+    color: '#3D2B5A',
     lineHeight: 24,
   },
   cardFooter: {
-    borderTopWidth: 1,
-    borderTopColor: '#F0F0F0',
+    borderTopWidth: 0,
     paddingTop: 12,
     width: '100%',
   },
   footerText: {
     fontSize: 12,
-    color: '#B2BEC3',
-    marginTop: 2,
+    color: '#B8A6C8',
+    marginTop: 3,
   },
+
+  // ── Empty ──
   emptyContainer: {
     alignItems: 'center',
     marginTop: 80,
@@ -740,29 +779,31 @@ const styles = StyleSheet.create({
   },
   emptyText: {
     fontSize: 18,
-    color: '#636E72',
+    color: '#7B6B8A',
     fontWeight: '600',
   },
   emptySubText: {
     fontSize: 14,
-    color: '#B2BEC3',
+    color: '#B8A6C8',
     marginTop: 8,
   },
+
+  // ── FAB ──
   fab: {
     position: 'absolute',
     bottom: 30,
     right: 20,
-    backgroundColor: '#6C5CE7',
-    borderRadius: 28,
+    backgroundColor: '#B48EDC',
+    borderRadius: 30,
     paddingVertical: 14,
-    paddingHorizontal: 24,
+    paddingHorizontal: 26,
     flexDirection: 'row',
     alignItems: 'center',
-    shadowColor: '#6C5CE7',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 6,
+    shadowColor: '#B48EDC',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.35,
+    shadowRadius: 10,
+    elevation: 8,
   },
   fabText: {
     fontSize: 18,
@@ -773,9 +814,11 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     fontSize: 15,
   },
+
+  // ── Modal ──
   modalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
+    backgroundColor: 'rgba(26,17,40,0.6)',
     justifyContent: 'flex-end',
   },
   modalContainer: {
@@ -783,9 +826,9 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-end',
   },
   modalContent: {
-    backgroundColor: '#fff',
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
+    backgroundColor: '#FFFFFF',
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
     maxHeight: '90%',
     paddingBottom: 30,
   },
@@ -793,42 +836,43 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    padding: 20,
+    padding: 22,
     borderBottomWidth: 1,
-    borderBottomColor: '#F0F0F0',
+    borderBottomColor: '#F3E8FF',
   },
   modalTitle: {
     fontSize: 20,
     fontWeight: 'bold',
-    color: '#2D3436',
+    color: '#2D1B4E',
   },
   modalClose: {
     fontSize: 22,
-    color: '#636E72',
+    color: '#B8A6C8',
     padding: 4,
   },
   modalBody: {
-    padding: 20,
+    padding: 22,
   },
   inputLabel: {
     fontSize: 14,
     fontWeight: '600',
-    color: '#636E72',
+    color: '#7B6B8A',
     marginBottom: 8,
-    marginTop: 12,
+    marginTop: 14,
   },
   letterInput: {
-    backgroundColor: '#F8F9FA',
-    borderRadius: 12,
-    padding: 16,
+    backgroundColor: '#F8F2FF',
+    borderRadius: 18,
+    padding: 18,
     fontSize: 16,
     minHeight: 180,
-    color: '#2D3436',
+    color: '#2D1B4E',
     lineHeight: 24,
+    borderWidth: 0,
   },
   dateSelector: {
-    backgroundColor: '#F8F9FA',
-    borderRadius: 12,
+    backgroundColor: '#F8F2FF',
+    borderRadius: 18,
     padding: 16,
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -836,56 +880,65 @@ const styles = StyleSheet.create({
   },
   dateText2: {
     fontSize: 15,
-    color: '#2D3436',
+    color: '#3D2B5A',
     fontWeight: '500',
   },
   changeDateText: {
     fontSize: 13,
-    color: '#6C5CE7',
+    color: '#8B5FC7',
     fontWeight: '600',
   },
   sealButton: {
-    marginHorizontal: 20,
-    marginTop: 16,
-    backgroundColor: '#6C5CE7',
-    borderRadius: 14,
+    marginHorizontal: 22,
+    marginTop: 18,
+    backgroundColor: '#B48EDC',
+    borderRadius: 18,
     paddingVertical: 16,
     alignItems: 'center',
+    shadowColor: '#B48EDC',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 4,
   },
   sealButtonDisabled: {
-    backgroundColor: '#A29BFE',
+    backgroundColor: '#C8B6D6',
+    shadowOpacity: 0,
   },
   sealButtonText: {
     color: '#fff',
     fontSize: 17,
     fontWeight: 'bold',
+    letterSpacing: 0.5,
   },
+
   // ── Photo Upload ──
   photoUploadRow: {
-    paddingHorizontal: 20,
-    marginTop: 8,
+    paddingHorizontal: 22,
+    marginTop: 10,
   },
   photoUploadButton: {
-    backgroundColor: '#F8F9FA',
-    borderRadius: 12,
-    padding: 14,
+    backgroundColor: '#F8F2FF',
+    borderRadius: 18,
+    padding: 16,
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: '#E0E0E0',
+    borderColor: '#E8D8F8',
     borderStyle: 'dashed',
   },
   photoUploadText: {
     fontSize: 14,
-    color: '#636E72',
+    color: '#9B8EC4',
   },
   photoUploadDone: {
     fontSize: 14,
-    color: '#27AE60',
+    color: '#7EB89E',
     fontWeight: '600',
   },
+
   // ── Capsule Photo ──
   capsulePhotoContainer: {
-    borderRadius: 12,
+    borderRadius: 16,
     overflow: 'hidden',
   },
 });

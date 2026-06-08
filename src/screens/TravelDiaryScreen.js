@@ -14,9 +14,11 @@ import {
   Modal,
   Pressable,
   ScrollView,
+  Image,
 } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { pickAndUploadImage } from '../lib/photoUtils';
+import { formatLocalDate, formatLocalTime, formatLocalDateTime } from '../lib/dateUtils';
 
 // ─── Card gradient colors (rotation) ───
 const CARD_COLORS = [
@@ -27,21 +29,6 @@ const CARD_COLORS = [
   { bg: '#FADBD8', accent: '#E74C3C' },
   { bg: '#D4EFDF', accent: '#1ABC9C' },
 ];
-
-// ─── Date Helpers ───
-function formatDate(dateStr) {
-  const date = new Date(dateStr);
-  return `${date.getFullYear()}/${(date.getMonth() + 1).toString().padStart(2, '0')}/${date.getDate().toString().padStart(2, '0')}`;
-}
-
-function formatTime(dateStr) {
-  const date = new Date(dateStr);
-  return `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
-}
-
-function formatDateTime(dateStr) {
-  return `${formatDate(dateStr)} ${formatTime(dateStr)}`;
-}
 
 // ─── Main Component ───
 export default function TravelDiaryScreen({ userId: propUserId }) {
@@ -67,7 +54,6 @@ export default function TravelDiaryScreen({ userId: propUserId }) {
   const [newEntryContent, setNewEntryContent] = useState('');
   const [sendingEntry, setSendingEntry] = useState(false);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
-  const entriesChannelRef = useRef(null);
   const flatListRef = useRef(null);
 
   // ─── Init ───
@@ -200,15 +186,10 @@ export default function TravelDiaryScreen({ userId: propUserId }) {
     setEntries([]);
     setEntriesLoading(true);
     fetchEntries(trip.id);
-    subscribeEntries(trip.id);
   };
 
   // ─── Go Back ───
   const goBack = () => {
-    if (entriesChannelRef.current) {
-      supabase.removeChannel(entriesChannelRef.current);
-      entriesChannelRef.current = null;
-    }
     setSelectedTrip(null);
     setEntries([]);
     fetchTrips();
@@ -233,11 +214,10 @@ export default function TravelDiaryScreen({ userId: propUserId }) {
   };
 
   // ─── Subscribe to Entries ───
-  const subscribeEntries = (tripId) => {
-    if (entriesChannelRef.current) {
-      supabase.removeChannel(entriesChannelRef.current);
-    }
+  useEffect(() => {
+    if (!selectedTrip) return;
 
+    const tripId = selectedTrip.id;
     const channel = supabase
       .channel(`trip-entries-${tripId}`)
       .on(
@@ -258,8 +238,10 @@ export default function TravelDiaryScreen({ userId: propUserId }) {
       )
       .subscribe();
 
-    entriesChannelRef.current = channel;
-  };
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [selectedTrip]);
 
   // ─── Send Entry ───
   const sendEntry = async () => {
@@ -310,15 +292,15 @@ export default function TravelDiaryScreen({ userId: propUserId }) {
         <View style={styles.tripCardInner}>
           {item.cover_url ? (
             <View style={styles.tripCoverContainer}>
-              <img
-                src={item.cover_url}
-                alt={item.title}
+              <Image
+                source={{ uri: item.cover_url }}
                 style={{
                   width: '100%',
                   height: 120,
-                  objectFit: 'cover',
-                  borderRadius: '16px 16px 0 0',
+                  borderTopLeftRadius: 16,
+                  borderTopRightRadius: 16,
                 }}
+                resizeMode="cover"
               />
               <View style={[styles.tripAccentOverlay, { backgroundColor: colorSet.accent }]} />
             </View>
@@ -338,7 +320,7 @@ export default function TravelDiaryScreen({ userId: propUserId }) {
               </View>
             ) : null}
             <Text style={styles.tripCardDate}>
-              创建于 {formatDate(item.created_at)}
+              创建于 {formatLocalDate(item.created_at)}
             </Text>
           </View>
         </View>
@@ -364,21 +346,21 @@ export default function TravelDiaryScreen({ userId: propUserId }) {
           )}
           {item.photo_url && (
             <View style={styles.entryPhotoContainer}>
-              <img
-                src={item.photo_url}
-                alt="photo"
+              <Image
+                source={{ uri: item.photo_url }}
                 style={{
                   width: '100%',
                   maxWidth: 220,
                   borderRadius: 12,
                   marginBottom: 8,
                 }}
+                resizeMode="cover"
               />
             </View>
           )}
           {item.content ? <Text style={styles.entryText}>{item.content}</Text> : null}
           <Text style={styles.entryTime}>
-            {formatDate(item.created_at)} {formatTime(item.created_at)}
+            {formatLocalDateTime(item.created_at)}
           </Text>
         </View>
         {isMe && (
@@ -417,25 +399,30 @@ export default function TravelDiaryScreen({ userId: propUserId }) {
             <Text style={styles.entriesLoadingText}>加载中...</Text>
           </View>
         ) : (
-          <FlatList
+          <ScrollView
             ref={flatListRef}
-            data={entries}
-            renderItem={renderEntry}
-            keyExtractor={(item) => item.id.toString()}
             contentContainerStyle={styles.entriesList}
+            showsVerticalScrollIndicator={false}
             onContentSizeChange={() => {
               if (flatListRef.current && entries.length > 0) {
                 flatListRef.current.scrollToEnd({ animated: true });
               }
             }}
-            ListEmptyComponent={
+          >
+            {entries.length === 0 ? (
               <View style={styles.entriesEmpty}>
                 <Text style={styles.entriesEmptyIcon}>📝</Text>
                 <Text style={styles.entriesEmptyText}>还没有日记</Text>
                 <Text style={styles.entriesEmptySubText}>写下你们旅行中的第一段回忆吧</Text>
               </View>
-            }
-          />
+            ) : (
+              entries.map((item) => (
+                <React.Fragment key={item.id.toString()}>
+                  {renderEntry({ item })}
+                </React.Fragment>
+              ))
+            )}
+          </ScrollView>
         )}
 
         {/* Entry Input */}
@@ -499,22 +486,27 @@ export default function TravelDiaryScreen({ userId: propUserId }) {
       </View>
 
       {/* Trip List */}
-      <FlatList
-        data={trips}
-        renderItem={renderTripCard}
-        keyExtractor={(item) => item.id.toString()}
+      <ScrollView
         contentContainerStyle={styles.tripListContent}
+        showsVerticalScrollIndicator={false}
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#6C5CE7" />
         }
-        ListEmptyComponent={
+      >
+        {trips.length === 0 ? (
           <View style={styles.emptyContainer}>
             <Text style={styles.emptyIcon}>🌍</Text>
             <Text style={styles.emptyText}>还没有旅行记录</Text>
             <Text style={styles.emptySubText}>点击右下角按钮，记录你们的第一次旅行</Text>
           </View>
-        }
-      />
+        ) : (
+          trips.map((item, index) => (
+            <React.Fragment key={item.id.toString()}>
+              {renderTripCard({ item, index })}
+            </React.Fragment>
+          ))
+        )}
+      </ScrollView>
 
       {/* FAB: Add Trip */}
       <TouchableOpacity
@@ -599,75 +591,80 @@ const styles = StyleSheet.create({
   // ── Common ──
   container: {
     flex: 1,
-    backgroundColor: '#F8F9FA',
+    backgroundColor: '#FAF7FF',
   },
   center: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: '#F8F9FA',
+    backgroundColor: '#FAF7FF',
   },
   loadingText: {
     marginTop: 12,
-    color: '#636E72',
+    color: '#9B8EC4',
     fontSize: 16,
   },
 
   // ── List Header ──
   header: {
-    paddingTop: 50,
-    paddingBottom: 20,
-    paddingHorizontal: 20,
-    backgroundColor: '#2D3436',
-    borderBottomLeftRadius: 24,
-    borderBottomRightRadius: 24,
+    paddingTop: 20,
+    paddingBottom: 18,
+    paddingHorizontal: 22,
+    backgroundColor: '#1A1128',
+    borderBottomLeftRadius: 28,
+    borderBottomRightRadius: 28,
   },
   headerTitle: {
     fontSize: 28,
     fontWeight: 'bold',
-    color: '#fff',
+    color: '#F5E6FF',
+    letterSpacing: 1,
   },
   headerSubtitle: {
-    fontSize: 14,
-    color: '#DFE6E9',
+    fontSize: 13,
+    color: '#9B8EC4',
     marginTop: 4,
   },
 
   // ── Trip List ──
   tripListContent: {
-    padding: 16,
+    padding: 18,
     paddingBottom: 100,
   },
   tripCard: {
     flexDirection: 'row',
     alignItems: 'center',
-    borderRadius: 16,
-    marginBottom: 14,
+    borderRadius: 24,
+    marginBottom: 18,
+    marginHorizontal: 2,
     overflow: 'hidden',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
-    shadowRadius: 6,
-    elevation: 3,
+    backgroundColor: '#FFFFFF',
+    shadowColor: '#B48EDC',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.1,
+    shadowRadius: 12,
+    elevation: 4,
   },
   tripAccent: {
-    width: 5,
+    width: 0,
     height: '100%',
     minHeight: 80,
   },
   tripCardBody: {
     flex: 1,
-    padding: 18,
+    padding: 20,
   },
   tripCardTitle: {
     fontSize: 18,
     fontWeight: 'bold',
-    marginBottom: 6,
+    color: '#2D1B4E',
+    marginBottom: 8,
+    letterSpacing: 0.3,
   },
   tripCardLocationRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 4,
+    marginBottom: 6,
   },
   tripCardLocationIcon: {
     fontSize: 13,
@@ -675,17 +672,17 @@ const styles = StyleSheet.create({
   },
   tripCardLocation: {
     fontSize: 13,
-    color: '#636E72',
+    color: '#9B8EC4',
   },
   tripCardDate: {
     fontSize: 11,
-    color: '#B2BEC3',
+    color: '#B8A6C8',
     marginTop: 4,
   },
   tripCardArrow: {
-    fontSize: 28,
-    color: '#B2BEC3',
-    marginRight: 16,
+    fontSize: 24,
+    color: '#D4B8F0',
+    marginRight: 18,
   },
 
   // ── Empty ──
@@ -699,12 +696,12 @@ const styles = StyleSheet.create({
   },
   emptyText: {
     fontSize: 18,
-    color: '#636E72',
+    color: '#7B6B8A',
     fontWeight: '600',
   },
   emptySubText: {
     fontSize: 14,
-    color: '#B2BEC3',
+    color: '#B8A6C8',
     marginTop: 8,
   },
 
@@ -713,17 +710,17 @@ const styles = StyleSheet.create({
     position: 'absolute',
     bottom: 30,
     right: 20,
-    backgroundColor: '#E17055',
-    borderRadius: 28,
+    backgroundColor: '#E8A0BF',
+    borderRadius: 30,
     paddingVertical: 14,
-    paddingHorizontal: 24,
+    paddingHorizontal: 26,
     flexDirection: 'row',
     alignItems: 'center',
-    shadowColor: '#E17055',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 6,
+    shadowColor: '#E8A0BF',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.35,
+    shadowRadius: 10,
+    elevation: 8,
   },
   fabText: {
     fontSize: 18,
@@ -739,97 +736,110 @@ const styles = StyleSheet.create({
   // ── Add Trip Modal ──
   modalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
+    backgroundColor: 'rgba(26,17,40,0.6)',
     justifyContent: 'center',
     padding: 24,
   },
   modalContent: {
-    backgroundColor: '#fff',
-    borderRadius: 20,
-    paddingBottom: 24,
+    backgroundColor: 'rgba(255,255,255,0.97)',
+    borderRadius: 28,
+    paddingBottom: 28,
+    shadowColor: '#B48EDC',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.2,
+    shadowRadius: 20,
+    elevation: 10,
   },
   modalHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    padding: 20,
+    padding: 22,
     borderBottomWidth: 1,
-    borderBottomColor: '#F0F0F0',
+    borderBottomColor: '#F3E8FF',
   },
   modalTitle: {
     fontSize: 20,
     fontWeight: 'bold',
-    color: '#2D3436',
+    color: '#2D1B4E',
   },
   modalClose: {
     fontSize: 22,
-    color: '#636E72',
+    color: '#B8A6C8',
     padding: 4,
   },
   modalBody: {
-    padding: 20,
+    padding: 22,
   },
   inputLabel: {
     fontSize: 14,
     fontWeight: '600',
-    color: '#636E72',
+    color: '#7B6B8A',
     marginBottom: 8,
-    marginTop: 8,
+    marginTop: 10,
   },
   modalInput: {
-    backgroundColor: '#F8F9FA',
-    borderRadius: 12,
-    padding: 14,
+    backgroundColor: '#F8F2FF',
+    borderRadius: 18,
+    padding: 16,
     fontSize: 16,
-    color: '#2D3436',
+    color: '#2D1B4E',
+    borderWidth: 0,
   },
   createButton: {
-    marginHorizontal: 20,
-    marginTop: 8,
-    backgroundColor: '#E17055',
-    borderRadius: 14,
+    marginHorizontal: 22,
+    marginTop: 10,
+    backgroundColor: '#B48EDC',
+    borderRadius: 18,
     paddingVertical: 16,
     alignItems: 'center',
+    shadowColor: '#B48EDC',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 4,
   },
   createButtonDisabled: {
-    backgroundColor: '#F0B27A',
+    backgroundColor: '#C8B6D6',
+    shadowOpacity: 0,
   },
   createButtonText: {
     color: '#fff',
     fontSize: 17,
     fontWeight: 'bold',
+    letterSpacing: 0.5,
   },
 
   // ── Detail View ──
   detailContainer: {
     flex: 1,
-    backgroundColor: '#F8F9FA',
+    backgroundColor: '#FAF7FF',
   },
   detailHeader: {
-    paddingTop: 50,
+    paddingTop: 20,
     paddingBottom: 16,
-    paddingHorizontal: 16,
-    backgroundColor: '#2D3436',
+    paddingHorizontal: 18,
+    backgroundColor: '#1A1128',
     flexDirection: 'row',
     alignItems: 'center',
-    borderBottomLeftRadius: 20,
-    borderBottomRightRadius: 20,
+    borderBottomLeftRadius: 24,
+    borderBottomRightRadius: 24,
   },
   backButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginRight: 12,
+    marginRight: 14,
     paddingVertical: 4,
   },
   backArrow: {
     fontSize: 28,
-    color: '#fff',
+    color: '#F5E6FF',
     fontWeight: '300',
     marginRight: 2,
   },
   backText: {
     fontSize: 15,
-    color: '#DFE6E9',
+    color: '#9B8EC4',
   },
   detailTitleArea: {
     flex: 1,
@@ -837,18 +847,18 @@ const styles = StyleSheet.create({
   detailTitle: {
     fontSize: 20,
     fontWeight: 'bold',
-    color: '#fff',
+    color: '#F5E6FF',
   },
   detailLocation: {
     fontSize: 12,
-    color: '#DFE6E9',
+    color: '#9B8EC4',
     marginTop: 2,
   },
 
   // ── Entries List ──
   entriesList: {
     padding: 16,
-    paddingBottom: 16,
+    paddingBottom: 100,
   },
   entriesLoadingContainer: {
     flex: 1,
@@ -857,7 +867,7 @@ const styles = StyleSheet.create({
   },
   entriesLoadingText: {
     marginTop: 10,
-    color: '#636E72',
+    color: '#9B8EC4',
   },
   entriesEmpty: {
     alignItems: 'center',
@@ -869,12 +879,12 @@ const styles = StyleSheet.create({
   },
   entriesEmptyText: {
     fontSize: 18,
-    color: '#636E72',
+    color: '#7B6B8A',
     fontWeight: '600',
   },
   entriesEmptySubText: {
     fontSize: 14,
-    color: '#B2BEC3',
+    color: '#B8A6C8',
     marginTop: 8,
   },
 
@@ -891,56 +901,62 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-start',
   },
   entryAvatar: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: '#00B894',
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: '#7EB89E',
     justifyContent: 'center',
     alignItems: 'center',
     marginTop: 4,
+    shadowColor: '#7EB89E',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 2,
   },
   entryAvatarMe: {
-    backgroundColor: '#6C5CE7',
+    backgroundColor: '#B48EDC',
+    shadowColor: '#B48EDC',
   },
   entryAvatarText: {
     color: '#fff',
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: 'bold',
   },
   entryContentBox: {
     maxWidth: '75%',
-    borderRadius: 16,
-    padding: 14,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
+    borderRadius: 20,
+    padding: 16,
+    shadowColor: '#B48EDC',
+    shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.06,
-    shadowRadius: 4,
+    shadowRadius: 6,
     elevation: 2,
   },
   entryBoxMe: {
-    backgroundColor: '#E8DAEF',
-    borderTopRightRadius: 4,
+    backgroundColor: '#D4B8F0',
+    borderTopRightRadius: 6,
     marginLeft: 8,
   },
   entryBoxOther: {
-    backgroundColor: '#fff',
-    borderTopLeftRadius: 4,
+    backgroundColor: '#FFFFFF',
+    borderTopLeftRadius: 6,
     marginLeft: 8,
   },
   entryUserIdLabel: {
     fontSize: 11,
     fontWeight: '700',
-    color: '#00B894',
+    color: '#7EB89E',
     marginBottom: 4,
   },
   entryText: {
     fontSize: 15,
-    color: '#2D3436',
+    color: '#2D1B4E',
     lineHeight: 22,
   },
   entryTime: {
     fontSize: 10,
-    color: '#B2BEC3',
+    color: '#B8A6C8',
     marginTop: 6,
     textAlign: 'right',
   },
@@ -951,30 +967,41 @@ const styles = StyleSheet.create({
     alignItems: 'flex-end',
     padding: 12,
     paddingBottom: Platform.OS === 'ios' ? 28 : 12,
-    backgroundColor: '#fff',
-    borderTopWidth: 1,
-    borderTopColor: '#EEE',
+    backgroundColor: 'rgba(255,255,255,0.95)',
+    borderTopWidth: 0,
+    shadowColor: '#B48EDC',
+    shadowOffset: { width: 0, height: -2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 8,
+    elevation: 4,
   },
   entryInput: {
     flex: 1,
-    backgroundColor: '#F1F1F1',
-    borderRadius: 20,
-    paddingHorizontal: 16,
+    backgroundColor: '#F8F2FF',
+    borderRadius: 22,
+    paddingHorizontal: 18,
     paddingVertical: 10,
     fontSize: 15,
     maxHeight: 100,
-    color: '#2D3436',
+    color: '#2D1B4E',
+    borderWidth: 0,
   },
   sendButton: {
     marginLeft: 10,
-    backgroundColor: '#6C5CE7',
-    borderRadius: 20,
+    backgroundColor: '#B48EDC',
+    borderRadius: 22,
     paddingVertical: 10,
-    paddingHorizontal: 18,
+    paddingHorizontal: 20,
     justifyContent: 'center',
+    shadowColor: '#B48EDC',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 2,
   },
   sendButtonDisabled: {
-    backgroundColor: '#B0C4DE',
+    backgroundColor: '#D4C8E4',
+    shadowOpacity: 0,
   },
   sendButtonText: {
     color: '#fff',
@@ -983,10 +1010,10 @@ const styles = StyleSheet.create({
   },
   // ── Camera Button ──
   cameraButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: '#F1F1F1',
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: '#F3E8FF',
     justifyContent: 'center',
     alignItems: 'center',
     marginRight: 8,
@@ -996,21 +1023,21 @@ const styles = StyleSheet.create({
   },
   // ── Cover Upload ──
   coverUploadButton: {
-    backgroundColor: '#F8F9FA',
-    borderRadius: 12,
-    padding: 16,
+    backgroundColor: '#F8F2FF',
+    borderRadius: 18,
+    padding: 18,
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: '#E0E0E0',
+    borderColor: '#E8D8F8',
     borderStyle: 'dashed',
   },
   coverUploadText: {
     fontSize: 15,
-    color: '#636E72',
+    color: '#9B8EC4',
   },
   coverUploadDone: {
     fontSize: 15,
-    color: '#27AE60',
+    color: '#7EB89E',
     fontWeight: '600',
   },
   // ── Trip Card with Cover ──
@@ -1033,7 +1060,7 @@ const styles = StyleSheet.create({
   // ── Entry Photo ──
   entryPhotoContainer: {
     marginBottom: 8,
-    borderRadius: 12,
+    borderRadius: 16,
     overflow: 'hidden',
   },
 });
