@@ -1,25 +1,22 @@
 {
   "expo": {
-    "name": "APK",
+    "name": "MOMO Corn",
     "slug": "APK",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "ios": {
-      "supportsTablet": true
-    },
+    "jsEngine": "hermes",
+    "newArchEnabled": true,
     "android": {
       "package": "com.ourspace.app",
+      "softwareKeyboardLayoutMode": "resize",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       }
-    },
-    "web": {
-      "favicon": "./assets/favicon.png"
     },
     "plugins": [
       "@react-native-community/datetimepicker",
@@ -29,7 +26,19 @@
           "photosPermission": "允许访问相册以选择照片",
           "cameraPermission": "允许使用相机拍摄照片"
         }
-      ]
+      ],
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "允许访问您的相册以保存图片",
+          "savePhotosPermission": "允许保存聊天和打卡图片到您的相册",
+          "isAccessMediaLocationEnabled": true,
+          "granularPermissions": [
+            "photo"
+          ]
+        }
+      ],
+      "expo-sharing"
     ],
     "extra": {
       "eas": {

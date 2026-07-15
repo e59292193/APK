@@ -16,6 +16,15 @@ function getSupabaseClient() {
         persistSession: true,
         detectSessionInUrl: false,
       },
+      realtime: {
+        params: {
+          eventsPerSecond: 10,
+        },
+      },
+      // Reduce default timeout for faster failure detection on mobile
+      db: {
+        schema: 'public',
+      },
     });
   }
   return supabaseInstance;

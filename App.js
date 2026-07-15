@@ -1,22 +1,38 @@
 import 'react-native-url-polyfill/auto';
 import 'react-native-get-random-values';
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, memo, useCallback } from 'react';
 import {
   StyleSheet,
   Text,
   View,
-  TextInput,
   TouchableOpacity,
+  ScrollView,
   Platform,
   StatusBar,
   Alert,
-  KeyboardAvoidingView,
   ActivityIndicator,
+  KeyboardAvoidingView,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { Ionicons } from '@expo/vector-icons';
+import { useKeyboardHeight } from './src/hooks/useKeyboardHeight';
 import TimeCapsuleScreen from './src/screens/TimeCapsuleScreen';
 import TravelDiaryScreen from './src/screens/TravelDiaryScreen';
+import ChatScreen from './src/screens/ChatScreen';
+import CheckinListScreen from './src/screens/CheckinListScreen';
+import CheckinDetailScreen from './src/screens/CheckinDetailScreen';
+import CheckinCalendarScreen from './src/screens/CheckinCalendarScreen';
+import AnniversaryScreen from './src/screens/AnniversaryScreen';
+import WishlistScreen from './src/screens/WishlistScreen';
+import GomokuGameScreen from './src/screens/GomokuGameScreen';
+import DrawGuessGameScreen from './src/screens/DrawGuessGameScreen';
+import { ErrorBoundary } from './src/components/ErrorBoundary';
+import { wakeUpSupabase } from './src/lib/wakeUpSupabase';
+import { initSignal, disconnectSignal } from './src/lib/realtimeSignal';
+import { TIM_SDKAPPID } from './src/lib/timConfig';
+import { colors, typography, spacing, radius } from './src/theme';
+import { Button, AppInput } from './src/components/ui';
 
 // ─── Valid Users ───
 const VALID_USERS = {
@@ -26,18 +42,19 @@ const VALID_USERS = {
 
 // ─── Login Screen ───
 function LoginScreen({ onLogin }) {
+  const insets = useSafeAreaInsets();
   const [nickname, setNickname] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
+  const [errorMsg, setErrorMsg] = useState('');
 
   const handleLogin = async () => {
     if (!nickname.trim() || !password.trim()) {
-      Alert.alert('提示', '请输入昵称和密码');
+      setErrorMsg('请输入昵称和密码');
       return;
     }
-
+    setErrorMsg('');
     setLoading(true);
-    await new Promise((resolve) => setTimeout(resolve, 300));
 
     const expectedPassword = VALID_USERS[nickname.trim()];
     if (expectedPassword && expectedPassword === password) {
@@ -45,67 +62,143 @@ function LoginScreen({ onLogin }) {
       await AsyncStorage.setItem('user_id', userId);
       onLogin(userId);
     } else {
-      Alert.alert('登录失败', '昵称或密码错误，请重新输入');
+      setErrorMsg('昵称或密码错误，请重新输入');
     }
-
     setLoading(false);
   };
 
   return (
-    <SafeAreaView style={loginStyles.container} edges={['top', 'bottom']}>
-      <StatusBar barStyle="light-content" backgroundColor="#1A1128" />
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        style={loginStyles.inner}
+    <View style={loginStyles.container}>
+      <StatusBar barStyle="dark-content" backgroundColor={colors.backgroundLavender} />
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      <ScrollView
+        style={{ flex: 1 }}
+        contentContainerStyle={{
+          flexGrow: 1,
+          justifyContent: 'center',
+          paddingHorizontal: spacing[5],
+          paddingTop: insets.top,
+          paddingBottom: insets.bottom + spacing[6],
+        }}
+        keyboardShouldPersistTaps="handled"
+        bounces={false}
       >
-        <View style={loginStyles.topSection}>
-          <Text style={loginStyles.heartIcon}>💕</Text>
-          <Text style={loginStyles.mainTitle}>momo和苞米的小世界</Text>
-          <Text style={loginStyles.subTitle}>属于我们的秘密花园</Text>
+        {/* Decorative circles */}
+        <View style={loginStyles.decor1} />
+        <View style={loginStyles.decor2} />
+        <View style={loginStyles.decor3} />
+
+        {/* Brand */}
+        <View style={loginStyles.brandSection}>
+          <View style={loginStyles.logoWrap}>
+            <Ionicons name="heart" size={36} color={colors.primaryAction} />
+          </View>
+          <Text style={loginStyles.brandTitle}>MOMO Corn</Text>
+          <Text style={loginStyles.brandSubtitle}>momo和苞米的小世界</Text>
         </View>
 
+        {/* Form Card */}
         <View style={loginStyles.formCard}>
-          <Text style={loginStyles.formTitle}>欢迎回来 ✨</Text>
+          <Text style={loginStyles.formTitle}>欢迎回来</Text>
 
-          <Text style={loginStyles.inputLabel}>昵称</Text>
-          <TextInput
-            style={loginStyles.input}
-            value={nickname}
-            onChangeText={setNickname}
+          <AppInput
+            label="昵称"
             placeholder="输入你的昵称"
-            placeholderTextColor="#C8B6D6"
+            value={nickname}
+            onChangeText={(v) => { setNickname(v); setErrorMsg(''); }}
             autoCapitalize="none"
             autoCorrect={false}
           />
 
-          <Text style={loginStyles.inputLabel}>密码</Text>
-          <TextInput
-            style={loginStyles.input}
-            value={password}
-            onChangeText={setPassword}
+          <AppInput
+            label="密码"
             placeholder="输入密码"
-            placeholderTextColor="#C8B6D6"
-            secureTextEntry={true}
+            value={password}
+            onChangeText={(v) => { setPassword(v); setErrorMsg(''); }}
+            secureTextEntry
+            returnKeyType="go"
+            onSubmitEditing={handleLogin}
           />
 
-          <TouchableOpacity
-            style={[loginStyles.loginButton, loading && loginStyles.loginButtonDisabled]}
-            onPress={handleLogin}
-            disabled={loading}
-          >
-            {loading ? (
-              <ActivityIndicator color="#fff" />
-            ) : (
-              <Text style={loginStyles.loginButtonText}>💕 登录</Text>
-            )}
-          </TouchableOpacity>
+          {errorMsg ? (
+            <View style={loginStyles.errorRow}>
+              <Ionicons name="alert-circle-outline" size={16} color={colors.error} />
+              <Text style={loginStyles.errorText}>{errorMsg}</Text>
+            </View>
+          ) : null}
 
-          <Text style={loginStyles.hintText}>专属账号，仅限两人使用 💫</Text>
+          <Button
+            variant="primary"
+            size="large"
+            fullWidth
+            loading={loading}
+            disabled={loading}
+            onPress={handleLogin}
+            style={{ marginTop: spacing[3] }}
+          >
+            登录
+          </Button>
+
+          <Text style={loginStyles.hintText}>专属账号，仅限两人使用</Text>
         </View>
+      </ScrollView>
       </KeyboardAvoidingView>
-    </SafeAreaView>
+    </View>
   );
 }
+
+// ─── Bottom Tab Bar ───
+const TAB_CONFIG = [
+  { key: 'Capsule', label: '时光胶囊', icon: 'mail-outline', iconActive: 'mail' },
+  { key: 'Wishlist', label: '愿望清单', icon: 'sparkles-outline', iconActive: 'sparkles' },
+  { key: 'Diary', label: '恋爱足迹', icon: 'map-outline', iconActive: 'map' },
+  { key: 'Anniversary', label: '纪念日', icon: 'calendar-outline', iconActive: 'calendar' },
+  { key: 'Chat', label: '聊天', icon: 'chatbubble-ellipses-outline', iconActive: 'chatbubble-ellipses' },
+];
+
+const BottomTabBar = memo(function BottomTabBar({ currentTab, onTabChange, unreadCount }) {
+  const insets = useSafeAreaInsets();
+  const keyboardHeight = useKeyboardHeight();
+  if (keyboardHeight > 0) return null;
+
+  return (
+    <View style={[tabStyles.container, { paddingBottom: insets.bottom + 4 }]}>
+      {TAB_CONFIG.map((tab) => {
+        const active = currentTab === tab.key;
+        const showBadge = tab.key === 'Chat' && unreadCount > 0 && !active;
+        return (
+          <TouchableOpacity
+            key={tab.key}
+            style={tabStyles.item}
+            onPress={() => onTabChange(tab.key)}
+            activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityState={{ selected: active }}
+            accessibilityLabel={tab.label}
+          >
+            <View style={[tabStyles.iconWrap, active && tabStyles.iconWrapActive]}>
+              <Ionicons
+                name={active ? tab.iconActive : tab.icon}
+                size={22}
+                color={active ? colors.primaryAction : colors.textMuted}
+              />
+              {showBadge && (
+                <View style={tabStyles.badge}>
+                  {unreadCount <= 99 ? (
+                    <Text style={tabStyles.badgeText}>{unreadCount > 99 ? '99+' : unreadCount}</Text>
+                  ) : (
+                    <Text style={tabStyles.badgeText}>99+</Text>
+                  )}
+                </View>
+              )}
+            </View>
+            <Text style={[tabStyles.label, active && tabStyles.labelActive]}>{tab.label}</Text>
+          </TouchableOpacity>
+        );
+      })}
+    </View>
+  );
+});
 
 // ─── Main App ───
 export default function App() {
@@ -113,10 +206,41 @@ export default function App() {
   const [userId, setUserId] = useState('');
   const [currentTab, setCurrentTab] = useState('Capsule');
   const [initializing, setInitializing] = useState(true);
+  const [unreadCount, setUnreadCount] = useState(0);
+
+  const [mountedTabs, setMountedTabs] = useState(new Set(['Capsule']));
+
+  const handleTabChange = (tab) => {
+    setCurrentTab(tab);
+    if (tab === 'Chat') setUnreadCount(0);
+    setMountedTabs((prev) => {
+      if (prev.has(tab)) return prev;
+      const next = new Set(prev);
+      next.add(tab);
+      return next;
+    });
+  };
+
+  const [fullscreenPage, setFullscreenPage] = useState(null);
+  const [chatRefreshTrigger, setChatRefreshTrigger] = useState(0);
 
   useEffect(() => {
     checkLogin();
   }, []);
+
+  useEffect(() => {
+    if (!isLoggedIn) return;
+    wakeUpSupabase().catch((err) => {
+      console.warn('[App] 后台唤醒失败（不影响使用，各页面会自动重试）:', err.message);
+    });
+    if (TIM_SDKAPPID) {
+      initSignal(userId).catch((err) => {
+        console.warn('[App] IM 信号层初始化失败（聊天/五子棋实时功能将不可用）:', err.message);
+      });
+    } else {
+      console.warn('[App] 腾讯 IM 未配置，请在 src/lib/timConfig.js 填入 SDKAppID 与 SecretKey');
+    }
+  }, [isLoggedIn, userId]);
 
   const checkLogin = async () => {
     try {
@@ -144,20 +268,62 @@ export default function App() {
         text: '退出',
         style: 'destructive',
         onPress: async () => {
+          await disconnectSignal().catch(() => {});
           await AsyncStorage.removeItem('user_id');
           setUserId('');
           setIsLoggedIn(false);
           setCurrentTab('Capsule');
+          setMountedTabs(new Set(['Capsule']));
         },
       },
     ]);
   };
 
+  const handleNavigateCheckinList = useCallback(() => {
+    setFullscreenPage({ screen: 'CheckinList' });
+  }, []);
+
+  const handleNavigateGomokuGame = useCallback((gameId) => {
+    setFullscreenPage({ screen: 'GomokuGame', params: { gameId } });
+  }, []);
+
+  const handleNavigateDrawGuessGame = useCallback((gameId) => {
+    setFullscreenPage({ screen: 'DrawGuessGame', params: { gameId } });
+  }, []);
+
+  const handleNavigateDetail = useCallback((theme) => {
+    setFullscreenPage({ screen: 'CheckinDetail', params: { theme } });
+  }, []);
+
+  const handleBackToList = useCallback(() => {
+    setFullscreenPage({ screen: 'CheckinList' });
+  }, []);
+
+  const handleBackToDetail = useCallback((theme) => {
+    setFullscreenPage({ screen: 'CheckinDetail', params: { theme } });
+  }, []);
+
+  const handleNavigateCalendar = useCallback((theme) => {
+    setFullscreenPage({ screen: 'CheckinCalendar', params: { theme } });
+  }, []);
+
+  const handleCloseFullscreen = useCallback(() => {
+    setFullscreenPage(null);
+    setChatRefreshTrigger((n) => n + 1);
+  }, []);
+
+  const handleNavigateNewGame = useCallback((newGameId) => {
+    setFullscreenPage({ screen: 'GomokuGame', params: { gameId: newGameId } });
+  }, []);
+
   if (initializing) {
     return (
-      <View style={appStyles.initContainer}>
-        <ActivityIndicator size="large" color="#B48EDC" />
-      </View>
+      <SafeAreaProvider>
+        <View style={appStyles.initContainer}>
+          <StatusBar barStyle="dark-content" backgroundColor={colors.background} />
+          <ActivityIndicator size="large" color={colors.primaryAction} />
+        </View>
+      </SafeAreaProvider>
     );
   }
 
@@ -171,57 +337,105 @@ export default function App() {
 
   return (
     <SafeAreaProvider>
-      <SafeAreaView style={appStyles.container} edges={['top']}>
-        <StatusBar barStyle="light-content" backgroundColor="#1A1128" />
+      <View style={appStyles.container}>
+        <StatusBar barStyle="dark-content" backgroundColor={colors.backgroundLavender} />
 
-        {/* Top User Bar */}
-        <View style={appStyles.topBar}>
-          <View style={appStyles.topBarLeft}>
-            <Text style={appStyles.topBarGreeting}>Hi, {userId}</Text>
-            <Text style={appStyles.topBarHeart}>💕</Text>
-          </View>
-          <TouchableOpacity onPress={handleLogout} style={appStyles.logoutButton}>
-            <Text style={appStyles.logoutText}>退出</Text>
-          </TouchableOpacity>
-        </View>
-
-        {/* Screen Content */}
+        {/* Screen Content — lazy mount */}
         <View style={appStyles.screenContainer}>
-          <View style={[appStyles.screenPage, currentTab === 'Capsule' ? appStyles.screenVisible : appStyles.screenHidden]}>
-            <TimeCapsuleScreen userId={userId} onLogout={handleLogout} />
+          <View
+            style={[appStyles.screenPage, currentTab === 'Capsule' ? appStyles.screenVisible : appStyles.screenHidden]}
+            pointerEvents={currentTab === 'Capsule' ? 'auto' : 'none'}
+          >
+            {mountedTabs.has('Capsule') && <TimeCapsuleScreen userId={userId} onLogout={handleLogout} />}
           </View>
-          <View style={[appStyles.screenPage, currentTab === 'Diary' ? appStyles.screenVisible : appStyles.screenHidden]}>
-            <TravelDiaryScreen userId={userId} />
+          <View
+            style={[appStyles.screenPage, currentTab === 'Wishlist' ? appStyles.screenVisible : appStyles.screenHidden]}
+            pointerEvents={currentTab === 'Wishlist' ? 'auto' : 'none'}
+          >
+            {mountedTabs.has('Wishlist') && <WishlistScreen userId={userId} isActive={currentTab === 'Wishlist'} />}
+          </View>
+          <View
+            style={[appStyles.screenPage, currentTab === 'Diary' ? appStyles.screenVisible : appStyles.screenHidden]}
+            pointerEvents={currentTab === 'Diary' ? 'auto' : 'none'}
+          >
+            {mountedTabs.has('Diary') && <TravelDiaryScreen userId={userId} />}
+          </View>
+          <View
+            style={[appStyles.screenPage, currentTab === 'Anniversary' ? appStyles.screenVisible : appStyles.screenHidden]}
+            pointerEvents={currentTab === 'Anniversary' ? 'auto' : 'none'}
+          >
+            {mountedTabs.has('Anniversary') && <AnniversaryScreen userId={userId} />}
+          </View>
+          <View
+            style={[appStyles.screenPage, currentTab === 'Chat' ? appStyles.screenVisible : appStyles.screenHidden]}
+            pointerEvents={currentTab === 'Chat' ? 'auto' : 'none'}
+          >
+            {mountedTabs.has('Chat') && (
+              <ChatScreen
+                userId={userId}
+                isActive={currentTab === 'Chat'}
+                onNavigateCheckinList={handleNavigateCheckinList}
+                onNavigateGomokuGame={handleNavigateGomokuGame}
+                onNavigateDrawGuessGame={handleNavigateDrawGuessGame}
+                onUnreadChange={setUnreadCount}
+                refreshTrigger={chatRefreshTrigger}
+              />
+            )}
           </View>
         </View>
+
+        {/* Fullscreen Page Overlay */}
+        {fullscreenPage && (
+          <View style={appStyles.fullscreenOverlay}>
+            <ErrorBoundary sessionId={`fullscreen-${fullscreenPage.screen}`}>
+              {fullscreenPage.screen === 'CheckinList' && (
+                <CheckinListScreen
+                  userId={userId}
+                  onNavigateDetail={handleNavigateDetail}
+                  onBack={handleCloseFullscreen}
+                />
+              )}
+              {fullscreenPage.screen === 'CheckinDetail' && (
+                <CheckinDetailScreen
+                  theme={fullscreenPage.params.theme}
+                  userId={userId}
+                  onBack={handleBackToList}
+                  onNavigateCalendar={handleNavigateCalendar}
+                />
+              )}
+              {fullscreenPage.screen === 'CheckinCalendar' && (
+                <CheckinCalendarScreen
+                  theme={fullscreenPage.params.theme}
+                  userId={userId}
+                  onBack={() => handleBackToDetail(fullscreenPage.params.theme)}
+                />
+              )}
+              {fullscreenPage.screen === 'GomokuGame' && (
+                <GomokuGameScreen
+                  gameId={fullscreenPage.params.gameId}
+                  userId={userId}
+                  onBack={handleCloseFullscreen}
+                  onNavigateGame={handleNavigateNewGame}
+                />
+              )}
+              {fullscreenPage.screen === 'DrawGuessGame' && (
+                <DrawGuessGameScreen
+                  gameId={fullscreenPage.params.gameId}
+                  userId={userId}
+                  onBack={handleCloseFullscreen}
+                />
+              )}
+            </ErrorBoundary>
+          </View>
+        )}
 
         {/* Bottom Tab Bar */}
-        <View style={appStyles.tabBar}>
-          <TouchableOpacity
-            style={[appStyles.tabItem, currentTab === 'Capsule' && appStyles.tabItemActive]}
-            onPress={() => setCurrentTab('Capsule')}
-            activeOpacity={0.7}
-          >
-            <Text style={appStyles.tabIcon}>💌</Text>
-            <Text style={[appStyles.tabLabel, currentTab === 'Capsule' && appStyles.tabLabelActive]}>
-              时光胶囊
-            </Text>
-          </TouchableOpacity>
-
-          <View style={appStyles.tabDivider} />
-
-          <TouchableOpacity
-            style={[appStyles.tabItem, currentTab === 'Diary' && appStyles.tabItemActive]}
-            onPress={() => setCurrentTab('Diary')}
-            activeOpacity={0.7}
-          >
-            <Text style={appStyles.tabIcon}>✈️</Text>
-            <Text style={[appStyles.tabLabel, currentTab === 'Diary' && appStyles.tabLabelActive]}>
-              恋爱足迹
-            </Text>
-          </TouchableOpacity>
-        </View>
-      </SafeAreaView>
+        <BottomTabBar
+          currentTab={currentTab}
+          onTabChange={handleTabChange}
+          unreadCount={unreadCount}
+        />
+      </View>
     </SafeAreaProvider>
   );
 }
@@ -230,90 +444,157 @@ export default function App() {
 const loginStyles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#1A1128',
+    backgroundColor: colors.backgroundLavender,
+    overflow: 'hidden',
   },
-  inner: {
-    flex: 1,
-    justifyContent: 'center',
-    paddingHorizontal: 24,
+  decor1: {
+    position: 'absolute',
+    top: -60,
+    right: -40,
+    width: 200,
+    height: 200,
+    borderRadius: 100,
+    backgroundColor: colors.primary[200],
+    opacity: 0.25,
   },
-  topSection: {
+  decor2: {
+    position: 'absolute',
+    top: 120,
+    left: -50,
+    width: 140,
+    height: 140,
+    borderRadius: 70,
+    backgroundColor: colors.mint[200],
+    opacity: 0.2,
+  },
+  decor3: {
+    position: 'absolute',
+    bottom: -30,
+    right: -20,
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    backgroundColor: colors.primary[100],
+    opacity: 0.4,
+  },
+  brandSection: {
     alignItems: 'center',
-    marginBottom: 40,
+    marginBottom: spacing[8],
   },
-  heartIcon: {
-    fontSize: 56,
-    marginBottom: 12,
+  logoWrap: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: colors.surface,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: spacing[4],
+    shadowColor: colors.shadow,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 12,
+    elevation: 3,
   },
-  mainTitle: {
-    fontSize: 26,
-    fontWeight: 'bold',
-    color: '#F5E6FF',
-    marginBottom: 6,
-    letterSpacing: 1,
+  brandTitle: {
+    ...typography.display,
+    color: colors.textPrimary,
   },
-  subTitle: {
-    fontSize: 13,
-    color: '#9B8EC4',
-    marginTop: 4,
+  brandSubtitle: {
+    ...typography.body,
+    color: colors.textSecondary,
+    marginTop: spacing[1],
   },
   formCard: {
-    backgroundColor: 'rgba(255,255,255,0.95)',
-    borderRadius: 24,
-    padding: 28,
-    shadowColor: '#B48EDC',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.25,
-    shadowRadius: 20,
-    elevation: 10,
-  },
-  formTitle: {
-    fontSize: 22,
-    fontWeight: 'bold',
-    color: '#2D1B4E',
-    textAlign: 'center',
-    marginBottom: 24,
-  },
-  inputLabel: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#7B6B8A',
-    marginBottom: 8,
-  },
-  input: {
-    backgroundColor: '#F8F2FF',
-    borderRadius: 16,
-    padding: 14,
-    fontSize: 16,
-    color: '#2D1B4E',
-    marginBottom: 18,
-    borderWidth: 0,
-  },
-  loginButton: {
-    backgroundColor: '#B48EDC',
-    borderRadius: 16,
-    paddingVertical: 16,
-    alignItems: 'center',
-    marginTop: 8,
-    shadowColor: '#B48EDC',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
+    backgroundColor: colors.surface,
+    borderRadius: radius.xl,
+    padding: spacing[5],
+    shadowColor: colors.shadow,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.08,
+    shadowRadius: 16,
     elevation: 4,
   },
-  loginButtonDisabled: {
-    backgroundColor: '#C8B6D6',
+  formTitle: {
+    ...typography.sectionTitle,
+    color: colors.textPrimary,
+    textAlign: 'center',
+    marginBottom: spacing[4],
   },
-  loginButtonText: {
-    color: '#fff',
-    fontSize: 17,
-    fontWeight: 'bold',
+  errorRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.errorSoft,
+    borderRadius: radius.sm,
+    paddingHorizontal: spacing[3],
+    paddingVertical: spacing[2],
+    marginBottom: spacing[2],
+  },
+  errorText: {
+    ...typography.caption,
+    color: colors.error,
+    marginLeft: spacing[2],
   },
   hintText: {
+    ...typography.caption,
     textAlign: 'center',
-    marginTop: 16,
-    fontSize: 12,
-    color: '#B8A6C8',
+    marginTop: spacing[4],
+    color: colors.textMuted,
+  },
+});
+
+// ─── Tab Bar Styles ───
+const tabStyles = StyleSheet.create({
+  container: {
+    flexDirection: 'row',
+    backgroundColor: colors.surface,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.border,
+    paddingTop: 6,
+  },
+  item: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 4,
+  },
+  iconWrap: {
+    width: 44,
+    height: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: radius.pill,
+    position: 'relative',
+  },
+  iconWrapActive: {
+    backgroundColor: colors.primary[100],
+  },
+  badge: {
+    position: 'absolute',
+    top: -2,
+    right: 2,
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: colors.error,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 4,
+    borderWidth: 1.5,
+    borderColor: colors.surface,
+  },
+  badgeText: {
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  label: {
+    ...typography.tabLabel,
+    color: colors.textMuted,
+    marginTop: 3,
+  },
+  labelActive: {
+    color: colors.primaryAction,
+    fontWeight: '600',
   },
 });
 
@@ -323,44 +604,11 @@ const appStyles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: '#FAF7FF',
+    backgroundColor: colors.background,
   },
   container: {
     flex: 1,
-    backgroundColor: '#FAF7FF',
-  },
-  topBar: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    backgroundColor: '#1A1128',
-    paddingHorizontal: 20,
-    paddingVertical: 12,
-  },
-  topBarLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  topBarGreeting: {
-    color: '#F5E6FF',
-    fontSize: 15,
-    fontWeight: '600',
-    letterSpacing: 0.5,
-  },
-  topBarHeart: {
-    fontSize: 14,
-    marginLeft: 6,
-  },
-  logoutButton: {
-    paddingHorizontal: 14,
-    paddingVertical: 6,
-    borderRadius: 20,
-    backgroundColor: 'rgba(255,255,255,0.1)',
-  },
-  logoutText: {
-    color: '#E8A0BF',
-    fontSize: 12,
-    fontWeight: '600',
+    backgroundColor: colors.background,
   },
   screenContainer: {
     flex: 1,
@@ -369,50 +617,23 @@ const appStyles = StyleSheet.create({
     flex: 1,
   },
   screenVisible: {
-    display: 'flex',
+    opacity: 1,
   },
   screenHidden: {
-    display: 'none',
+    position: 'absolute',
+    top: 0,
+    left: -10000,
+    width: '100%',
+    height: '100%',
+    opacity: 0,
   },
-  tabBar: {
-    flexDirection: 'row',
-    backgroundColor: 'rgba(255,255,255,0.95)',
-    borderTopWidth: 0,
-    paddingBottom: Platform.OS === 'ios' ? 24 : 8,
-    paddingTop: 8,
-    shadowColor: '#B48EDC',
-    shadowOffset: { width: 0, height: -4 },
-    shadowOpacity: 0.08,
-    shadowRadius: 12,
-    elevation: 10,
-  },
-  tabItem: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 6,
-    borderRadius: 16,
-    marginHorizontal: 12,
-  },
-  tabItemActive: {
-    backgroundColor: '#F3E8FF',
-  },
-  tabDivider: {
-    width: 1,
-    backgroundColor: '#EDE4F5',
-    marginVertical: 4,
-  },
-  tabIcon: {
-    fontSize: 20,
-    marginBottom: 2,
-  },
-  tabLabel: {
-    fontSize: 11,
-    fontWeight: '500',
-    color: '#B8A6C8',
-  },
-  tabLabelActive: {
-    color: '#8B5FC7',
-    fontWeight: '700',
+  fullscreenOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: colors.background,
+    zIndex: 100,
   },
 });

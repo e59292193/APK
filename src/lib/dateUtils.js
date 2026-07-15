@@ -27,12 +27,19 @@ export function formatLocalTime(utcString) {
 
 /**
  * Converts a UTC date string to full local date and time.
+ * Optimized: parses Date only once instead of delegating to formatLocalDate + formatLocalTime.
  * @param {string} utcString
  * @returns {string} "YYYY/MM/DD HH:mm"
  */
 export function formatLocalDateTime(utcString) {
   if (!utcString) return '';
-  return `${formatLocalDate(utcString)} ${formatLocalTime(utcString)}`;
+  const date = new Date(utcString);
+  const y = date.getFullYear();
+  const m = (date.getMonth() + 1).toString().padStart(2, '0');
+  const d = date.getDate().toString().padStart(2, '0');
+  const h = date.getHours().toString().padStart(2, '0');
+  const min = date.getMinutes().toString().padStart(2, '0');
+  return `${y}/${m}/${d} ${h}:${min}`;
 }
 
 /**

@@ -39,3 +39,22 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# APK builds
+*.apk
+
+# Build logs
+build*.log
+logcat-*.log
+
+# Debug
+.dbg/
+debug-server.js
+debug-*.md
+
+# IDE
+.idea/
+
+# Misc
+pic.jpg
+cleanup_data.sql

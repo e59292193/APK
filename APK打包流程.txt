@@ -1,0 +1,62 @@
+====================================
+  momo-corn APK 打包流程
+====================================
+
+【项目位置】
+  D:\APK\APK
+
+【环境要求】
+  - 系统默认 Java 是 JDK 8，但项目 Gradle 9.3.1 需要 JDK 17+
+  - 使用 Android Studio 自带的 JDK 21（路径：D:\AndroidStudio\jbr）
+  - Android SDK 路径：D:\AndroidStudio\Sdk
+
+【打包步骤】
+
+1. 打开终端（Git Bash 或类似 bash 环境）
+
+2. 设置环境变量并执行编译：
+
+   export JAVA_HOME="D:/AndroidStudio/jbr"
+   export ANDROID_HOME="D:/AndroidStudio/Sdk"
+   cd "D:/APK/APK/android"
+   ./gradlew.bat assembleRelease --no-daemon --stacktrace
+
+   说明：
+   - JAVA_HOME 指向 Android Studio 内置 JDK 21，解决 Gradle 对 JDK 版本的要求
+   - --no-daemon  避免后台 Gradle 进程占用
+   - --stacktrace  出错时显示完整堆栈信息，方便排查
+
+3. 编译成功后，APK 输出在：
+
+   D:\APK\APK\android\app\build\outputs\apk\release\app-release.apk
+
+   文件大小约 75MB，包含 4 个 CPU 架构：
+   - arm64-v8a（主流 64 位 ARM）
+   - armeabi-v7a（老款 32 位 ARM）
+   - x86（模拟器）
+   - x86_64（64 位模拟器）
+
+4.（可选）复制 APK 到输出目录方便取用：
+
+   cp "D:/APK/APK/android/app/build/outputs/apk/release/app-release.apk" "C:/Users/a/.qoderworkcn/workspace/mqqqxz91zszjjqlk/outputs/momo-corn-release.apk"
+
+【常见问题】
+
+  Q: 编译报错 "Unsupported class file major version"
+  A: JAVA_HOME 没设对，确认指向 D:\AndroidStudio\jbr（JDK 21），不是系统默认的 JDK 8
+
+  Q: 编译报错 SDK not found
+  A: ANDROID_HOME 没设对，确认指向 D:\AndroidStudio\Sdk
+
+  Q: 编译很慢
+  A: 首次编译较慢（需要下载依赖），后续增量编译会快很多。
+     加了 --no-daemon 每次都是独立进程，如果追求速度可以去掉 --no-daemon，
+     但会留一个后台 Gradle 进程占用内存。
+
+【耗时参考】
+  - 全量编译：约 2-4 分钟
+  - 增量编译（改动少量 JS 文件）：约 1-2 分钟
+
+====================================
+  生成日期：2026-06-28
+====================================
