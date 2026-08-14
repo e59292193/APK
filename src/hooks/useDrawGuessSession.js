@@ -817,6 +817,7 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
 
     const tick = async () => {
       if (cancelled) return;
+      timer = null;
       if (!appActiveRef.current) {
         schedule();
         return;
@@ -880,6 +881,7 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
 
     const tick = async () => {
       if (cancelled) return;
+      timer = null;
       if (!appActiveRef.current) {
         schedule();
         return;
