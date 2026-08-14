@@ -1,22 +1,13 @@
-// ═══════════════════════════════════════════════════════
-// lazyScreen —— 屏幕级代码延迟求值（启动速度优化）
+// 屏幕级按需加载。
 //
-// 问题：App.js 顶部的 import 会被提升，启动时就把所有屏幕模块（聊天、
-// 五子棋、你画我猜、旅行手账…，其中多个超过 50KB）全部求值一遂，
-// 还连带拉起 svg / 图片处理 / IM 等重依赖，直接拖长白屏时间。
+// loader 只在该页面第一次真正参与渲染时执行，因此未访问页面不会增加启动阶段
+// 的模块求值开销；成功后缓存在闭包中，之后直接渲染。
 //
-// 方案：把 require() 放到 useEffect 里。Metro 的 require 是同步的，但 useEffect
-// 在首帧之后才执行，因此：
-//   • 启动时只求值首屏真正用到的模块
-//   • 未打开过的页面永远不求值
-//   • 首次打开时先出现占位骨架（不阻塞手势/动画），下一帧换上真内容
-//   • 模块实例缓存在闭包里，第二次打开零延迟（同步直出）
-//
-// 用法：
-//   const ChatScreen = lazyScreen(() => require('./src/screens/ChatScreen'));
-//   <ChatScreen {...props} />
-// ═══════════════════════════════════════════════════════
-import React, { useEffect, useRef, useState } from 'react';
+// 不能把 Metro require() 放进 useEffect 再用本地 state 补一次渲染：部分 Android
+// release 环境会先提交空的全屏覆盖层，而模块解析异常又被吞掉，最终表现为点击入口
+// 后仍看到聊天页或残缺控件。这里在首次导航的 render 中同步解析，让目标页面与覆盖层
+// 在同一次提交中挂载；异常则抛给外层 ErrorBoundary，而不是永久显示空壳。
+import React from 'react';
 import { ActivityIndicator, StyleSheet, View } from 'react-native';
 
 function ScreenFallback() {
@@ -28,42 +19,39 @@ function ScreenFallback() {
 }
 
 export function lazyScreen(loader, Fallback = ScreenFallback) {
-  // 模块级缓存：同一个屏幕只求值一次
   let Loaded = null;
+  let loadError = null;
 
   function resolve() {
-    const mod = loader();
-    return (mod && (mod.default || mod)) || null;
+    if (Loaded || loadError) return;
+    try {
+      const mod = loader();
+      Loaded = (mod && (mod.default || mod)) || null;
+      if (!Loaded) {
+        loadError = new Error('页面模块没有可渲染的默认导出');
+      }
+    } catch (error) {
+      loadError = error instanceof Error ? error : new Error(String(error));
+    }
   }
 
-  return function LazyScreen(props) {
-    const [, forceRender] = useState(0);
-    const mounted = useRef(true);
-
-    useEffect(() => {
-      mounted.current = true;
-      if (!Loaded) {
-        try {
-          Loaded = resolve();
-        } catch (e) {
-          console.warn('[lazyScreen] 模块加载失败', e);
-        }
-        if (mounted.current) forceRender((n) => n + 1);
-      }
-      return () => {
-        mounted.current = false;
-      };
-    }, []);
-
+  function LazyScreen(props) {
+    resolve();
+    if (loadError) throw loadError;
     if (!Loaded) return <Fallback />;
     const Component = Loaded;
     return <Component {...props} />;
-  };
+  }
+
+  LazyScreen.displayName = 'LazyScreen';
+  return LazyScreen;
 }
 
 const styles = StyleSheet.create({
   fallback: {
     flex: 1,
+    width: '100%',
+    height: '100%',
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: '#FAF9FC',
