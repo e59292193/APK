@@ -260,6 +260,32 @@ export const FeedOverlay = memo(function FeedOverlay({ items, userId }) {
   );
 });
 
+// 本轮猜词记录（持久显示）：画画方能看到对方猜过的每个词，
+// 弥补弹幕 4 秒即逝、专注画画容易错过的问题
+export const GuessHistory = memo(function GuessHistory({ items }) {
+  const list = items || [];
+  if (list.length === 0) return null;
+  return (
+    <ScrollView
+      horizontal
+      style={styles.guessHistory}
+      contentContainerStyle={styles.guessHistoryRow}
+      showsHorizontalScrollIndicator={false}
+      keyboardShouldPersistTaps="handled"
+      pointerEvents="none"
+    >
+      {list.map((item) => (
+        <View
+          key={item.id}
+          style={[styles.guessChip, item.kind === 'win' && styles.guessChipWin]}
+        >
+          <Text style={styles.guessChipText} numberOfLines={1}>{item.text}</Text>
+        </View>
+      ))}
+    </ScrollView>
+  );
+});
+
 export const HeaderActions = memo(function HeaderActions({ onGallery, onWords }) {
   return (
     <View style={styles.headerActions}>
@@ -313,8 +339,13 @@ const styles = StyleSheet.create({
   feedOther: { left: 12, backgroundColor: 'rgba(61,52,80,0.83)' },
   feedWin: { left: '18%', backgroundColor: 'rgba(105,183,155,0.94)' },
   feedText: { color: '#FFF', fontSize: 12, fontWeight: '700' },
+  guessHistory: { width: '100%', maxHeight: 30, marginTop: 8 },
+  guessHistoryRow: { gap: 6, alignItems: 'center' },
+  guessChip: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 13, backgroundColor: 'rgba(61,52,80,0.78)' },
+  guessChipWin: { backgroundColor: 'rgba(105,183,155,0.94)' },
+  guessChipText: { color: '#FFF', fontSize: 12, fontWeight: '600' },
   headerActions: { flexDirection: 'row', gap: 8 },
   headerBtn: { width: 36, height: 36, borderRadius: 13, alignItems: 'center', justifyContent: 'center', backgroundColor: C.primarySoft },
 });
 
-export default { CountdownPill, WordBar, Toolbar, GuessBar, FeedOverlay, HeaderActions };
+export default { CountdownPill, WordBar, Toolbar, GuessBar, FeedOverlay, GuessHistory, HeaderActions };

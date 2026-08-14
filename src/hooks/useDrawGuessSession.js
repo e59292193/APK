@@ -114,6 +114,8 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
   const [remoteStroke, setRemoteStroke] = useState(null);
   const [remainSec, setRemainSec] = useState(room.DRAW_SECONDS);
   const [feed, setFeed] = useState([]);
+  // 本轮猜词记录（持久显示，区别于 4 秒即逝的弹幕 feed），画画方据此看到对方猜过什么
+  const [guesses, setGuesses] = useState([]);
   const [toast, setToast] = useState(null);
   const [tool, setTool] = useState({ color: COLORS[0], width: SIZES[1], isEraser: false });
   const [busy, setBusy] = useState(false);
@@ -193,6 +195,14 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
     }, FEED_TTL);
   }
 
+  // 持久猜词记录：整个回合保留（弹幕会消失，这个不会）
+  function pushGuess(item) {
+    if (!mountedRef.current || !item || !item.text) return;
+    feedIdRef.current += 1;
+    const entry = { id: feedIdRef.current, ...item };
+    setGuesses((previous) => previous.concat([entry]).slice(-20));
+  }
+
   function setStrokeList(next) {
     strokesRef.current = next;
     if (mountedRef.current) setStrokes(next);
@@ -262,6 +272,7 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
     if (roundChanged || enteredDrawing) {
       discardPendingSignals();
       resetBoard();
+      setGuesses([]);
       setPartnerSavedRound(null);
       setChoiceOverride(null);
     }
@@ -377,6 +388,7 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
         break;
       case 'guess':
         pushFeed({ text: signal.text, from: signal.from, kind: signal.correct ? 'win' : 'guess' });
+        pushGuess({ text: signal.text, from: signal.from, kind: signal.correct ? 'win' : 'guess' });
         break;
       case 'update':
         if (signal.row) applyRow(signal.row);
@@ -667,6 +679,7 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
     const correct = isCorrectGuess(value, current.word);
     sendSignal('guess', { text: value, correct });
     pushFeed({ text: value, from: userId, kind: correct ? 'win' : 'guess' });
+    pushGuess({ text: value, from: userId, kind: correct ? 'win' : 'guess' });
     if (correct) await settleRound('win');
   }
 
@@ -1018,6 +1031,7 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
     remoteStroke,
     remainSec,
     feed,
+    guesses,
     toast,
     tool,
     setTool,

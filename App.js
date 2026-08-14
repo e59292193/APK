@@ -5,7 +5,6 @@ import {
   ActivityIndicator,
   Alert,
   KeyboardAvoidingView,
-  Platform,
   ScrollView,
   StatusBar,
   StyleSheet,
@@ -68,7 +67,8 @@ function LoginScreen({ onLogin }) {
   return (
     <View style={loginStyles.container}>
       <StatusBar barStyle="dark-content" backgroundColor={colors.backgroundLavender} />
-      <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      {/* edge-to-edge 下 Android adjustResize 失效，必须显式 padding 才能避开键盘 */}
+      <KeyboardAvoidingView style={styles.flex} behavior="padding">
         <ScrollView
           style={styles.flex}
           contentContainerStyle={[

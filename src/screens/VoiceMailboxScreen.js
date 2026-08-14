@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AccessibilityInfo,
   Animated,
@@ -356,12 +356,22 @@ function RecordScene({ userId, partnerId, reduceMotion, onSent, onError }) {
   const samplesRef = useRef([]);
   const sampleTimerRef = useRef(null);
   const mountedRef = useRef(true);
+  const durationRef = useRef(0);      // 录音期间累计的最大时长（stop 后 recorderState 会归零）
+  const isRecordingRef = useRef(false); // 供卸载 cleanup 使用，避免闭包陈旧
   useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
 
   // 同步 metering 到 ref
   useEffect(() => {
     meteringRef.current = recorderState.metering ?? -160;
   }, [recorderState.metering]);
+
+  // 同步录音状态与时长到 ref
+  useEffect(() => {
+    isRecordingRef.current = !!recorderState.isRecording;
+    if (recorderState.isRecording) {
+      durationRef.current = Math.max(durationRef.current, recorderState.durationMs || 0);
+    }
+  }, [recorderState.isRecording, recorderState.durationMs]);
 
   // 录音时长
   useEffect(() => {
@@ -380,7 +390,7 @@ function RecordScene({ userId, partnerId, reduceMotion, onSent, onError }) {
     return () => {
       if (sampleTimerRef.current) clearInterval(sampleTimerRef.current);
       try {
-        if (audioRecorder && recorderState.isRecording) audioRecorder.stop();
+        if (audioRecorder && isRecordingRef.current) audioRecorder.stop();
       } catch (e) {}
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -410,11 +420,16 @@ function RecordScene({ userId, partnerId, reduceMotion, onSent, onError }) {
     try {
       await setAudioModeAsync({ playsInSilentMode: true, allowsRecording: true });
       samplesRef.current = [];
+      durationRef.current = 0;
+      isRecordingRef.current = false;
       setLiveSamples([]);
       setRecordedUri(null);
       setDurationMs(0);
       await audioRecorder.prepareToRecordAsync();
-      audioRecorder.record();
+      // record() 在 expo-audio 中返回 Promise，必须 await：
+      // 否则启动失败（如 AudioSession 冲突）时异常被静默吞掉，
+      // 表现为“点击后没反应、不计时、录音未开始”
+      await audioRecorder.record();
       // 每 100ms 采样 metering
       sampleTimerRef.current = setInterval(() => {
         samplesRef.current.push(meteringRef.current);
@@ -423,6 +438,11 @@ function RecordScene({ userId, partnerId, reduceMotion, onSent, onError }) {
         }
       }, 100);
     } catch (e) {
+      console.warn('[voice] 录音启动失败:', e && (e.message || e));
+      if (sampleTimerRef.current) {
+        clearInterval(sampleTimerRef.current);
+        sampleTimerRef.current = null;
+      }
       onError('录音启动失败，请重试');
     }
   }, [audioRecorder, ensurePermission, onError]);
@@ -438,7 +458,8 @@ function RecordScene({ userId, partnerId, reduceMotion, onSent, onError }) {
     } catch (e) {}
     if (!mountedRef.current) return;
     const uri = audioRecorder.uri;
-    const dur = recorderState.durationMs || 0;
+    // recorderState.durationMs 是闭包快照，stop 后可能已归零，用 ref 里的累计值
+    const dur = durationRef.current;
     if (dur < MIN_DURATION_MS) {
       setRecordedUri(null);
       setDurationMs(0);
@@ -451,34 +472,17 @@ function RecordScene({ userId, partnerId, reduceMotion, onSent, onError }) {
     setDurationMs(dur);
     setWaveform(normalizeWaveform(samplesRef.current, 40));
     setLiveSamples(normalizeWaveform(samplesRef.current, 40));
-  }, [audioRecorder, recorderState.durationMs, onError]);
+  }, [audioRecorder, onError]);
 
-  // ─── 试听 ───
-  const previewSource = useMemo(() => (recordedUri ? { uri: recordedUri } : null), [recordedUri]);
-  const previewPlayer = useAudioPlayer(previewSource, { updateInterval: 100 });
-  const previewStatus = useAudioPlayerStatus(previewPlayer);
-  const previewPlaying = !!(previewStatus?.playing ?? previewStatus?.isPlaying);
-  const previewDur = (previewStatus?.duration && previewStatus.duration > 0)
-    ? previewStatus.duration
-    : durationMs / 1000;
-  const previewCur = previewStatus?.currentTime || 0;
-  const previewProgress = previewDur > 0 ? Math.min(1, previewCur / previewDur) : 0;
-
-  const togglePreview = useCallback(() => {
-    if (!previewPlayer) return;
-    if (previewPlaying) previewPlayer.pause();
-    else { previewPlayer.seekTo(0); previewPlayer.play(); }
-  }, [previewPlayer, previewPlaying]);
-
-  // ─── 重新录制 ───
+  // ─── 试听与重录（拆到 PreviewPanel 子组件中，仅在有录音时才创建
+  //     AudioPlayer，避免空 Player 常驻抢占 AudioSession 导致录音无法启动）───
   const reRecord = useCallback(() => {
-    try { if (previewPlayer) previewPlayer.pause(); } catch (e) {}
     setRecordedUri(null);
     setDurationMs(0);
     setWaveform([]);
     setLiveSamples([]);
     samplesRef.current = [];
-  }, [previewPlayer]);
+  }, []);
 
   // ─── 发送 ───
   const handleSend = useCallback(async () => {
@@ -581,59 +585,14 @@ function RecordScene({ userId, partnerId, reduceMotion, onSent, onError }) {
       )}
 
       {recordedUri && !sendAnimRunning && (
-        <View style={recStyles.previewWrap}>
-          <Text style={recStyles.title}>试听这段声音</Text>
-          <Text style={recStyles.sub}>满意就发送，不满意可以重录</Text>
-
-          <View style={recStyles.envelope}>
-            <View style={recStyles.flap} />
-            <View style={recStyles.seal}>
-              <Ionicons name="volume-medium-outline" size={24} color="#FFFFFF" />
-            </View>
-            <View style={recStyles.previewBody}>
-              <VoiceWaveform
-                points={waveform}
-                progress={previewProgress}
-                playing={previewPlaying}
-                height={56}
-              />
-              <View style={recStyles.progressTrack}>
-                <View style={[recStyles.progressFill, { width: `${previewProgress * 100}%` }]} />
-              </View>
-              <View style={recStyles.timeRow}>
-                <Text style={recStyles.timeText}>{fmt(previewCur * 1000)}</Text>
-                <Text style={recStyles.timeText}>{fmt(durationMs)}</Text>
-              </View>
-              <TouchableOpacity
-                style={recStyles.playBtn}
-                onPress={togglePreview}
-                activeOpacity={0.8}
-                accessibilityRole="button"
-                accessibilityLabel={previewPlaying ? '暂停试听' : '播放试听'}
-              >
-                <Ionicons name={previewPlaying ? 'pause' : 'play'} size={20} color="#FFFFFF" />
-                <Text style={recStyles.playBtnText}>{previewPlaying ? '暂停' : '试听'}</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-
-          <View style={recStyles.actionRow}>
-            <Button variant="secondary" size="medium" onPress={reRecord} iconLeft="refresh-outline">
-              重录
-            </Button>
-            <Button
-              variant="primary"
-              size="medium"
-              onPress={handleSend}
-              loading={sending}
-              disabled={sending}
-              iconRight="send-outline"
-              style={{ flex: 1, marginLeft: spacing[2] }}
-            >
-              {sending ? '发送中…' : '发送'}
-            </Button>
-          </View>
-        </View>
+        <PreviewPanel
+          recordedUri={recordedUri}
+          durationMs={durationMs}
+          waveform={waveform}
+          sending={sending}
+          onReRecord={reRecord}
+          onSend={handleSend}
+        />
       )}
 
       {sendAnimRunning && (
@@ -650,6 +609,90 @@ function RecordScene({ userId, partnerId, reduceMotion, onSent, onError }) {
           </Animated.View>
         </View>
       )}
+    </View>
+  );
+}
+
+// ═══════════════════════════════════════════════════════
+// 试听面板（独立子组件：仅在录制完成后挂载，
+// 此时才创建 AudioPlayer，录音阶段不再有 Player 抢占 AudioSession）
+// ═══════════════════════════════════════════════════════
+function PreviewPanel({ recordedUri, durationMs, waveform, sending, onReRecord, onSend }) {
+  const previewPlayer = useAudioPlayer({ uri: recordedUri }, { updateInterval: 100 });
+  const previewStatus = useAudioPlayerStatus(previewPlayer);
+  const previewPlaying = !!(previewStatus?.playing ?? previewStatus?.isPlaying);
+  const previewDur = (previewStatus?.duration && previewStatus.duration > 0)
+    ? previewStatus.duration
+    : durationMs / 1000;
+  const previewCur = previewStatus?.currentTime || 0;
+  const previewProgress = previewDur > 0 ? Math.min(1, previewCur / previewDur) : 0;
+
+  const togglePreview = useCallback(() => {
+    if (!previewPlayer) return;
+    if (previewPlaying) previewPlayer.pause();
+    else { previewPlayer.seekTo(0); previewPlayer.play(); }
+  }, [previewPlayer, previewPlaying]);
+
+  const fmt = (ms) => {
+    const sec = Math.max(0, Math.floor((ms || 0) / 1000));
+    const m = Math.floor(sec / 60);
+    const r = sec % 60;
+    return `${m}:${r.toString().padStart(2, '0')}`;
+  };
+
+  return (
+    <View style={recStyles.previewWrap}>
+      <Text style={recStyles.title}>试听这段声音</Text>
+      <Text style={recStyles.sub}>满意就发送，不满意可以重录</Text>
+
+      <View style={recStyles.envelope}>
+        <View style={recStyles.flap} />
+        <View style={recStyles.seal}>
+          <Ionicons name="volume-medium-outline" size={24} color="#FFFFFF" />
+        </View>
+        <View style={recStyles.previewBody}>
+          <VoiceWaveform
+            points={waveform}
+            progress={previewProgress}
+            playing={previewPlaying}
+            height={56}
+          />
+          <View style={recStyles.progressTrack}>
+            <View style={[recStyles.progressFill, { width: `${previewProgress * 100}%` }]} />
+          </View>
+          <View style={recStyles.timeRow}>
+            <Text style={recStyles.timeText}>{fmt(previewCur * 1000)}</Text>
+            <Text style={recStyles.timeText}>{fmt(durationMs)}</Text>
+          </View>
+          <TouchableOpacity
+            style={recStyles.playBtn}
+            onPress={togglePreview}
+            activeOpacity={0.8}
+            accessibilityRole="button"
+            accessibilityLabel={previewPlaying ? '暂停试听' : '播放试听'}
+          >
+            <Ionicons name={previewPlaying ? 'pause' : 'play'} size={20} color="#FFFFFF" />
+            <Text style={recStyles.playBtnText}>{previewPlaying ? '暂停' : '试听'}</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      <View style={recStyles.actionRow}>
+        <Button variant="secondary" size="medium" onPress={onReRecord} iconLeft="refresh-outline">
+          重录
+        </Button>
+        <Button
+          variant="primary"
+          size="medium"
+          onPress={onSend}
+          loading={sending}
+          disabled={sending}
+          iconRight="send-outline"
+          style={{ flex: 1, marginLeft: spacing[2] }}
+        >
+          {sending ? '发送中…' : '发送'}
+        </Button>
+      </View>
     </View>
   );
 }

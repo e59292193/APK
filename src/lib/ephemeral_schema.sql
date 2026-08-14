@@ -155,9 +155,11 @@ BEGIN
   END IF;
 
   v_token := gen_random_uuid();
+  -- 注意：WHERE 必须用表名限定 id，否则与 RETURNS TABLE 的 OUT 参数 id
+  -- 产生 42702 ambiguous column reference 错误（前端表现为“网络开小差”）
   UPDATE ephemeral_notes
     SET status = 'claimed', claimed_at = now(), claim_token = v_token
-    WHERE id = v_id
+    WHERE ephemeral_notes.id = v_id
     RETURNING * INTO v_row;
 
   RETURN QUERY
@@ -216,9 +218,10 @@ BEGIN
   END IF;
 
   v_token := gen_random_uuid();
+  -- 同上：表名限定 id，避免与 OUT 参数 id 歧义（42702）
   UPDATE ephemeral_voice_messages
     SET status = 'claimed', claimed_at = now(), claim_token = v_token
-    WHERE id = v_id
+    WHERE ephemeral_voice_messages.id = v_id
     RETURNING * INTO v_row;
 
   RETURN QUERY

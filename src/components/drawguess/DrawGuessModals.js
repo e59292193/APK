@@ -10,6 +10,7 @@ import React, { memo } from 'react';
 import {
   ActivityIndicator,
   Dimensions,
+  KeyboardAvoidingView,
   Modal,
   Pressable,
   ScrollView,
@@ -203,7 +204,8 @@ export const CustomWordsModal = memo(function CustomWordsModal({
 
   return (
     <Modal visible transparent animationType="slide" onRequestClose={onClose}>
-      <View style={styles.sheetBackdrop}>
+      {/* edge-to-edge 下 Android 键盘会盖住底 sheet，需 KAV 显式上推 */}
+      <KeyboardAvoidingView style={styles.sheetBackdrop} behavior="padding">
         <View style={styles.sheet}>
           <View style={styles.sheetHeader}>
             <Text style={styles.sheetTitle}>我的私房词库</Text>
@@ -262,7 +264,7 @@ export const CustomWordsModal = memo(function CustomWordsModal({
             </ScrollView>
           )}
         </View>
-      </View>
+      </KeyboardAvoidingView>
     </Modal>
   );
 });

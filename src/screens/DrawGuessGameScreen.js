@@ -4,7 +4,6 @@ import {
   Alert,
   Dimensions,
   KeyboardAvoidingView,
-  Platform,
   ScrollView,
   StatusBar,
   StyleSheet,
@@ -19,6 +18,7 @@ import DrawCanvas from '../components/drawguess/DrawCanvas';
 import {
   FeedOverlay,
   GuessBar,
+  GuessHistory,
   HeaderActions,
   Toolbar,
   WordBar,
@@ -292,7 +292,8 @@ export default function DrawGuessGameScreen({ gameId, userId, onBack }) {
       <StatusBar barStyle="dark-content" backgroundColor={C.background} />
       <KeyboardAvoidingView
         style={styles.flex}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        // 新架构 edge-to-edge 下 Android adjustResize 失效，必须显式 padding
+        behavior="padding"
         keyboardVerticalOffset={0}
       >
         <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
@@ -338,6 +339,9 @@ export default function DrawGuessGameScreen({ gameId, userId, onBack }) {
                   </View>
                 ) : null}
               </DrawCanvas>
+
+              {/* 本轮猜词记录：画画方也能看到对方猜过的词（错误=深色，正确=绿色） */}
+              <GuessHistory items={session.guesses} />
 
               {session.isDrawer ? (
                 <>

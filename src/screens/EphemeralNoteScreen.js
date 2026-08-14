@@ -121,6 +121,7 @@ export default function EphemeralNoteScreen({ userId, onBack }) {
         setDrawState('revealing');
       }
     } catch (e) {
+      console.warn('[ephemeral] 抽取纸条失败:', e && (e.code || e.message || e));
       if (mountedRef.current) {
         setErrorMsg('网络开小差了，稍后再试');
         setDrawState('error');
