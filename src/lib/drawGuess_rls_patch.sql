@@ -1,13 +1,16 @@
--- 你画我猜：自定义词库 RLS 修复补丁
+-- 你画我猜：已有数据库 v2 补丁
+-- Supabase SQL Editor 中执行一次；脚本可重复执行。
 --
--- 背景：应用使用 Supabase anon key + 自定义昵称（momo / 苞米），没有 Supabase Auth 会话。
--- 原策略使用 auth.uid() = user_id：auth.uid() 始终为 NULL，且 uuid 与 varchar 类型也不匹配，
--- 因而所有自定义词的查询、添加和删除都会被 RLS 拒绝。
---
--- 请在 Supabase SQL Editor 中执行一次。脚本可重复执行。
--- 数据隔离由客户端始终按 user_id 过滤；这是当前双人私密应用的既有信任模型。
+-- 修复内容：
+--   1. 补 deadline_at，双方倒计时与提示加时使用同一数据库时间；
+--   2. 修复 anon 会话下私房词库全部被 RLS 拒绝的问题；
+--   3. 清理历史重复画作并建立 (game_id, round) 唯一索引；
+--   4. 清理一天前的可靠信号，避免轮询表无限增长。
 
 BEGIN;
+
+ALTER TABLE public.drawguess_games
+  ADD COLUMN IF NOT EXISTS deadline_at timestamptz;
 
 ALTER TABLE public.drawguess_custom_words ENABLE ROW LEVEL SECURITY;
 
@@ -22,6 +25,8 @@ DROP POLICY IF EXISTS "drawguess_custom_words_update"
 DROP POLICY IF EXISTS "drawguess_custom_words_delete"
   ON public.drawguess_custom_words;
 
+-- 应用使用 anon key + 应用内昵称，并没有 Supabase Auth 会话。
+-- auth.uid() 在这里恒为 NULL，且不能与 varchar user_id 比较。
 CREATE POLICY "Allow all on drawguess_custom_words"
   ON public.drawguess_custom_words
   FOR ALL
@@ -29,11 +34,29 @@ CREATE POLICY "Allow all on drawguess_custom_words"
   USING (true)
   WITH CHECK (true);
 
--- 为高频的“读取自己的词库”补索引。
 CREATE INDEX IF NOT EXISTS idx_drawguess_custom_words_user_created
   ON public.drawguess_custom_words (user_id, created_at DESC);
 
--- 信号只承担短期可靠投递；删除一天前的数据，避免表无限增长拖慢轮询。
+-- 双方曾可能同时保存同一轮。保留最早一条，再由唯一索引从数据库层防重。
+WITH ranked AS (
+  SELECT
+    id,
+    row_number() OVER (
+      PARTITION BY game_id, round
+      ORDER BY created_at ASC, id ASC
+    ) AS duplicate_rank
+  FROM public.drawguess_gallery
+  WHERE round IS NOT NULL
+)
+DELETE FROM public.drawguess_gallery AS gallery
+USING ranked
+WHERE gallery.id = ranked.id
+  AND ranked.duplicate_rank > 1;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_drawguess_gallery_game_round
+  ON public.drawguess_gallery (game_id, round)
+  WHERE round IS NOT NULL;
+
 DELETE FROM public.drawguess_signals
 WHERE created_at < now() - interval '1 day';
 
