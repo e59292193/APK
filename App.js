@@ -22,8 +22,7 @@ import { Button, AppInput } from './src/components/ui';
 import { colors, typography, spacing, radius } from './src/theme';
 import { lazyScreen } from './src/lib/lazyScreen';
 
-// 屏幕模块都在真正挂载后的 effect 中求值。登录页不再提前执行十余个大屏幕
-// 及其 SVG、图片、数据库和 IM 依赖，显著缩短冷启动 JS 阻塞时间。
+// loader 仅在页面第一次实际渲染时执行；未访问页面不会参与冷启动模块求值。
 const TimeCapsuleScreen = lazyScreen(() => require('./src/screens/TimeCapsuleScreen'));
 const WishlistScreen = lazyScreen(() => require('./src/screens/WishlistScreen'));
 const TravelDiaryScreen = lazyScreen(() => require('./src/screens/TravelDiaryScreen'));
@@ -97,7 +96,10 @@ function LoginScreen({ onLogin }) {
               label="昵称"
               placeholder="输入你的昵称"
               value={nickname}
-              onChangeText={(value) => { setNickname(value); setErrorMsg(''); }}
+              onChangeText={(value) => {
+                setNickname(value);
+                setErrorMsg('');
+              }}
               autoCapitalize="none"
               autoCorrect={false}
             />
@@ -105,7 +107,10 @@ function LoginScreen({ onLogin }) {
               label="密码"
               placeholder="输入密码"
               value={password}
-              onChangeText={(value) => { setPassword(value); setErrorMsg(''); }}
+              onChangeText={(value) => {
+                setPassword(value);
+                setErrorMsg('');
+              }}
               secureTextEntry
               returnKeyType="go"
               onSubmitEditing={handleLogin}
@@ -217,11 +222,15 @@ function MainApp() {
         }
       })
       .catch((error) => console.warn('[App] 读取登录状态失败:', error.message))
-      .finally(() => { if (alive) setInitializing(false); });
-    return () => { alive = false; };
+      .finally(() => {
+        if (alive) setInitializing(false);
+      });
+    return () => {
+      alive = false;
+    };
   }, []);
 
-  // 首帧和主导航先完成，300ms 后再求值并初始化网络重模块。
+  // 先完成首帧和主导航，随后再初始化网络重模块。
   useEffect(() => {
     if (!isLoggedIn || !userId) return undefined;
     let cancelled = false;
@@ -274,7 +283,7 @@ function MainApp() {
           try {
             const { disconnectSignal } = require('./src/lib/realtimeSignal');
             await disconnectSignal();
-          } catch (e) {
+          } catch (error) {
             // IM 可能尚未加载，不影响退出。
           }
           await AsyncStorage.removeItem('user_id');
@@ -292,12 +301,17 @@ function MainApp() {
   const openFullscreen = useCallback((screen, params) => {
     setFullscreenPage({ screen, params: params || {} });
   }, []);
+
   const closeFullscreen = useCallback(() => {
     setFullscreenPage(null);
     setChatRefreshTrigger((value) => value + 1);
   }, []);
+
   const backToList = useCallback(() => openFullscreen('CheckinList'), [openFullscreen]);
-  const backToDetail = useCallback((theme) => openFullscreen('CheckinDetail', { theme }), [openFullscreen]);
+  const backToDetail = useCallback(
+    (theme) => openFullscreen('CheckinDetail', { theme }),
+    [openFullscreen]
+  );
 
   if (initializing) {
     return (
@@ -307,14 +321,19 @@ function MainApp() {
       </View>
     );
   }
+
   if (!isLoggedIn) return <LoginScreen onLogin={handleLogin} />;
 
   const full = fullscreenPage;
   const params = (full && full.params) || {};
+  const fullKey = full
+    ? `${full.screen}:${params.gameId || (params.theme && params.theme.id) || 'root'}`
+    : 'none';
 
   return (
     <View style={appStyles.container}>
       <StatusBar barStyle="dark-content" backgroundColor={colors.backgroundLavender} />
+
       <View style={appStyles.screenContainer}>
         <TabPage name="Capsule" current={currentTab} mounted={mountedTabs.has('Capsule')}>
           <TimeCapsuleScreen userId={userId} onLogout={handleLogout} />
@@ -343,9 +362,24 @@ function MainApp() {
         </TabPage>
       </View>
 
+      {/* 全屏模块打开时完全卸载底部栏，避免 Android 原生层级穿透与误触。 */}
+      {!full ? (
+        <BottomTabBar
+          currentTab={currentTab}
+          onTabChange={handleTabChange}
+          unreadCount={unreadCount}
+        />
+      ) : null}
+
+      {/* 放在兄弟节点最后，并增加 elevation，确保 Android 上完整覆盖聊天页。 */}
       {full ? (
-        <View style={appStyles.fullscreenOverlay}>
-          <ErrorBoundary sessionId={`fullscreen-${full.screen}`}>
+        <View
+          key={fullKey}
+          style={appStyles.fullscreenOverlay}
+          pointerEvents="auto"
+          collapsable={false}
+        >
+          <ErrorBoundary key={fullKey} sessionId={`fullscreen-${full.screen}`}>
             {full.screen === 'CheckinList' ? (
               <CheckinListScreen
                 userId={userId}
@@ -388,8 +422,6 @@ function MainApp() {
           </ErrorBoundary>
         </View>
       ) : null}
-
-      <BottomTabBar currentTab={currentTab} onTabChange={handleTabChange} unreadCount={unreadCount} />
     </View>
   );
 }
@@ -407,37 +439,154 @@ const styles = StyleSheet.create({ flex: { flex: 1 } });
 const loginStyles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.backgroundLavender, overflow: 'hidden' },
   scroll: { flexGrow: 1, justifyContent: 'center', paddingHorizontal: spacing[5] },
-  decor1: { position: 'absolute', top: -60, right: -40, width: 200, height: 200, borderRadius: 100, backgroundColor: colors.primary[200], opacity: 0.25 },
-  decor2: { position: 'absolute', top: 120, left: -50, width: 140, height: 140, borderRadius: 70, backgroundColor: colors.mint[200], opacity: 0.2 },
-  decor3: { position: 'absolute', bottom: -30, right: -20, width: 120, height: 120, borderRadius: 60, backgroundColor: colors.primary[100], opacity: 0.4 },
+  decor1: {
+    position: 'absolute',
+    top: -60,
+    right: -40,
+    width: 200,
+    height: 200,
+    borderRadius: 100,
+    backgroundColor: colors.primary[200],
+    opacity: 0.25,
+  },
+  decor2: {
+    position: 'absolute',
+    top: 120,
+    left: -50,
+    width: 140,
+    height: 140,
+    borderRadius: 70,
+    backgroundColor: colors.mint[200],
+    opacity: 0.2,
+  },
+  decor3: {
+    position: 'absolute',
+    bottom: -30,
+    right: -20,
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    backgroundColor: colors.primary[100],
+    opacity: 0.4,
+  },
   brandSection: { alignItems: 'center', marginBottom: spacing[8] },
-  logoWrap: { width: 72, height: 72, borderRadius: 36, backgroundColor: colors.surface, alignItems: 'center', justifyContent: 'center', marginBottom: spacing[4], shadowColor: colors.shadow, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.08, shadowRadius: 12, elevation: 3 },
+  logoWrap: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: colors.surface,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: spacing[4],
+    shadowColor: colors.shadow,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 12,
+    elevation: 3,
+  },
   brandTitle: { ...typography.display, color: colors.textPrimary },
   brandSubtitle: { ...typography.body, color: colors.textSecondary, marginTop: spacing[1] },
-  formCard: { backgroundColor: colors.surface, borderRadius: radius.xl, padding: spacing[5], shadowColor: colors.shadow, shadowOffset: { width: 0, height: 6 }, shadowOpacity: 0.08, shadowRadius: 16, elevation: 4 },
-  formTitle: { ...typography.sectionTitle, color: colors.textPrimary, textAlign: 'center', marginBottom: spacing[4] },
-  errorRow: { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.errorSoft, borderRadius: radius.sm, paddingHorizontal: spacing[3], paddingVertical: spacing[2], marginBottom: spacing[2] },
+  formCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.xl,
+    padding: spacing[5],
+    shadowColor: colors.shadow,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.08,
+    shadowRadius: 16,
+    elevation: 4,
+  },
+  formTitle: {
+    ...typography.sectionTitle,
+    color: colors.textPrimary,
+    textAlign: 'center',
+    marginBottom: spacing[4],
+  },
+  errorRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.errorSoft,
+    borderRadius: radius.sm,
+    paddingHorizontal: spacing[3],
+    paddingVertical: spacing[2],
+    marginBottom: spacing[2],
+  },
   errorText: { ...typography.caption, color: colors.error, marginLeft: spacing[2] },
-  hintText: { ...typography.caption, textAlign: 'center', marginTop: spacing[4], color: colors.textMuted },
+  hintText: {
+    ...typography.caption,
+    textAlign: 'center',
+    marginTop: spacing[4],
+    color: colors.textMuted,
+  },
 });
 
 const tabStyles = StyleSheet.create({
-  container: { flexDirection: 'row', backgroundColor: colors.surface, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border, paddingTop: 6 },
+  container: {
+    flexDirection: 'row',
+    backgroundColor: colors.surface,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.border,
+    paddingTop: 6,
+  },
   item: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 4 },
-  iconWrap: { width: 44, height: 32, alignItems: 'center', justifyContent: 'center', borderRadius: radius.pill, position: 'relative' },
+  iconWrap: {
+    width: 44,
+    height: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: radius.pill,
+    position: 'relative',
+  },
   iconWrapActive: { backgroundColor: colors.primary[100] },
-  badge: { position: 'absolute', top: -2, right: 2, minWidth: 18, height: 18, borderRadius: 9, backgroundColor: colors.error, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 4, borderWidth: 1.5, borderColor: colors.surface },
+  badge: {
+    position: 'absolute',
+    top: -2,
+    right: 2,
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: colors.error,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 4,
+    borderWidth: 1.5,
+    borderColor: colors.surface,
+  },
   badgeText: { color: '#FFFFFF', fontSize: 10, fontWeight: '700' },
   label: { ...typography.tabLabel, color: colors.textMuted, marginTop: 3 },
   labelActive: { color: colors.primaryAction, fontWeight: '600' },
 });
 
 const appStyles = StyleSheet.create({
-  initContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: colors.background },
-  container: { flex: 1, backgroundColor: colors.background },
-  screenContainer: { flex: 1 },
+  initContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: colors.background,
+  },
+  container: { flex: 1, backgroundColor: colors.background, position: 'relative' },
+  screenContainer: { flex: 1, position: 'relative' },
   screenPage: { flex: 1 },
   screenVisible: { opacity: 1 },
-  screenHidden: { position: 'absolute', top: 0, left: -10000, width: '100%', height: '100%', opacity: 0 },
-  fullscreenOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: colors.background, zIndex: 100 },
+  screenHidden: {
+    position: 'absolute',
+    top: 0,
+    left: -10000,
+    width: '100%',
+    height: '100%',
+    opacity: 0,
+  },
+  fullscreenOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    width: '100%',
+    height: '100%',
+    backgroundColor: colors.background,
+    overflow: 'hidden',
+    zIndex: 1000,
+    elevation: 1000,
+  },
 });
