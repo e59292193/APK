@@ -1,7 +1,7 @@
 -- ═══════════════════════════════════════════════════════
 -- 你画我猜 (Draw & Guess)
 -- 执行方式：Supabase Dashboard → SQL Editor → New query → 粘贴 → Run
--- 所有语句均带 IF NOT EXISTS，可重复执行
+-- 所有语句均带 IF NOT EXISTS / 异常保护，可重复执行
 -- ═══════════════════════════════════════════════════════
 
 -- 1. 对局表 ────────────────────────────────────────────
@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS drawguess_games (
   winner varchar,                         -- 本轮结果：null/'win'/'timeout'/'gaveup'
   hint varchar,                           -- 画题人给出的文字提示
   started_at timestamptz,                 -- 进入画画阶段的时间
+  deadline_at timestamptz,                -- 本轮作画截止时间（提示加时会刷新它，双端据此同步倒计时）
   finished_at timestamptz,                -- 全部 6 轮结束时间
   duration_sec int,                       -- 本轮猜中用时（秒）
   rematch_request_by varchar,
@@ -52,6 +53,10 @@ BEGIN
   END IF;
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'drawguess_games' AND column_name = 'round_results') THEN
     ALTER TABLE drawguess_games ADD COLUMN round_results jsonb NOT NULL DEFAULT '[]'::jsonb;
+  END IF;
+  -- v2：作画截止时间（提示加时双方同步倒计时的依据）
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'drawguess_games' AND column_name = 'deadline_at') THEN
+    ALTER TABLE drawguess_games ADD COLUMN deadline_at timestamptz;
   END IF;
 END $$;
 
@@ -99,7 +104,7 @@ CREATE INDEX IF NOT EXISTS idx_drawguess_words_user ON drawguess_custom_words(us
 CREATE TABLE IF NOT EXISTS drawguess_signals (
   id bigint PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
   game_id uuid NOT NULL,
-  type varchar NOT NULL,              -- 'stroke_begin'/'stroke_pts'/'stroke_end'/'danmaku'/'undo'/'clear'/'guess'
+  type varchar NOT NULL,              -- 'stroke_begin'/'stroke_pts'/'stroke_end'/'danmaku'/'undo'/'clear'/'guess'/'update'/'sync_request'/'snapshot'/'save'/'rematch'
   data jsonb NOT NULL DEFAULT '{}'::jsonb,
   sender_id varchar NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now()
@@ -117,7 +122,16 @@ END $$;
 
 -- 启用 Realtime（WebSocket 实时推送 INSERT 事件，让笔画同步丝滑无延迟）
 -- 将 drawguess_signals 表加入 supabase_realtime publication
-ALTER PUBLICATION supabase_realtime ADD TABLE drawguess_signals;
+-- 注意：重复执行 ALTER PUBLICATION ... ADD TABLE 会报 duplicate_object，这里加保护
+DO $$
+BEGIN
+  BEGIN
+    ALTER PUBLICATION supabase_realtime ADD TABLE drawguess_signals;
+  EXCEPTION
+    WHEN duplicate_object THEN NULL;
+    WHEN undefined_object THEN NULL; -- publication 不存在时忽略（本地/测试环境）
+  END;
+END $$;
 
 -- 4. 统计快照表（轻量统计：总局数/猜中数/最快记录）──────
 CREATE TABLE IF NOT EXISTS drawguess_stats (
@@ -152,3 +166,6 @@ BEGIN
     CREATE POLICY "Allow all on drawguess_stats" ON drawguess_stats FOR ALL USING (true) WITH CHECK (true);
   END IF;
 END $$;
+
+-- 6. （可选）定期清理 1 天前的历史信号，防止 signals 表无限增长：
+-- DELETE FROM drawguess_signals WHERE created_at < now() - interval '1 day';
