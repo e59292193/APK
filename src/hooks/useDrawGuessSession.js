@@ -1,29 +1,3 @@
-// ══════════════════════════════════════════════════════════
-// useDrawGuessSession —— 你画我猜 对局核心逻辑
-//
-// 把原来堆在 DrawGuessGameScreen 里的 1700 行状态机搬到这里，并修掉：
-//
-// 【同步类】
-//  1. IM + DB 双通道重复投递 → 所有信号带 uid 全局去重（撤销/清空不再双执行）
-//  2. stroke_pts 早于 stroke_begin 到达被丢弃 → 乱序缓冲后按序重组
-//  3. stroke_end 丢包导致整笔消失 → 下一笔 begin 时自动给上一笔收尾
-//  4. 绝对像素坐标在不同机型偏移 → 统一相对坐标（0~1）传输
-//  5. 中途进入看不到已画内容 → sync_request / snapshot 整幅补齐
-//  6. 自己的信号被自己处理 → sender_id + from 双重过滤
-//  7. 首次进入会重放整局历史笔画 → 首轮拉取只对齐游标（prime）
-//
-// 【逻辑类】
-//  8. 双方同时结算导致轮次跳 2 轮、round_results 重复 → 全部走条件更新
-//  9. 倒计时双端不一致、提示加时对方看不到 → 统一以 DB deadline_at 为准
-// 10. 画题人掉线本轮永远卡住 → 猜题人在宽限期后接手结算
-// 11. 轮询旧数据覆盖新状态 → applyRow 带状态戳，旧状态直接丢弃
-// 12. 轮次切换后画布残留上一轮笔画 → applyRow 统一 resetBoard
-//
-// 【性能类】
-// 13. 每个点一次 DB insert → 出站信号 220ms 批量合并，抬手立即 flush
-// 14. 固定 1.2s / 2s 轮询 → 按状态自适应，切到后台完全停轮询
-// 15. 手指每动一下都 setState 全量重绘 → 点抽稀 + 实时笔独立图层
-// ══════════════════════════════════════════════════════════
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { AppState, PanResponder } from 'react-native';
 import { emitSignal, onSignal } from '../lib/realtimeSignal';
@@ -45,6 +19,17 @@ export const SIZES = [3, 6, 11];
 export const ERASER_WIDTH = 20;
 
 const STATUS_RANK = { waiting: 0, picking: 1, drawing: 2, finished: 3 };
+const ROUND_SCOPED = new Set([
+  'stroke_begin',
+  'stroke_pts',
+  'stroke_end',
+  'undo',
+  'clear',
+  'danmaku',
+  'guess',
+  'sync_request',
+  'snapshot',
+]);
 const GAME_POLL_ACTIVE = 2500;
 const GAME_POLL_IDLE = 6000;
 const SIGNAL_POLL_DRAWING = 900;
@@ -69,14 +54,51 @@ function stateStamp(row) {
   return (row.round || 0) * 10 + rank;
 }
 
-function clamp(v, min, max) {
-  if (v < min) return min;
-  if (v > max) return max;
-  return v;
+function clamp(value, min, max) {
+  if (value < min) return min;
+  if (value > max) return max;
+  return value;
 }
 
 function wordsOf(list) {
-  return (list || []).map((w) => (typeof w === 'string' ? w : w && w.word)).filter(Boolean);
+  return (list || [])
+    .map((item) => (typeof item === 'string' ? item : item && item.word))
+    .filter(Boolean);
+}
+
+function laterIso(a, b) {
+  const aMs = a ? new Date(a).getTime() : 0;
+  const bMs = b ? new Date(b).getTime() : 0;
+  if (!Number.isFinite(aMs)) return b;
+  if (!Number.isFinite(bMs)) return a;
+  return aMs >= bMs ? a : b;
+}
+
+// 同轮同阶段没有 updated_at 可比较，合并不可逆字段，避免迟到的旧轮询行抹掉提示、
+// 加时、战绩或再来一局编号。跨阶段则仍由 stateStamp 严格裁决。
+function mergeSameStage(previous, incoming) {
+  if (
+    !previous ||
+    !incoming ||
+    previous.id !== incoming.id ||
+    previous.round !== incoming.round ||
+    previous.status !== incoming.status
+  ) {
+    return incoming;
+  }
+  const next = { ...incoming };
+  if (incoming.status === 'drawing') {
+    next.word = incoming.word || previous.word;
+    next.started_at = incoming.started_at || previous.started_at;
+    next.hint = incoming.hint || previous.hint;
+    next.deadline_at = laterIso(previous.deadline_at, incoming.deadline_at);
+  }
+  const oldResults = Array.isArray(previous.round_results) ? previous.round_results : [];
+  const newResults = Array.isArray(incoming.round_results) ? incoming.round_results : [];
+  if (oldResults.length > newResults.length) next.round_results = oldResults;
+  next.rematch_game_id = incoming.rematch_game_id || previous.rematch_game_id;
+  next.rematch_request_by = incoming.rematch_request_by || previous.rematch_request_by;
+  return next;
 }
 
 export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
@@ -126,26 +148,24 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
 
   toolRef.current = tool;
   customWordsRef.current = customWords;
-
   if (!dedupeRef.current) dedupeRef.current = sync.createDedupe(1500);
 
   if (!assemblerRef.current) {
     assemblerRef.current = sync.createStrokeAssembler({
       width: size,
       height: size,
-      onLive: (s) => {
-        if (mountedRef.current) setRemoteStroke(s);
+      onLive: (stroke) => {
+        if (mountedRef.current) setRemoteStroke(stroke);
       },
-      onComplete: (s) => {
+      onComplete: (stroke) => {
         if (!mountedRef.current) return;
-        const next = strokesRef.current.concat([s]);
+        const next = strokesRef.current.concat([stroke]);
         strokesRef.current = next;
         setStrokes(next);
       },
     });
   }
 
-  // ─────────────── 小工具 ───────────────
   function showToast(text, kind) {
     if (!mountedRef.current) return;
     setToast({ text, kind: kind || 'info' });
@@ -156,12 +176,14 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
   }
 
   function pushFeed(item) {
-    if (!mountedRef.current) return;
+    if (!mountedRef.current || !item || !item.text) return;
     feedIdRef.current += 1;
-    const entry = Object.assign({ id: feedIdRef.current }, item);
-    setFeed((prev) => prev.slice(-5).concat([entry]));
+    const entry = { id: feedIdRef.current, ...item };
+    setFeed((previous) => previous.slice(-5).concat([entry]));
     setTimeout(() => {
-      if (mountedRef.current) setFeed((prev) => prev.filter((f) => f.id !== entry.id));
+      if (mountedRef.current) {
+        setFeed((previous) => previous.filter((value) => value.id !== entry.id));
+      }
     }, FEED_TTL);
   }
 
@@ -170,76 +192,109 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
     if (mountedRef.current) setStrokes(next);
   }
 
+  function discardPendingSignals() {
+    if (ptsTimerRef.current) clearTimeout(ptsTimerRef.current);
+    if (outboxTimerRef.current) clearTimeout(outboxTimerRef.current);
+    ptsTimerRef.current = null;
+    outboxTimerRef.current = null;
+    ptsRef.current = { si: null, flat: [] };
+    outboxRef.current = [];
+  }
+
   function resetBoard() {
     setStrokeList([]);
     liveRef.current = null;
     strokeIdRef.current = null;
     lastPointRef.current = null;
     ptsRef.current = { si: null, flat: [] };
-    if (mountedRef.current) setLiveStroke(null);
+    if (mountedRef.current) {
+      setLiveStroke(null);
+      setRemoteStroke(null);
+    }
     if (assemblerRef.current) assemblerRef.current.reset();
   }
 
-  // ─────────────── 状态应用（唯一入口） ───────────────
-  function applyRow(row, opts) {
-    if (!row || !mountedRef.current) return;
-    const prev = gameRef.current;
+  function applyRow(rawRow, opts) {
+    if (!rawRow || !mountedRef.current) return;
+    const previous = gameRef.current;
     const force = !!(opts && opts.force);
+    if (
+      previous &&
+      previous.id === rawRow.id &&
+      !force &&
+      stateStamp(rawRow) < stateStamp(previous)
+    ) {
+      return;
+    }
 
-    // 过期数据保护：轮询/信号乱序时，旧状态不许覆盖新状态
-    if (prev && prev.id === row.id && !force && stateStamp(row) < stateStamp(prev)) return;
+    const row = force ? rawRow : mergeSameStage(previous, rawRow);
+    const roundChanged = !previous || previous.id !== row.id || previous.round !== row.round;
+    const leftDrawing = !!previous && previous.status === 'drawing' && row.status !== 'drawing';
+    const enteredDrawing = !!previous && previous.status !== 'drawing' && row.status === 'drawing';
 
-    const roundChanged = !prev || prev.id !== row.id || prev.round !== row.round;
-    const leftDrawing = !!prev && prev.status === 'drawing' && row.status !== 'drawing';
-
-    // 轮结束时先把画留个快照，方便结算后再补存到画廊
-    if (prev && (roundChanged || leftDrawing) && strokesRef.current.length > 0) {
+    if (previous && (roundChanged || leftDrawing) && strokesRef.current.length > 0) {
       snapshotRef.current = {
-        gameId: prev.id,
-        round: prev.round,
-        word: prev.word,
+        gameId: previous.id,
+        round: previous.round,
+        word: previous.word,
         strokes: strokesRef.current,
-        drawerId: prev.current_drawer === 'creator' ? prev.creator_id : prev.invitee_id,
-        guesserId: prev.current_drawer === 'creator' ? prev.invitee_id : prev.creator_id,
+        drawerId:
+          previous.current_drawer === 'creator' ? previous.creator_id : previous.invitee_id,
+        guesserId:
+          previous.current_drawer === 'creator' ? previous.invitee_id : previous.creator_id,
       };
     }
 
-    if (roundChanged || (prev && prev.status !== 'drawing' && row.status === 'drawing')) {
+    if (roundChanged || enteredDrawing) {
+      discardPendingSignals();
       resetBoard();
       setPartnerSavedRound(null);
       setChoiceOverride(null);
     }
 
-    // 本轮结果提示
-    if (prev && prev.status === 'drawing' && row.status !== 'drawing') {
+    if (previous && previous.status === 'drawing' && row.status !== 'drawing') {
       const results = Array.isArray(row.round_results) ? row.round_results : [];
-      const hit = results.find((r) => r && r.round === prev.round);
-      const word = (hit && hit.word) || prev.word || '';
-      if (hit && hit.winner === 'win') showToast('猜中了！答案是「' + word + '」', 'win');
-      else if (hit && hit.winner === 'gaveup') showToast('本轮答案是「' + word + '」', 'info');
-      else if (hit) showToast('时间到，答案是「' + word + '」', 'warn');
+      const result = results.find((item) => item && item.round === previous.round);
+      const word = (result && result.word) || previous.word || '';
+      if (result && result.winner === 'win') {
+        showToast('猜中了！答案是「' + word + '」', 'win');
+      } else if (result && result.winner === 'gaveup') {
+        showToast('本轮答案是「' + word + '」', 'info');
+      } else if (result) {
+        showToast('时间到，答案是「' + word + '」', 'warn');
+      }
     }
 
     gameRef.current = row;
     setGame(row);
     canDrawRef.current = row.status === 'drawing' && isDrawerOf(row, userId);
-
-    if (row.rematch_game_id && row.rematch_request_by && row.rematch_request_by !== userId) {
+    if (row.rematch_game_id && row.rematch_request_by !== userId) {
       setPendingRematchId(row.rematch_game_id);
     }
   }
 
-  // ─────────────── 信号收发 ───────────────
   function sendSignal(type, data, opts) {
     const gid = activeIdRef.current;
     if (!gid) return null;
-    const o = opts || {};
-    const payload = Object.assign({ type, uid: sync.makeUid(userId), from: userId }, data || {});
-    if (!o.dbOnly) emitSignal('dg:' + gid, payload);
-    if (o.batch) {
+    const current = gameRef.current;
+    const options = opts || {};
+    const payload = Object.assign(
+      {
+        type,
+        uid: sync.makeUid(userId),
+        from: userId,
+        r: current && current.id === gid ? current.round : null,
+      },
+      data || {}
+    );
+    if (!options.dbOnly) emitSignal('dg:' + gid, payload);
+    if (options.batch) {
       outboxRef.current.push({ type, data: payload });
       if (!outboxTimerRef.current) {
-        outboxTimerRef.current = setTimeout(() => apiRef.current.flushOutbox(), OUTBOX_FLUSH_MS);
+        outboxTimerRef.current = setTimeout(
+          () => apiRef.current.flushOutbox(),
+          OUTBOX_FLUSH_MS
+        );
       }
     } else {
       pushSignal(gid, type, payload, userId);
@@ -248,15 +303,12 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
   }
 
   function flushOutbox() {
-    if (outboxTimerRef.current) {
-      clearTimeout(outboxTimerRef.current);
-      outboxTimerRef.current = null;
-    }
+    if (outboxTimerRef.current) clearTimeout(outboxTimerRef.current);
+    outboxTimerRef.current = null;
     const gid = activeIdRef.current;
     const items = outboxRef.current;
-    if (!gid || items.length === 0) return;
     outboxRef.current = [];
-    pushSignals(gid, items, userId);
+    if (gid && items.length > 0) pushSignals(gid, items, userId);
   }
 
   function broadcastRow(row) {
@@ -264,32 +316,42 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
   }
 
   function replySnapshot(round) {
-    const g = gameRef.current;
-    if (!g || g.status !== 'drawing') return;
-    if (!isDrawerOf(g, userId)) return;
-    if (round && round !== g.round) return;
+    const current = gameRef.current;
+    if (!current || current.status !== 'drawing' || !isDrawerOf(current, userId)) return;
+    if (round && Number(round) !== Number(current.round)) return;
     sendSignal(
       'snapshot',
-      { round: g.round, s: sync.encodeStrokes(strokesRef.current, size, size) },
+      {
+        round: current.round,
+        r: current.round,
+        s: sync.encodeStrokes(strokesRef.current, size, size),
+      },
       { dbOnly: true }
     );
   }
 
-  function handleSignal(sig) {
-    if (!sig || !sig.type) return;
-    if (sig.from && sig.from === userId) return;
-    if (!dedupeRef.current.accept(sig.uid)) return;
-    const asm = assemblerRef.current;
+  function handleSignal(signal) {
+    if (!signal || !signal.type) return;
+    if (signal.from && signal.from === userId) return;
 
-    switch (sig.type) {
+    const current = gameRef.current;
+    if (ROUND_SCOPED.has(signal.type)) {
+      // 先做阶段检查、后做 uid 去重。若 IM 比对局行先到，不消耗 uid，DB 副本仍可补上。
+      if (!current || current.status !== 'drawing') return;
+      if (signal.r != null && Number(signal.r) !== Number(current.round)) return;
+    }
+    if (!dedupeRef.current.accept(signal.uid)) return;
+
+    const assembler = assemblerRef.current;
+    switch (signal.type) {
       case 'stroke_begin':
-        asm.begin(sig.si, { c: sig.c, w: sig.w, e: sig.e, p: sig.p });
+        assembler.begin(signal.si, { c: signal.c, w: signal.w, e: signal.e, p: signal.p });
         break;
       case 'stroke_pts':
-        asm.points(sig.si, sig.p);
+        assembler.points(signal.si, signal.p);
         break;
       case 'stroke_end':
-        asm.end(sig.si);
+        assembler.end(signal.si);
         break;
       case 'undo':
         setStrokeList(strokesRef.current.slice(0, -1));
@@ -298,32 +360,35 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
         resetBoard();
         break;
       case 'danmaku':
-        pushFeed({ text: sig.text, from: sig.from, kind: 'chat' });
+        pushFeed({ text: signal.text, from: signal.from, kind: 'chat' });
         break;
       case 'guess':
-        pushFeed({ text: sig.text, from: sig.from, kind: sig.correct ? 'win' : 'guess' });
+        pushFeed({
+          text: signal.text,
+          from: signal.from,
+          kind: signal.correct ? 'win' : 'guess',
+        });
         break;
       case 'update':
-        if (sig.row) applyRow(sig.row);
+        if (signal.row) applyRow(signal.row);
         break;
       case 'sync_request':
-        replySnapshot(sig.round);
+        replySnapshot(signal.round);
         break;
       case 'snapshot': {
-        const g = gameRef.current;
-        if (!g || isDrawerOf(g, userId)) break;
-        if (sig.round && sig.round !== g.round) break;
-        const decoded = sync.decodeStrokes(sig.s, size, size);
+        if (isDrawerOf(current, userId)) break;
+        if (signal.round && Number(signal.round) !== Number(current.round)) break;
+        const decoded = sync.decodeStrokes(signal.s, size, size);
         if (decoded.length >= strokesRef.current.length) setStrokeList(decoded);
         break;
       }
       case 'save':
-        setPartnerSavedRound(sig.round || null);
+        setPartnerSavedRound(signal.round || null);
         showToast('对方把这幅画存进画廊了', 'info');
         break;
       case 'rematch':
-        if (sig.game_id) {
-          setPendingRematchId(sig.game_id);
+        if (signal.game_id) {
+          setPendingRematchId(signal.game_id);
           showToast('对方想再来一局', 'info');
         }
         break;
@@ -332,28 +397,27 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
     }
   }
 
-  // ─────────────── 画笔 ───────────────
-  function beginStroke(ne) {
+  function beginStroke(nativeEvent) {
     if (!canDrawRef.current) return;
-    const t = toolRef.current;
-    const x = clamp(ne.locationX, 0, size);
-    const y = clamp(ne.locationY, 0, size);
-    const sid = sync.makeStrokeId(userId);
+    const selected = toolRef.current;
+    const x = clamp(nativeEvent.locationX, 0, size);
+    const y = clamp(nativeEvent.locationY, 0, size);
+    const strokeId = sync.makeStrokeId(userId);
     const stroke = {
       points: [{ x, y }],
-      color: t.color,
-      width: t.isEraser ? ERASER_WIDTH : t.width,
-      isEraser: t.isEraser,
+      color: selected.color,
+      width: selected.isEraser ? ERASER_WIDTH : selected.width,
+      isEraser: selected.isEraser,
     };
-    strokeIdRef.current = sid;
+    strokeIdRef.current = strokeId;
     lastPointRef.current = { x, y };
     liveRef.current = stroke;
     setLiveStroke(stroke);
-    ptsRef.current = { si: sid, flat: [] };
+    ptsRef.current = { si: strokeId, flat: [] };
     sendSignal(
       'stroke_begin',
       {
-        si: sid,
+        si: strokeId,
         c: stroke.color,
         w: stroke.width,
         e: stroke.isEraser ? 1 : 0,
@@ -363,15 +427,15 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
     );
   }
 
-  function moveStroke(ne) {
+  function moveStroke(nativeEvent) {
     const stroke = liveRef.current;
     if (!stroke || !canDrawRef.current) return;
-    const x = clamp(ne.locationX, 0, size);
-    const y = clamp(ne.locationY, 0, size);
+    const x = clamp(nativeEvent.locationX, 0, size);
+    const y = clamp(nativeEvent.locationY, 0, size);
     if (!sync.shouldAppendPoint(lastPointRef.current, x, y, 2)) return;
     if (stroke.points.length >= MAX_STROKE_POINTS) return;
     lastPointRef.current = { x, y };
-    const next = Object.assign({}, stroke, { points: stroke.points.concat([{ x, y }]) });
+    const next = { ...stroke, points: stroke.points.concat([{ x, y }]) };
     liveRef.current = next;
     setLiveStroke(next);
     ptsRef.current.flat.push(sync.toRel(x, size), sync.toRel(y, size));
@@ -381,23 +445,21 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
   }
 
   function flushPts() {
-    if (ptsTimerRef.current) {
-      clearTimeout(ptsTimerRef.current);
-      ptsTimerRef.current = null;
-    }
-    const buf = ptsRef.current;
-    if (!buf || !buf.si || buf.flat.length === 0) return;
-    const flat = buf.flat;
-    buf.flat = [];
+    if (ptsTimerRef.current) clearTimeout(ptsTimerRef.current);
+    ptsTimerRef.current = null;
+    const buffer = ptsRef.current;
+    if (!buffer || !buffer.si || buffer.flat.length === 0) return;
+    const flat = buffer.flat;
+    buffer.flat = [];
     const chunks = sync.chunkFlatPoints(flat, 120);
-    for (let i = 0; i < chunks.length; i++) {
-      sendSignal('stroke_pts', { si: buf.si, p: chunks[i] }, { batch: true });
+    for (let index = 0; index < chunks.length; index += 1) {
+      sendSignal('stroke_pts', { si: buffer.si, p: chunks[index] }, { batch: true });
     }
   }
 
   function endStroke() {
     const stroke = liveRef.current;
-    const sid = strokeIdRef.current;
+    const strokeId = strokeIdRef.current;
     flushPts();
     liveRef.current = null;
     strokeIdRef.current = null;
@@ -406,27 +468,30 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
     if (stroke && stroke.points.length > 0) {
       setStrokeList(strokesRef.current.concat([sync.withPath(stroke)]));
     }
-    if (sid) sendSignal('stroke_end', { si: sid }, { batch: true });
+    if (strokeId) sendSignal('stroke_end', { si: strokeId }, { batch: true });
     flushOutbox();
   }
 
   function undo() {
-    const g = gameRef.current;
-    if (!g || !canDrawRef.current || strokesRef.current.length === 0) return;
+    if (!gameRef.current || !canDrawRef.current || strokesRef.current.length === 0) return;
+    flushOutbox();
     setStrokeList(strokesRef.current.slice(0, -1));
     sendSignal('undo', {});
   }
 
   function clearBoard() {
-    const g = gameRef.current;
-    if (!g || !canDrawRef.current) return;
+    if (!gameRef.current || !canDrawRef.current) return;
+    discardPendingSignals();
     resetBoard();
     sendSignal('clear', {});
   }
 
-  // ─────────────── 对局动作 ───────────────
   function enterGame(id, row) {
     if (!id) return;
+    // 切局前把旧局已完成的发送批次落下，随后彻底重置游标与缓冲，防止串局。
+    flushPts();
+    flushOutbox();
+    discardPendingSignals();
     setPendingRematchId(null);
     lastSignalIdRef.current = 0;
     primeRef.current = true;
@@ -437,8 +502,10 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
     gameRef.current = null;
     resetBoard();
     setActiveId(id);
-    if (row) applyRow(row, { force: true });
-    else {
+    if (row) {
+      applyRow(row, { force: true });
+      setLoading(false);
+    } else {
       setGame(null);
       setLoading(true);
     }
@@ -446,29 +513,42 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
 
   async function createInvite() {
     setBusy(true);
+    let created = null;
     try {
-      const row = await room.createGame(userId, partnerId, wordsOf(customWordsRef.current));
-      enterGame(row.id, row);
-      broadcastRow(row);
+      created = await room.createGame(userId, partnerId, wordsOf(customWordsRef.current));
+      const message = await room.publishInviteMessage(created, userId, partnerId);
+      enterGame(created.id, created);
+      if (message) emitSignal('chat:message', message);
+      broadcastRow(created);
       setErrorText('');
-    } catch (e) {
-      setErrorText(e.message || '创建对局失败，请检查网络');
+    } catch (error) {
+      // 消息没有写成功时撤销孤立对局，让用户可以安全重试，而不是生成多个等待局。
+      if (created) {
+        try {
+          await room.cancelInvite(created.id);
+        } catch (cleanupError) {
+          console.warn('[DrawGuess] 孤立邀请清理失败:', cleanupError.message);
+        }
+      }
+      setErrorText(error.message || '创建对局失败，请检查网络');
     } finally {
       setBusy(false);
     }
   }
 
   async function cancelInvite() {
-    const g = gameRef.current;
-    if (!g || g.status !== 'waiting' || g.creator_id !== userId) return;
+    const current = gameRef.current;
+    if (!current || current.status !== 'waiting' || current.creator_id !== userId) return;
     setBusy(true);
     try {
-      await room.cancelInvite(g.id);
+      await room.cancelInvite(current.id);
+      discardPendingSignals();
       gameRef.current = null;
       activeIdRef.current = null;
       setActiveId(null);
       setGame(null);
-    } catch (e) {
+      setErrorText('');
+    } catch (error) {
       showToast('取消失败，请重试', 'warn');
     } finally {
       setBusy(false);
@@ -476,57 +556,82 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
   }
 
   async function ensureJoined(row) {
-    if (!row || row.status !== 'waiting') return;
-    if (row.creator_id === userId) return;
+    if (!row || row.status !== 'waiting' || row.creator_id === userId) return;
     try {
-      const res = await room.joinGame(row.id);
-      if (res.changed && res.row) {
-        applyRow(res.row);
-        broadcastRow(res.row);
+      const result = await room.joinGame(row.id);
+      if (result.changed && result.row) {
+        applyRow(result.row);
+        broadcastRow(result.row);
       }
-    } catch (e) {
-      /* 下一次轮询会重试 */
+    } catch (error) {
+      // 下一轮轮询自动重试。
     }
   }
 
   async function pick(word) {
-    const g = gameRef.current;
-    if (!g || g.status !== 'picking' || !isDrawerOf(g, userId) || !word) return;
+    const current = gameRef.current;
+    if (
+      !current ||
+      current.status !== 'picking' ||
+      !isDrawerOf(current, userId) ||
+      !word
+    ) {
+      return;
+    }
     setBusy(true);
     try {
-      const res = await room.pickWord(g.id, g.round, word);
-      if (res.changed && res.row) {
-        applyRow(res.row);
-        broadcastRow(res.row);
+      const result = await room.pickWord(current.id, current.round, word);
+      if (result.changed && result.row) {
+        applyRow(result.row);
+        broadcastRow(result.row);
       } else {
-        applyRow(await room.fetchGameRow(g.id));
+        applyRow(await room.fetchGameRow(current.id));
       }
-    } catch (e) {
-      showToast('选词失败，请重试', 'warn');
+    } catch (error) {
+      showToast('选词失败，请确认已执行最新数据库脚本', 'warn');
     } finally {
       setBusy(false);
     }
   }
 
   function reshuffleChoices() {
-    const g = gameRef.current;
-    if (!g || g.status !== 'picking' || !isDrawerOf(g, userId)) return;
+    const current = gameRef.current;
+    if (!current || current.status !== 'picking' || !isDrawerOf(current, userId)) return;
     setChoiceOverride(wordsOf(room.makeWordChoices(wordsOf(customWordsRef.current), 3)));
   }
 
   async function sendHintText(text) {
-    const g = gameRef.current;
+    const current = gameRef.current;
     const value = String(text || '').trim();
-    if (!g || g.status !== 'drawing' || !isDrawerOf(g, userId) || !value) return;
+    if (
+      !current ||
+      current.status !== 'drawing' ||
+      !isDrawerOf(current, userId) ||
+      !value
+    ) {
+      return;
+    }
+    if (current.word && value.includes(current.word)) {
+      showToast('提示不能直接包含答案', 'warn');
+      return;
+    }
     setBusy(true);
     try {
-      const res = await room.sendHint(g.id, g.round, value);
-      if (res.changed && res.row) {
-        applyRow(res.row);
-        broadcastRow(res.row);
+      const result = await room.sendHint(
+        current.id,
+        current.round,
+        value,
+        current.deadline_at
+      );
+      if (result.changed && result.row) {
+        applyRow(result.row);
+        broadcastRow(result.row);
         showToast('提示已发送，本轮加时 ' + room.HINT_EXTRA_SECONDS + ' 秒', 'info');
+      } else {
+        applyRow(await room.fetchGameRow(current.id));
+        showToast('本轮已经发送过提示了', 'info');
       }
-    } catch (e) {
+    } catch (error) {
       showToast('提示发送失败', 'warn');
     } finally {
       setBusy(false);
@@ -534,87 +639,90 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
   }
 
   async function settleRound(winner) {
-    const g = gameRef.current;
-    if (!g || g.status !== 'drawing' || finishingRef.current) return;
+    const current = gameRef.current;
+    if (!current || current.status !== 'drawing' || finishingRef.current) return;
     finishingRef.current = true;
     try {
-      const res = await room.finishRound(g, winner, wordsOf(customWordsRef.current));
-      if (res.changed && res.row) {
-        applyRow(res.row);
-        broadcastRow(res.row);
+      // 下一轮的私房词由下一位画题人的本地 UI 混入，避免把当前用户词库写给对方。
+      const result = await room.finishRound(current, winner);
+      if (result.changed && result.row) {
+        applyRow(result.row);
+        broadcastRow(result.row);
       } else {
-        applyRow(await room.fetchGameRow(g.id));
+        applyRow(await room.fetchGameRow(current.id));
       }
-    } catch (e) {
-      showToast('结算失败，正在重试', 'warn');
+    } catch (error) {
+      showToast('结算失败，正在等待自动重试', 'warn');
     } finally {
       finishingRef.current = false;
     }
   }
 
   async function giveUp() {
-    const g = gameRef.current;
-    if (!g || !isDrawerOf(g, userId)) return;
+    const current = gameRef.current;
+    if (!current || !isDrawerOf(current, userId)) return;
     await settleRound('gaveup');
   }
 
   async function submitGuess(text) {
-    const g = gameRef.current;
+    const current = gameRef.current;
     const value = String(text || '').trim();
-    if (!g || g.status !== 'drawing' || isDrawerOf(g, userId) || !value) return;
-    const correct = isCorrectGuess(value, g.word);
-    sendSignal('guess', { text: value, correct: correct });
+    if (
+      !current ||
+      current.status !== 'drawing' ||
+      isDrawerOf(current, userId) ||
+      !value
+    ) {
+      return;
+    }
+    const correct = isCorrectGuess(value, current.word);
+    sendSignal('guess', { text: value, correct });
     pushFeed({ text: value, from: userId, kind: correct ? 'win' : 'guess' });
     if (correct) await settleRound('win');
   }
 
   function sendQuickChat(text) {
     const value = String(text || '').trim();
-    if (!value) return;
+    const current = gameRef.current;
+    if (!value || !current || current.status !== 'drawing') return;
     sendSignal('danmaku', { text: value });
     pushFeed({ text: value, from: userId, kind: 'chat' });
   }
 
   async function saveDrawing() {
-    const g = gameRef.current;
-    let snap = snapshotRef.current;
-    if (g && g.status === 'drawing' && strokesRef.current.length > 0) {
-      snap = {
-        gameId: g.id,
-        round: g.round,
-        word: g.word,
-        strokes: strokesRef.current,
-        drawerId: g.current_drawer === 'creator' ? g.creator_id : g.invitee_id,
-        guesserId: g.current_drawer === 'creator' ? g.invitee_id : g.creator_id,
-      };
+    const current = gameRef.current;
+    if (current && current.status === 'drawing') {
+      showToast('本轮结束后再保存，结果记录会更准确', 'info');
+      return;
     }
-    if (!snap || !snap.strokes || snap.strokes.length === 0) {
-      showToast('画布还是空的', 'warn');
+    const snapshot = snapshotRef.current;
+    if (!snapshot || !snapshot.strokes || snapshot.strokes.length === 0) {
+      showToast('没有可保存的上一轮画作', 'warn');
       return;
     }
     setSaving(true);
     try {
-      const results = g && Array.isArray(g.round_results) ? g.round_results : [];
-      const hit = results.find((r) => r && r.round === snap.round);
-      const res = await saveDrawingToGallery({
-        gameId: snap.gameId,
-        round: snap.round,
-        word: snap.word,
-        strokes: snap.strokes,
+      const results = current && Array.isArray(current.round_results) ? current.round_results : [];
+      const result = results.find((item) => item && item.round === snapshot.round);
+      const saved = await saveDrawingToGallery({
+        gameId: snapshot.gameId,
+        round: snapshot.round,
+        word: snapshot.word,
+        strokes: snapshot.strokes,
         canvasSize: size,
-        drawerId: snap.drawerId,
-        guesserId: snap.guesserId,
-        result: hit && hit.winner ? hit.winner : 'timeout',
-        durationSec: hit ? hit.duration : null,
+        drawerId: snapshot.drawerId,
+        guesserId: snapshot.guesserId,
+        result: result && result.winner ? result.winner : 'timeout',
+        durationSec: result ? result.duration : null,
       });
-      if (res.saved) {
+      if (saved.saved) {
         showToast('已保存到画廊', 'win');
-        sendSignal('save', { round: snap.round });
+        sendSignal('save', { round: snapshot.round, r: snapshot.round });
       } else {
-        showToast(res.reason || '未保存', 'info');
+        showToast(saved.reason || '未保存', 'info');
       }
-    } catch (e) {
-      showToast('保存失败：' + (e.message || '请稍后再试'), 'warn');
+    } catch (error) {
+      showToast('保存失败：' + (error.message || '请稍后再试'), 'warn');
     } finally {
       setSaving(false);
     }
@@ -625,15 +733,23 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
       enterGame(pendingRematchId);
       return;
     }
-    const g = gameRef.current;
-    if (!g) return;
+    const current = gameRef.current;
+    if (!current || current.status !== 'finished') return;
     setBusy(true);
+    let created = null;
     try {
-      const created = await room.createGame(userId, partnerId, wordsOf(customWordsRef.current));
-      await room.markRematch(g.id, created.id, userId);
+      created = await room.createGame(userId, partnerId, wordsOf(customWordsRef.current));
+      await room.markRematch(current.id, created.id, userId);
       sendSignal('rematch', { game_id: created.id });
       enterGame(created.id, created);
-    } catch (e) {
+    } catch (error) {
+      if (created) {
+        try {
+          await room.cancelInvite(created.id);
+        } catch (cleanupError) {
+          // 轮询不会自动进入未关联的孤立局，保留日志即可。
+        }
+      }
       showToast('创建新对局失败', 'warn');
     } finally {
       setBusy(false);
@@ -644,12 +760,11 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
     try {
       const rows = await room.fetchCustomWords(userId);
       if (mountedRef.current) setCustomWords(rows);
-    } catch (e) {
-      /* 静默 */
+    } catch (error) {
+      // 词库是增强功能，不阻断游戏主流程。
     }
   }
 
-  // 供 PanResponder / 定时器 调用最新实现，避免闭包过期
   apiRef.current.flushOutbox = flushOutbox;
   apiRef.current.flushPts = flushPts;
   apiRef.current.handleSignal = handleSignal;
@@ -662,13 +777,12 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
   apiRef.current.replySnapshot = replySnapshot;
   apiRef.current.sendSignal = sendSignal;
 
-  // ─────────────── 生命周期 ───────────────
   useEffect(() => {
     mountedRef.current = true;
     return () => {
-      mountedRef.current = false;
       apiRef.current.flushPts();
       apiRef.current.flushOutbox();
+      mountedRef.current = false;
       if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     };
   }, []);
@@ -682,7 +796,7 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
   }, [gameId]);
 
   useEffect(() => {
-    const sub = AppState.addEventListener('change', (state) => {
+    const subscription = AppState.addEventListener('change', (state) => {
       const active = state === 'active';
       appActiveRef.current = active;
       if (active && activeIdRef.current) {
@@ -692,10 +806,9 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
           .catch(() => {});
       }
     });
-    return () => sub && sub.remove();
+    return () => subscription && subscription.remove();
   }, []);
 
-  // 对局行轮询（自适应间隔 + 后台暂停）
   useEffect(() => {
     if (!activeId) {
       setLoading(false);
@@ -706,9 +819,11 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
 
     const schedule = () => {
       if (cancelled) return;
-      const g = gameRef.current;
-      const fast = !g || g.status !== 'finished';
-      timer = setTimeout(tick, fast ? GAME_POLL_ACTIVE : GAME_POLL_IDLE);
+      const current = gameRef.current;
+      timer = setTimeout(
+        tick,
+        !current || current.status !== 'finished' ? GAME_POLL_ACTIVE : GAME_POLL_IDLE
+      );
     };
 
     const tick = async () => {
@@ -727,8 +842,8 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
         } else {
           setErrorText('这局游戏不存在或已被取消');
         }
-      } catch (e) {
-        /* 静默，下个周期重试 */
+      } catch (error) {
+        // 下一周期重试，避免弱网时反复弹窗。
       } finally {
         if (!cancelled) {
           setLoading(false);
@@ -744,7 +859,6 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
     };
   }, [activeId]);
 
-  // 信号队列轮询
   useEffect(() => {
     if (!activeId) return undefined;
     let cancelled = false;
@@ -752,8 +866,11 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
 
     const schedule = () => {
       if (cancelled) return;
-      const g = gameRef.current;
-      timer = setTimeout(tick, g && g.status === 'drawing' ? SIGNAL_POLL_DRAWING : SIGNAL_POLL_IDLE);
+      const current = gameRef.current;
+      timer = setTimeout(
+        tick,
+        current && current.status === 'drawing' ? SIGNAL_POLL_DRAWING : SIGNAL_POLL_IDLE
+      );
     };
 
     const tick = async () => {
@@ -763,22 +880,34 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
         return;
       }
       try {
-        const res = await pollSignals(activeId, lastSignalIdRef.current);
+        const result = await pollSignals(activeId, lastSignalIdRef.current);
         if (cancelled) return;
-        lastSignalIdRef.current = res.maxId;
-        const list = res.signals || [];
-        // 首次只对齐游标，不重放整局历史笔画
-        if (primeRef.current) {
+        lastSignalIdRef.current = result.maxId;
+        const list = result.signals || [];
+        const wasPriming = primeRef.current;
+        if (wasPriming) {
           if (list.length < PRIME_PAGE) primeRef.current = false;
         } else {
-          for (let i = 0; i < list.length; i++) {
-            const item = list[i];
+          for (let index = 0; index < list.length; index += 1) {
+            const item = list[index];
             if (item.sender_id === userId) continue;
             apiRef.current.handleSignal(Object.assign({ type: item.type }, item.data || {}));
           }
         }
-      } catch (e) {
-        /* 静默 */
+        // 历史游标对齐完成后主动要一次快照，避免对齐期间生成的 snapshot 被跳过。
+        if (wasPriming && !primeRef.current) {
+          const current = gameRef.current;
+          if (
+            current &&
+            current.status === 'drawing' &&
+            !isDrawerOf(current, userId) &&
+            strokesRef.current.length === 0
+          ) {
+            apiRef.current.sendSignal('sync_request', { round: current.round });
+          }
+        }
+      } catch (error) {
+        // 静默兜底。
       } finally {
         schedule();
       }
@@ -791,18 +920,16 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
     };
   }, [activeId, userId]);
 
-  // IM 快速通道
   useEffect(() => {
     if (!activeId) return undefined;
-    const off = onSignal('dg:' + activeId, (payload) => {
+    const unsubscribe = onSignal('dg:' + activeId, (payload) => {
       apiRef.current.handleSignal(payload);
     });
     return () => {
-      if (off) off();
+      if (unsubscribe) unsubscribe();
     };
   }, [activeId]);
 
-  // 倒计时 + 超时兜底（以 DB deadline_at 为唯一依据）
   const status = game ? game.status : null;
   const round = game ? game.round : 0;
   const deadline = game ? game.deadline_at || game.started_at : null;
@@ -813,32 +940,38 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
       return undefined;
     }
     const tick = () => {
-      const g = gameRef.current;
-      const left = room.computeRemainSec(g);
+      const current = gameRef.current;
+      const left = room.computeRemainSec(current);
       setRemainSec(left);
       if (left > 0) return;
-      const deadlineMs = room.computeDeadlineMs(g);
+      const deadlineMs = room.computeDeadlineMs(current);
       if (!deadlineMs) return;
       const over = Date.now() - deadlineMs;
-      const mine = isDrawerOf(g, userId);
-      // 画题人负责结算；画题人掉线时猜题人在宽限期后接手
-      if (mine || over > room.TIMEOUT_GRACE_MS) apiRef.current.settleRound('timeout');
+      if (isDrawerOf(current, userId) || over > room.TIMEOUT_GRACE_MS) {
+        apiRef.current.settleRound('timeout');
+      }
     };
     tick();
     const timer = setInterval(tick, 1000);
     return () => clearInterval(timer);
   }, [status, round, deadline, userId]);
 
-  // 猜题人中途进入：请求整幅画快照
   useEffect(() => {
-    if (status !== 'drawing' || !game) return undefined;
-    if (isDrawerOf(game, userId)) return undefined;
+    if (status !== 'drawing' || !game || isDrawerOf(game, userId)) return undefined;
     if (syncRoundRef.current === round) return undefined;
     syncRoundRef.current = round;
-    const timer = setTimeout(() => {
-      apiRef.current.sendSignal('sync_request', { round: round });
+    const first = setTimeout(() => {
+      apiRef.current.sendSignal('sync_request', { round });
     }, 700);
-    return () => clearTimeout(timer);
+    const retry = setTimeout(() => {
+      if (strokesRef.current.length === 0) {
+        apiRef.current.sendSignal('sync_request', { round });
+      }
+    }, 2600);
+    return () => {
+      clearTimeout(first);
+      clearTimeout(retry);
+    };
   }, [status, round, userId, game]);
 
   const panHandlers = useMemo(
@@ -846,10 +979,12 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
       PanResponder.create({
         onStartShouldSetPanResponder: () => canDrawRef.current,
         onMoveShouldSetPanResponder: () => canDrawRef.current,
+        onStartShouldSetPanResponderCapture: () => canDrawRef.current,
+        onMoveShouldSetPanResponderCapture: () => canDrawRef.current,
         onPanResponderTerminationRequest: () => false,
         onShouldBlockNativeResponder: () => true,
-        onPanResponderGrant: (evt) => apiRef.current.beginStroke(evt.nativeEvent),
-        onPanResponderMove: (evt) => apiRef.current.moveStroke(evt.nativeEvent),
+        onPanResponderGrant: (event) => apiRef.current.beginStroke(event.nativeEvent),
+        onPanResponderMove: (event) => apiRef.current.moveStroke(event.nativeEvent),
         onPanResponderRelease: () => apiRef.current.endStroke(),
         onPanResponderTerminate: () => apiRef.current.endStroke(),
       }).panHandlers,
