@@ -1,4 +1,4 @@
-// 你画我猜对局状态层：所有阶段推进均使用带 status + round 条件的更新，
+// 你画我猜对局状态层：阶段推进均使用 status + round 条件更新，
 // 将双方同时操作时的互斥交给 Postgres，避免重复结算与跳轮。
 import { supabase } from './supabase';
 import { fetchWithTimeout } from './fetchWithTimeout';
@@ -10,6 +10,23 @@ export const HINT_EXTRA_SECONDS = 15;
 export const TIMEOUT_GRACE_MS = 30000;
 
 const MUTATE_OPTS = { timeout: 12000, retries: 2, retryDelay: 800 };
+const INSERT_ONCE_OPTS = { timeout: 15000, retries: 0, retryDelay: 0 };
+
+function makeUuid() {
+  const bytes = new Uint8Array(16);
+  const cryptoApi = typeof globalThis !== 'undefined' ? globalThis.crypto : null;
+  if (cryptoApi && typeof cryptoApi.getRandomValues === 'function') {
+    cryptoApi.getRandomValues(bytes);
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256);
+    }
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
 
 export function computeDeadlineMs(row) {
   if (!row) return 0;
@@ -30,8 +47,8 @@ export function computeRemainSec(row, nowMs = Date.now()) {
   return Math.max(0, Math.ceil((deadline - nowMs) / 1000));
 }
 
-export function makeWordChoices(customWords = [], n = 3) {
-  return pickRandomWords(customWords, n).map((word) => ({ word }));
+export function makeWordChoices(customWords = [], count = 3) {
+  return pickRandomWords(customWords, count).map((word) => ({ word }));
 }
 
 export function normalizeChoices(row) {
@@ -39,7 +56,6 @@ export function normalizeChoices(row) {
   return raw.map((item) => (typeof item === 'string' ? item : item && item.word)).filter(Boolean);
 }
 
-// 自定义词只在当前画题人的 UI 中确定性替换一个候选，避免异步加载后反复跳词。
 export function mixCustomWord(choices, customWords, round) {
   const list = choices || [];
   if (list.length === 0) return list;
@@ -73,54 +89,103 @@ export async function fetchCustomWords(userId) {
 }
 
 export async function createGame(userId, partnerId, customWords = []) {
-  const { data, error } = await fetchWithTimeout(
-    () =>
-      supabase
-        .from('drawguess_games')
-        .insert([
-          {
-            creator_id: userId,
-            invitee_id: partnerId,
-            status: 'waiting',
-            round: 1,
-            current_drawer: 'creator',
-            word_choices: makeWordChoices(customWords, 3),
-            round_results: [],
-          },
-        ])
-        .select(),
-    MUTATE_OPTS
-  );
-  if (error) throw error;
+  // 客户端先生成 UUID：同一次请求即使超时重试，也只可能落下一条对局。
+  const gameId = makeUuid();
+  let response;
+  try {
+    response = await fetchWithTimeout(
+      () =>
+        supabase
+          .from('drawguess_games')
+          .insert([
+            {
+              id: gameId,
+              creator_id: userId,
+              invitee_id: partnerId,
+              status: 'waiting',
+              round: 1,
+              current_drawer: 'creator',
+              word_choices: makeWordChoices(customWords, 3),
+              round_results: [],
+            },
+          ])
+          .select(),
+      MUTATE_OPTS
+    );
+  } catch (networkError) {
+    const recovered = await fetchGameRow(gameId).catch(() => null);
+    if (recovered) return recovered;
+    throw networkError;
+  }
+
+  const { data, error } = response;
+  if (error) {
+    if (error.code === '23505') {
+      const recovered = await fetchGameRow(gameId).catch(() => null);
+      if (recovered) return recovered;
+    }
+    throw error;
+  }
   if (!data || !data[0]) throw new Error('创建对局失败：未返回数据');
   return data[0];
 }
 
-// 保留旧版聊天卡片协议，让对方能从聊天页收到邀请并带 gameId 进入对局。
-export async function publishInviteMessage(game, userId, partnerId) {
-  if (!game || !game.id) throw new Error('邀请缺少对局编号');
-  const { data, error } = await fetchWithTimeout(
-    () =>
-      supabase
-        .from('messages')
-        .insert([
-          {
-            user_id: userId,
-            content: '你画我猜邀请',
-            type: 'drawguess_invite',
-            metadata: {
-              game_id: game.id,
-              creator_id: userId,
-              creator_name: userId,
-              partner_id: partnerId,
-              partner_name: partnerId,
-            },
-          },
-        ])
-        .select(),
-    MUTATE_OPTS
+async function findInviteMessage(gameId) {
+  const { data, error } = await fetchWithTimeout(() =>
+    supabase
+      .from('messages')
+      .select('*')
+      .eq('type', 'drawguess_invite')
+      .contains('metadata', { game_id: gameId })
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
   );
   if (error) throw error;
+  return data || null;
+}
+
+// 保留聊天卡片协议，让对方能从聊天页带 gameId 进入；按 gameId 防重复写卡片。
+export async function publishInviteMessage(game, userId, partnerId) {
+  if (!game || !game.id) throw new Error('邀请缺少对局编号');
+  const existing = await findInviteMessage(game.id);
+  if (existing) return existing;
+
+  let response;
+  try {
+    response = await fetchWithTimeout(
+      () =>
+        supabase
+          .from('messages')
+          .insert([
+            {
+              user_id: userId,
+              content: '你画我猜邀请',
+              type: 'drawguess_invite',
+              metadata: {
+                game_id: game.id,
+                creator_id: userId,
+                creator_name: userId,
+                partner_id: partnerId,
+                partner_name: partnerId,
+              },
+            },
+          ])
+          .select(),
+      INSERT_ONCE_OPTS
+    );
+  } catch (networkError) {
+    const recovered = await findInviteMessage(game.id).catch(() => null);
+    if (recovered) return recovered;
+    throw networkError;
+  }
+
+  const { data, error } = response;
+  if (error) {
+    const recovered = await findInviteMessage(game.id).catch(() => null);
+    if (recovered) return recovered;
+    throw error;
+  }
   return data && data[0] ? data[0] : null;
 }
 
@@ -146,8 +211,6 @@ export async function cancelInvite(gameId) {
     MUTATE_OPTS
   );
   if (error) throw error;
-
-  // 对局已经取消后，尽量移除聊天里的邀请卡片；清理失败不影响取消结果。
   try {
     await fetchWithTimeout(
       () =>
@@ -189,7 +252,6 @@ export async function pickWord(gameId, round, word) {
   return { row, changed: !!row };
 }
 
-// 在原截止时间上累加，而不是重置为“从现在起 15 秒”；并限制每轮只能提示一次。
 export async function sendHint(
   gameId,
   round,
@@ -199,15 +261,14 @@ export async function sendHint(
 ) {
   const parsed = currentDeadlineAt ? new Date(currentDeadlineAt).getTime() : 0;
   const base = Number.isFinite(parsed) && parsed > 0 ? Math.max(Date.now(), parsed) : Date.now();
-  const patch = {
-    hint,
-    deadline_at: new Date(base + extraSec * 1000).toISOString(),
-  };
   const { data, error } = await fetchWithTimeout(
     () =>
       supabase
         .from('drawguess_games')
-        .update(patch)
+        .update({
+          hint,
+          deadline_at: new Date(base + extraSec * 1000).toISOString(),
+        })
         .eq('id', gameId)
         .eq('round', round)
         .eq('status', 'drawing')
