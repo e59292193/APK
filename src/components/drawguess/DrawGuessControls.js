@@ -2,7 +2,6 @@ import React, { memo, useEffect, useRef, useState } from 'react';
 import {
   Animated,
   Easing,
-  Pressable,
   ScrollView,
   StyleSheet,
   Text,
@@ -12,14 +11,12 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { getCategoryHint } from '../../lib/drawGuessUtils';
-import { COLORS, ERASER_WIDTH, SIZES } from '../../hooks/useDrawGuessSession';
+import { COLORS, SIZES } from '../../hooks/useDrawGuessSession';
 
 const C = {
   primary: '#8C69CA',
   primarySoft: '#EEE7FA',
   mint: '#69B79B',
-  mintSoft: '#E7F5F0',
-  orange: '#E69A55',
   danger: '#D86560',
   text: '#3D3450',
   sub: '#8B8398',
@@ -33,8 +30,8 @@ function sameColor(a, b) {
   return Array.isArray(a) && Array.isArray(b) && a.join(',') === b.join(',');
 }
 
-function rgb(c) {
-  return `rgb(${c[0]},${c[1]},${c[2]})`;
+function rgb(color) {
+  return `rgb(${color[0]},${color[1]},${color[2]})`;
 }
 
 export const CountdownPill = memo(function CountdownPill({ seconds, total = 60 }) {
@@ -59,7 +56,9 @@ export const CountdownPill = memo(function CountdownPill({ seconds, total = 60 }
 });
 
 function maskWord(word) {
-  return Array.from(String(word || '')).map((ch) => (ch.trim() ? '＿' : '　')).join(' ');
+  return Array.from(String(word || ''))
+    .map((char) => (char.trim() ? '＿' : '　'))
+    .join(' ');
 }
 
 export const WordBar = memo(function WordBar({ game, isDrawer, remainSec }) {
@@ -68,7 +67,7 @@ export const WordBar = memo(function WordBar({ game, isDrawer, remainSec }) {
   let category = '';
   try {
     category = getCategoryHint(word) || '';
-  } catch (e) {
+  } catch (error) {
     category = '';
   }
 
@@ -94,7 +93,7 @@ export const WordBar = memo(function WordBar({ game, isDrawer, remainSec }) {
 
 export const Toolbar = memo(function Toolbar({ tool, disabled, onChangeTool, onUndo, onClear }) {
   const value = tool || { color: COLORS[0], width: SIZES[1], isEraser: false };
-  const patch = (next) => onChangeTool && onChangeTool(Object.assign({}, value, next));
+  const patch = (next) => onChangeTool && onChangeTool({ ...value, ...next });
 
   return (
     <View style={[styles.toolbar, disabled && styles.disabled]} pointerEvents={disabled ? 'none' : 'auto'}>
@@ -150,7 +149,7 @@ export const Toolbar = memo(function Toolbar({ tool, disabled, onChangeTool, onU
         <TouchableOpacity
           style={[styles.iconBtn, value.isEraser && styles.iconBtnSelected]}
           accessibilityLabel="橡皮擦"
-          onPress={() => patch({ isEraser: true, width: ERASER_WIDTH })}
+          onPress={() => patch({ isEraser: true })}
         >
           <Ionicons name="bandage-outline" size={19} color={value.isEraser ? C.primary : C.sub} />
         </TouchableOpacity>
@@ -232,7 +231,10 @@ const FeedItem = memo(function FeedItem({ item, mine, index }) {
   }, [progress]);
 
   const translateY = progress.interpolate({ inputRange: [0, 1], outputRange: [16, -34] });
-  const opacity = progress.interpolate({ inputRange: [0, 0.12, 0.78, 1], outputRange: [0, 1, 1, 0] });
+  const opacity = progress.interpolate({
+    inputRange: [0, 0.12, 0.78, 1],
+    outputRange: [0, 1, 1, 0],
+  });
   const tint = item.kind === 'win' ? styles.feedWin : mine ? styles.feedMine : styles.feedOther;
 
   return (
@@ -272,34 +274,13 @@ export const HeaderActions = memo(function HeaderActions({ onGallery, onWords })
 });
 
 const styles = StyleSheet.create({
-  wordBar: {
-    width: '100%',
-    minHeight: 66,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 18,
-    backgroundColor: C.surface,
-    borderWidth: 1,
-    borderColor: C.border,
-  },
+  wordBar: { width: '100%', minHeight: 66, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 14, paddingVertical: 10, borderRadius: 18, backgroundColor: C.surface, borderWidth: 1, borderColor: C.border },
   wordMain: { flex: 1, paddingRight: 10 },
   wordEyebrow: { color: C.sub, fontSize: 11, fontWeight: '600' },
   wordValue: { color: C.text, fontSize: 20, lineHeight: 25, fontWeight: '800', marginTop: 1 },
   wordMask: { letterSpacing: 1, fontSize: 17 },
   wordMeta: { color: C.sub, fontSize: 11, marginTop: 2 },
-  timer: {
-    minWidth: 70,
-    paddingHorizontal: 9,
-    paddingVertical: 7,
-    borderRadius: 13,
-    backgroundColor: C.primarySoft,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
+  timer: { minWidth: 70, paddingHorizontal: 9, paddingVertical: 7, borderRadius: 13, backgroundColor: C.primarySoft, flexDirection: 'row', alignItems: 'center', gap: 4 },
   timerUrgent: { backgroundColor: '#FCECEB' },
   timerText: { color: C.primary, fontWeight: '800', fontVariant: ['tabular-nums'] },
   timerTextUrgent: { color: C.danger },
@@ -327,9 +308,9 @@ const styles = StyleSheet.create({
   sendBtn: { width: 46, borderRadius: 15, backgroundColor: C.primary, alignItems: 'center', justifyContent: 'center' },
   sendBtnDisabled: { opacity: 0.42 },
   feedLayer: { ...StyleSheet.absoluteFillObject, overflow: 'hidden', zIndex: 10 },
-  feedItem: { position: 'absolute', maxWidth: '78%', left: 12, paddingHorizontal: 11, paddingVertical: 7, borderRadius: 14 },
-  feedMine: { left: undefined, right: 12, backgroundColor: 'rgba(140,105,202,0.9)' },
-  feedOther: { backgroundColor: 'rgba(61,52,80,0.83)' },
+  feedItem: { position: 'absolute', maxWidth: '78%', paddingHorizontal: 11, paddingVertical: 7, borderRadius: 14 },
+  feedMine: { right: 12, backgroundColor: 'rgba(140,105,202,0.9)' },
+  feedOther: { left: 12, backgroundColor: 'rgba(61,52,80,0.83)' },
   feedWin: { left: '18%', backgroundColor: 'rgba(105,183,155,0.94)' },
   feedText: { color: '#FFF', fontSize: 12, fontWeight: '700' },
   headerActions: { flexDirection: 'row', gap: 8 },
