@@ -350,7 +350,10 @@ const styles = StyleSheet.create({
   },
   letterWrap: {
     width: '86%',
-    maxHeight: '74%',
+    // 必须用确定高度（而非 maxHeight）：letterWrap 高度不定时，
+    // 内部 letter(flex:1) → 正文(flex:1) → ScrollView(flex:1) 整条链
+    // 会塌陷为 0 高度，导致正文文字完全不渲染（信纸空白）。
+    height: '74%',
     ...shadows.floating,
   },
   letter: {
