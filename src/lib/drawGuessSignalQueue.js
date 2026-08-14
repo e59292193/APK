@@ -1,21 +1,7 @@
-// ═══════════════════════════════════════════════════════
-// drawGuessSignalQueue —— 基于 DB 的实时信号队列
-//
-// 腾讯 IM 自定义消息跨设备（模拟器↔手机）不够稳定，
-// 这里用 Supabase 的 drawguess_signals 表做可靠消息队列：
-//   - pushSignal(gameId, type, data, senderId)  写入一条信号
-//   - pollSignals(gameId, lastSeenId)            拉取 id > lastSeenId 的信号
-//
-// DrawGuessGameScreen 每 1.5 秒轮询一次，保证笔画/弹幕/撤销/清空
-// 都能可靠同步到对方。IM 信号保留为快速通道（可选）。
-// ═══════════════════════════════════════════════════════
+// 基于 Supabase 的可靠信号队列。IM 是低延迟通道，DB 队列负责丢包补偿。
 import { supabase } from './supabase';
 import { fetchWithTimeout } from './fetchWithTimeout';
 
-/**
- * 写入一条信号到队列
- * @returns {Promise<number|null>} 新信号 id，失败返回 null
- */
 export async function pushSignal(gameId, type, data, senderId) {
   if (!gameId || !type || !senderId) return null;
   try {
@@ -27,39 +13,56 @@ export async function pushSignal(gameId, type, data, senderId) {
     );
     if (error) throw error;
     return rows && rows[0] ? rows[0].id : null;
-  } catch (e) {
-    console.warn('[DGQueue] pushSignal failed:', type, e.message);
+  } catch (error) {
+    console.warn('[DrawGuessQueue] 写入信号失败:', type, error.message);
     return null;
   }
 }
 
-/**
- * 批量写入信号（用于一笔的多个点段）
- */
 export async function pushSignals(gameId, items, senderId) {
   if (!gameId || !items || items.length === 0 || !senderId) return [];
   try {
-    const rows = items.map((it) => ({
+    const rows = items.map((item) => ({
       game_id: gameId,
-      type: it.type,
-      data: it.data,
+      type: item.type,
+      data: item.data,
       sender_id: senderId,
     }));
-    const { data: inserted, error } = await fetchWithTimeout(() =>
+    const { data, error } = await fetchWithTimeout(() =>
       supabase.from('drawguess_signals').insert(rows).select('id')
     );
     if (error) throw error;
-    return (inserted || []).map((r) => r.id);
-  } catch (e) {
-    console.warn('[DGQueue] pushSignals failed:', e.message);
+    return (data || []).map((row) => row.id);
+  } catch (error) {
+    console.warn('[DrawGuessQueue] 批量写入信号失败:', error.message);
     return [];
   }
 }
 
-/**
- * 拉取 id > lastSeenId 的信号（增量）
- * @returns {Promise<{signals: Array, maxId: number}>}
- */
+// 进入已进行多轮的对局时，直接把游标定位到最新一条，再通过 snapshot 补画布。
+// 返回 null 表示查询失败（调用方再退回分页对齐）；没有历史信号时返回 0。
+export async function getLatestSignalId(gameId) {
+  if (!gameId) return 0;
+  try {
+    const { data, error } = await fetchWithTimeout(
+      () =>
+        supabase
+          .from('drawguess_signals')
+          .select('id')
+          .eq('game_id', gameId)
+          .order('id', { ascending: false })
+          .limit(1)
+          .maybeSingle(),
+      { timeout: 10000, retries: 1, retryDelay: 500 }
+    );
+    if (error) throw error;
+    return data && data.id ? data.id : 0;
+  } catch (error) {
+    console.warn('[DrawGuessQueue] 获取最新游标失败:', error.message);
+    return null;
+  }
+}
+
 export async function pollSignals(gameId, lastSeenId) {
   if (!gameId) return { signals: [], maxId: lastSeenId || 0 };
   try {
@@ -73,23 +76,22 @@ export async function pollSignals(gameId, lastSeenId) {
         .limit(200)
     );
     if (error) throw error;
-    if (!data || data.length === 0) return { signals: [], maxId: lastSeenId || 0 };
-    const maxId = data[data.length - 1].id;
-    return { signals: data, maxId };
-  } catch (e) {
-    console.warn('[DGQueue] pollSignals failed:', e.message);
+    if (!data || data.length === 0) {
+      return { signals: [], maxId: lastSeenId || 0 };
+    }
+    return { signals: data, maxId: data[data.length - 1].id };
+  } catch (error) {
+    console.warn('[DrawGuessQueue] 拉取信号失败:', error.message);
     return { signals: [], maxId: lastSeenId || 0 };
   }
 }
 
-/**
- * 清理某局游戏的信号（轮开始时调用，避免表无限增长）
- */
+// 仅可在确定整局已不再需要历史信号时调用；不要在回合切换时清理。
 export async function clearSignals(gameId) {
   if (!gameId) return;
   try {
     await supabase.from('drawguess_signals').delete().eq('game_id', gameId);
-  } catch (e) {
-    /* 静默 */
+  } catch (error) {
+    // 清理失败不影响游戏。
   }
 }
