@@ -74,8 +74,6 @@ function laterIso(a, b) {
   return aMs >= bMs ? a : b;
 }
 
-// 同轮同阶段没有 updated_at 可比较，合并不可逆字段，避免迟到的旧轮询行抹掉提示、
-// 加时、战绩或再来一局编号。跨阶段则仍由 stateStamp 严格裁决。
 function mergeSameStage(previous, incoming) {
   if (
     !previous ||
@@ -134,7 +132,7 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
   const primeRef = useRef(true);
   const outboxRef = useRef([]);
   const outboxTimerRef = useRef(null);
-  const ptsRef = useRef({ si: null, flat: [] });
+  const ptsRef = useRef({ si: null, flat: [], q: 0 });
   const ptsTimerRef = useRef(null);
   const strokeIdRef = useRef(null);
   const lastPointRef = useRef(null);
@@ -197,7 +195,7 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
     if (outboxTimerRef.current) clearTimeout(outboxTimerRef.current);
     ptsTimerRef.current = null;
     outboxTimerRef.current = null;
-    ptsRef.current = { si: null, flat: [] };
+    ptsRef.current = { si: null, flat: [], q: 0 };
     outboxRef.current = [];
   }
 
@@ -206,7 +204,7 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
     liveRef.current = null;
     strokeIdRef.current = null;
     lastPointRef.current = null;
-    ptsRef.current = { si: null, flat: [] };
+    ptsRef.current = { si: null, flat: [], q: 0 };
     if (mountedRef.current) {
       setLiveStroke(null);
       setRemoteStroke(null);
@@ -336,7 +334,6 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
 
     const current = gameRef.current;
     if (ROUND_SCOPED.has(signal.type)) {
-      // 先做阶段检查、后做 uid 去重。若 IM 比对局行先到，不消耗 uid，DB 副本仍可补上。
       if (!current || current.status !== 'drawing') return;
       if (signal.r != null && Number(signal.r) !== Number(current.round)) return;
     }
@@ -348,10 +345,10 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
         assembler.begin(signal.si, { c: signal.c, w: signal.w, e: signal.e, p: signal.p });
         break;
       case 'stroke_pts':
-        assembler.points(signal.si, signal.p);
+        assembler.points(signal.si, signal.p, signal.q);
         break;
       case 'stroke_end':
-        assembler.end(signal.si);
+        assembler.end(signal.si, signal.q);
         break;
       case 'undo':
         setStrokeList(strokesRef.current.slice(0, -1));
@@ -363,11 +360,7 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
         pushFeed({ text: signal.text, from: signal.from, kind: 'chat' });
         break;
       case 'guess':
-        pushFeed({
-          text: signal.text,
-          from: signal.from,
-          kind: signal.correct ? 'win' : 'guess',
-        });
+        pushFeed({ text: signal.text, from: signal.from, kind: signal.correct ? 'win' : 'guess' });
         break;
       case 'update':
         if (signal.row) applyRow(signal.row);
@@ -413,7 +406,7 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
     lastPointRef.current = { x, y };
     liveRef.current = stroke;
     setLiveStroke(stroke);
-    ptsRef.current = { si: strokeId, flat: [] };
+    ptsRef.current = { si: strokeId, flat: [], q: 0 };
     sendSignal(
       'stroke_begin',
       {
@@ -453,7 +446,12 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
     buffer.flat = [];
     const chunks = sync.chunkFlatPoints(flat, 120);
     for (let index = 0; index < chunks.length; index += 1) {
-      sendSignal('stroke_pts', { si: buffer.si, p: chunks[index] }, { batch: true });
+      buffer.q += 1;
+      sendSignal(
+        'stroke_pts',
+        { si: buffer.si, q: buffer.q, p: chunks[index] },
+        { batch: true }
+      );
     }
   }
 
@@ -461,6 +459,7 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
     const stroke = liveRef.current;
     const strokeId = strokeIdRef.current;
     flushPts();
+    const lastSequence = ptsRef.current.q || 0;
     liveRef.current = null;
     strokeIdRef.current = null;
     lastPointRef.current = null;
@@ -468,7 +467,10 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
     if (stroke && stroke.points.length > 0) {
       setStrokeList(strokesRef.current.concat([sync.withPath(stroke)]));
     }
-    if (strokeId) sendSignal('stroke_end', { si: strokeId }, { batch: true });
+    if (strokeId) {
+      sendSignal('stroke_end', { si: strokeId, q: lastSequence }, { batch: true });
+    }
+    ptsRef.current = { si: null, flat: [], q: 0 };
     flushOutbox();
   }
 
@@ -488,7 +490,6 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
 
   function enterGame(id, row) {
     if (!id) return;
-    // 切局前把旧局已完成的发送批次落下，随后彻底重置游标与缓冲，防止串局。
     flushPts();
     flushOutbox();
     discardPendingSignals();
@@ -522,7 +523,6 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
       broadcastRow(created);
       setErrorText('');
     } catch (error) {
-      // 消息没有写成功时撤销孤立对局，让用户可以安全重试，而不是生成多个等待局。
       if (created) {
         try {
           await room.cancelInvite(created.id);
@@ -570,14 +570,7 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
 
   async function pick(word) {
     const current = gameRef.current;
-    if (
-      !current ||
-      current.status !== 'picking' ||
-      !isDrawerOf(current, userId) ||
-      !word
-    ) {
-      return;
-    }
+    if (!current || current.status !== 'picking' || !isDrawerOf(current, userId) || !word) return;
     setBusy(true);
     try {
       const result = await room.pickWord(current.id, current.round, word);
@@ -603,26 +596,14 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
   async function sendHintText(text) {
     const current = gameRef.current;
     const value = String(text || '').trim();
-    if (
-      !current ||
-      current.status !== 'drawing' ||
-      !isDrawerOf(current, userId) ||
-      !value
-    ) {
-      return;
-    }
+    if (!current || current.status !== 'drawing' || !isDrawerOf(current, userId) || !value) return;
     if (current.word && value.includes(current.word)) {
       showToast('提示不能直接包含答案', 'warn');
       return;
     }
     setBusy(true);
     try {
-      const result = await room.sendHint(
-        current.id,
-        current.round,
-        value,
-        current.deadline_at
-      );
+      const result = await room.sendHint(current.id, current.round, value, current.deadline_at);
       if (result.changed && result.row) {
         applyRow(result.row);
         broadcastRow(result.row);
@@ -643,7 +624,6 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
     if (!current || current.status !== 'drawing' || finishingRef.current) return;
     finishingRef.current = true;
     try {
-      // 下一轮的私房词由下一位画题人的本地 UI 混入，避免把当前用户词库写给对方。
       const result = await room.finishRound(current, winner);
       if (result.changed && result.row) {
         applyRow(result.row);
@@ -667,14 +647,7 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
   async function submitGuess(text) {
     const current = gameRef.current;
     const value = String(text || '').trim();
-    if (
-      !current ||
-      current.status !== 'drawing' ||
-      isDrawerOf(current, userId) ||
-      !value
-    ) {
-      return;
-    }
+    if (!current || current.status !== 'drawing' || isDrawerOf(current, userId) || !value) return;
     const correct = isCorrectGuess(value, current.word);
     sendSignal('guess', { text: value, correct });
     pushFeed({ text: value, from: userId, kind: correct ? 'win' : 'guess' });
@@ -747,7 +720,7 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
         try {
           await room.cancelInvite(created.id);
         } catch (cleanupError) {
-          // 轮询不会自动进入未关联的孤立局，保留日志即可。
+          // 保留日志即可。
         }
       }
       showToast('创建新对局失败', 'warn');
@@ -843,7 +816,7 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
           setErrorText('这局游戏不存在或已被取消');
         }
       } catch (error) {
-        // 下一周期重试，避免弱网时反复弹窗。
+        // 下一周期重试。
       } finally {
         if (!cancelled) {
           setLoading(false);
@@ -894,7 +867,6 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
             apiRef.current.handleSignal(Object.assign({ type: item.type }, item.data || {}));
           }
         }
-        // 历史游标对齐完成后主动要一次快照，避免对齐期间生成的 snapshot 被跳过。
         if (wasPriming && !primeRef.current) {
           const current = gameRef.current;
           if (
