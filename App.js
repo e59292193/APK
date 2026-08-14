@@ -27,6 +27,8 @@ import AnniversaryScreen from './src/screens/AnniversaryScreen';
 import WishlistScreen from './src/screens/WishlistScreen';
 import GomokuGameScreen from './src/screens/GomokuGameScreen';
 import DrawGuessGameScreen from './src/screens/DrawGuessGameScreen';
+import EphemeralNoteScreen from './src/screens/EphemeralNoteScreen';
+import VoiceMailboxScreen from './src/screens/VoiceMailboxScreen';
 import { ErrorBoundary } from './src/components/ErrorBoundary';
 import { wakeUpSupabase } from './src/lib/wakeUpSupabase';
 import { initSignal, disconnectSignal } from './src/lib/realtimeSignal';
@@ -291,6 +293,14 @@ export default function App() {
     setFullscreenPage({ screen: 'DrawGuessGame', params: { gameId } });
   }, []);
 
+  const handleNavigateEphemeralNote = useCallback(() => {
+    setFullscreenPage({ screen: 'EphemeralNote' });
+  }, []);
+
+  const handleNavigateVoiceMailbox = useCallback(() => {
+    setFullscreenPage({ screen: 'VoiceMailbox' });
+  }, []);
+
   const handleNavigateDetail = useCallback((theme) => {
     setFullscreenPage({ screen: 'CheckinDetail', params: { theme } });
   }, []);
@@ -377,6 +387,8 @@ export default function App() {
                 onNavigateCheckinList={handleNavigateCheckinList}
                 onNavigateGomokuGame={handleNavigateGomokuGame}
                 onNavigateDrawGuessGame={handleNavigateDrawGuessGame}
+                onNavigateEphemeralNote={handleNavigateEphemeralNote}
+                onNavigateVoiceMailbox={handleNavigateVoiceMailbox}
                 onUnreadChange={setUnreadCount}
                 refreshTrigger={chatRefreshTrigger}
               />
@@ -424,6 +436,12 @@ export default function App() {
                   userId={userId}
                   onBack={handleCloseFullscreen}
                 />
+              )}
+              {fullscreenPage.screen === 'EphemeralNote' && (
+                <EphemeralNoteScreen userId={userId} onBack={handleCloseFullscreen} />
+              )}
+              {fullscreenPage.screen === 'VoiceMailbox' && (
+                <VoiceMailboxScreen userId={userId} onBack={handleCloseFullscreen} />
               )}
             </ErrorBoundary>
           </View>

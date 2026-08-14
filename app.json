@@ -38,7 +38,16 @@
           ]
         }
       ],
-      "expo-sharing"
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "允许使用麦克风录制语音信箱的私密语音消息",
+          "recordAudioAndroid": true
+        }
+      ],
+      "expo-sharing",
+      "expo-asset",
+      "expo-font"
     ],
     "extra": {
       "eas": {

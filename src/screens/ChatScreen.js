@@ -34,7 +34,7 @@ const { width: SCREEN_WIDTH } = Dimensions.get('window');
 // ─── Valid Users ───
 const VALID_USERS = { momo: true, '苞米': true };
 
-export default function ChatScreen({ userId, onNavigateCheckinList, onNavigateGomokuGame, onNavigateDrawGuessGame, onUnreadChange, isActive = true, refreshTrigger = 0 }) {
+export default function ChatScreen({ userId, onNavigateCheckinList, onNavigateGomokuGame, onNavigateDrawGuessGame, onNavigateEphemeralNote, onNavigateVoiceMailbox, onUnreadChange, isActive = true, refreshTrigger = 0 }) {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(true);
   const [inputText, setInputText] = useState('');
@@ -503,6 +503,20 @@ export default function ChatScreen({ userId, onNavigateCheckinList, onNavigateGo
   const handleOpenDrawGuessLobby = () => {
     setPlusPanelVisible(false);
     onNavigateDrawGuessGame(null);
+  };
+
+  // ─── Open Ephemeral Note ───
+  // 点击「+」面板的小纸条入口：进入小纸条全屏页（内容不进入聊天记录）
+  const handleOpenEphemeralNote = () => {
+    setPlusPanelVisible(false);
+    onNavigateEphemeralNote && onNavigateEphemeralNote();
+  };
+
+  // ─── Open Voice Mailbox ───
+  // 点击「+」面板的语音信箱入口：进入语音信箱全屏页（内容不进入聊天记录）
+  const handleOpenVoiceMailbox = () => {
+    setPlusPanelVisible(false);
+    onNavigateVoiceMailbox && onNavigateVoiceMailbox();
   };
 
   // ─── Open Gomoku (Join / Continue / View) ───
@@ -1036,52 +1050,31 @@ export default function ChatScreen({ userId, onNavigateCheckinList, onNavigateGo
         </View>
       )}
 
-      {/* Plus Panel */}
+      {/* Plus Panel (4 列换行网格) */}
       {plusPanelVisible && (
         <View style={styles.plusPanel}>
-          <TouchableOpacity
-            style={styles.plusPanelItem}
-            onPress={() => {
-              setPlusPanelVisible(false);
-              setCheckinCreateVisible(true);
-            }}
-            activeOpacity={0.7}
-          >
-            <View style={[styles.plusPanelIconBg, { backgroundColor: colors.primary[100] }]}>
-              <Ionicons name="checkmark-circle-outline" size={24} color={colors.primaryAction} />
-            </View>
-            <Text style={styles.plusPanelLabel}>二人打卡</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.plusPanelItem}
-            onPress={handleSendPhoto}
-            activeOpacity={0.7}
-          >
-            <View style={[styles.plusPanelIconBg, { backgroundColor: colors.mint[100] }]}>
-              <Ionicons name="images-outline" size={24} color={colors.mint[600]} />
-            </View>
-            <Text style={styles.plusPanelLabel}>发送照片</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.plusPanelItem}
-            onPress={handleOpenGomokuLobby}
-            activeOpacity={0.7}
-          >
-            <View style={[styles.plusPanelIconBg, { backgroundColor: colors.neutral[200] }]}>
-              <Ionicons name="game-controller-outline" size={24} color={colors.neutral[600]} />
-            </View>
-            <Text style={styles.plusPanelLabel}>五子棋</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.plusPanelItem}
-            onPress={handleOpenDrawGuessLobby}
-            activeOpacity={0.7}
-          >
-            <View style={[styles.plusPanelIconBg, { backgroundColor: colors.coral[100] }]}>
-              <Ionicons name="color-palette-outline" size={24} color={colors.coral[600]} />
-            </View>
-            <Text style={styles.plusPanelLabel}>你画我猜</Text>
-          </TouchableOpacity>
+          {[
+            { icon: 'checkmark-circle-outline', bg: colors.primary[100], color: colors.primaryAction, label: '二人打卡', onPress: () => { setPlusPanelVisible(false); setCheckinCreateVisible(true); } },
+            { icon: 'images-outline', bg: colors.mint[100], color: colors.mint[600], label: '发送照片', onPress: handleSendPhoto },
+            { icon: 'game-controller-outline', bg: colors.neutral[200], color: colors.neutral[600], label: '五子棋', onPress: handleOpenGomokuLobby },
+            { icon: 'color-palette-outline', bg: colors.coral[100], color: colors.coral[600], label: '你画我猜', onPress: handleOpenDrawGuessLobby },
+            { icon: 'paper-plane-outline', bg: colors.primary[100], color: colors.primaryAction, label: '小纸条', onPress: handleOpenEphemeralNote },
+            { icon: 'mic-outline', bg: colors.mint[100], color: colors.mint[600], label: '语音信箱', onPress: handleOpenVoiceMailbox },
+          ].map((item, idx) => (
+            <TouchableOpacity
+              key={idx}
+              style={styles.plusPanelItem}
+              onPress={item.onPress}
+              activeOpacity={0.7}
+              accessibilityRole="button"
+              accessibilityLabel={item.label}
+            >
+              <View style={[styles.plusPanelIconBg, { backgroundColor: item.bg }]}>
+                <Ionicons name={item.icon} size={24} color={item.color} />
+              </View>
+              <Text style={styles.plusPanelLabel}>{item.label}</Text>
+            </TouchableOpacity>
+          ))}
         </View>
       )}
 
@@ -1575,19 +1568,20 @@ const styles = StyleSheet.create({
     backgroundColor: colors.primaryActionDisabled,
   },
 
-  // ── Plus Panel ──
+  // ── Plus Panel (4 列换行网格) ──
   plusPanel: {
     backgroundColor: colors.surface,
-    paddingHorizontal: spacing[4],
+    paddingHorizontal: spacing[3],
     paddingVertical: spacing[3] + 2,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: colors.border,
     flexDirection: 'row',
-    justifyContent: 'space-around',
+    flexWrap: 'wrap',
   },
   plusPanelItem: {
     alignItems: 'center',
-    flex: 1,
+    width: '25%',
+    paddingVertical: spacing[2],
   },
   plusPanelIconBg: {
     width: 48,

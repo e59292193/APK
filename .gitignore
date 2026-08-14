@@ -58,3 +58,10 @@ debug-*.md
 # Misc
 pic.jpg
 cleanup_data.sql
+
+# Supabase CLI local state
+supabase/.temp/
+
+# Local properties
+local.properties
+android/local.properties
