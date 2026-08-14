@@ -74,6 +74,7 @@ export default function DrawGuessGameScreen({ gameId, userId, onBack }) {
     size: CW,
   });
 
+  // 高频画笔 state 更新时，给 memo 子组件保持稳定的动作引用。
   const actionRef = useRef(session.actions);
   actionRef.current = session.actions;
   const stable = useMemo(
@@ -85,7 +86,12 @@ export default function DrawGuessGameScreen({ gameId, userId, onBack }) {
       guess: (text) => actionRef.current.submitGuess(text),
       quick: (text) => actionRef.current.sendQuickChat(text),
       undo: () => actionRef.current.undo(),
-      clear: () => actionRef.current.clearBoard(),
+      clear: () => {
+        Alert.alert('清空画布', '确定清空当前所有笔画吗？此操作无法撤销。', [
+          { text: '取消', style: 'cancel' },
+          { text: '清空', style: 'destructive', onPress: () => actionRef.current.clearBoard() },
+        ]);
+      },
       save: () => actionRef.current.saveDrawing(),
       rematch: () => actionRef.current.rematch(),
       hint: (text) => actionRef.current.sendHintText(text),
@@ -110,7 +116,7 @@ export default function DrawGuessGameScreen({ gameId, userId, onBack }) {
     setGalleryLoading(true);
     try {
       setGalleryItems(await fetchGallery(60));
-    } catch (e) {
+    } catch (error) {
       stable.toast('画廊加载失败，请稍后重试', 'warn');
     } finally {
       setGalleryLoading(false);
@@ -126,9 +132,9 @@ export default function DrawGuessGameScreen({ gameId, userId, onBack }) {
         onPress: async () => {
           try {
             await deleteGalleryItem(item);
-            setGalleryItems((prev) => prev.filter((x) => x.id !== item.id));
+            setGalleryItems((previous) => previous.filter((value) => value.id !== item.id));
             if (viewerItem && viewerItem.id === item.id) setViewerItem(null);
-          } catch (e) {
+          } catch (error) {
             stable.toast('删除失败，请稍后重试', 'warn');
           }
         },
@@ -164,7 +170,7 @@ export default function DrawGuessGameScreen({ gameId, userId, onBack }) {
       await addCustomWord(userId, value);
       setWordInput('');
       await stable.refreshWords();
-    } catch (e) {
+    } catch (error) {
       stable.toast('添加失败，请先执行词库权限补丁', 'warn');
     } finally {
       setWordBusy(false);
@@ -181,7 +187,7 @@ export default function DrawGuessGameScreen({ gameId, userId, onBack }) {
           try {
             await deleteCustomWord(item.id);
             await stable.refreshWords();
-          } catch (e) {
+          } catch (error) {
             stable.toast('删除失败，请稍后重试', 'warn');
           }
         },
@@ -278,7 +284,6 @@ export default function DrawGuessGameScreen({ gameId, userId, onBack }) {
         />
       );
     }
-
     return null;
   }
 
@@ -303,7 +308,10 @@ export default function DrawGuessGameScreen({ gameId, userId, onBack }) {
 
         <ScrollView
           style={styles.flex}
-          contentContainerStyle={[styles.content, { paddingBottom: Math.max(insets.bottom, 12) + 18 }]}
+          contentContainerStyle={[
+            styles.content,
+            { paddingBottom: Math.max(insets.bottom, 12) + 18 },
+          ]}
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
           bounces={false}
@@ -360,16 +368,10 @@ export default function DrawGuessGameScreen({ gameId, userId, onBack }) {
                       <Ionicons name="bulb-outline" size={17} color="#FFF" />
                     </TouchableOpacity>
                   </View>
-                  <View style={styles.drawingActions}>
-                    <TouchableOpacity style={styles.softAction} onPress={stable.save} disabled={session.saving}>
-                      <Ionicons name="download-outline" size={16} color={C.primary} />
-                      <Text style={styles.softActionText}>保存画作</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity style={styles.softAction} onPress={confirmGiveUp}>
-                      <Ionicons name="eye-outline" size={16} color={C.danger} />
-                      <Text style={[styles.softActionText, { color: C.danger }]}>公布答案</Text>
-                    </TouchableOpacity>
-                  </View>
+                  <TouchableOpacity style={styles.publishAction} onPress={confirmGiveUp}>
+                    <Ionicons name="eye-outline" size={16} color={C.danger} />
+                    <Text style={styles.publishActionText}>公布答案并结束本轮</Text>
+                  </TouchableOpacity>
                 </>
               ) : (
                 <GuessBar disabled={!drawing} onSubmit={stable.guess} onQuick={stable.quick} />
@@ -435,9 +437,8 @@ const styles = StyleSheet.create({
   hintInput: { flex: 1, paddingHorizontal: 13, borderRadius: 14, borderWidth: 1, borderColor: C.border, backgroundColor: C.surface, color: C.text, fontSize: 12 },
   hintBtn: { width: 44, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: C.primary },
   actionDisabled: { opacity: 0.42 },
-  drawingActions: { width: '100%', flexDirection: 'row', gap: 9 },
-  softAction: { flex: 1, height: 40, borderRadius: 14, flexDirection: 'row', gap: 6, alignItems: 'center', justifyContent: 'center', backgroundColor: C.surface, borderWidth: 1, borderColor: C.border },
-  softActionText: { color: C.primary, fontSize: 12, fontWeight: '700' },
+  publishAction: { width: '100%', height: 40, borderRadius: 14, flexDirection: 'row', gap: 6, alignItems: 'center', justifyContent: 'center', backgroundColor: C.surface, borderWidth: 1, borderColor: '#F1D7D5' },
+  publishActionText: { color: C.danger, fontSize: 12, fontWeight: '700' },
   previousSave: { marginTop: -10, marginBottom: 14, paddingHorizontal: 14, paddingVertical: 9, borderRadius: 14, flexDirection: 'row', gap: 6, alignItems: 'center', backgroundColor: C.primarySoft },
   previousSaveText: { color: C.primary, fontSize: 12, fontWeight: '700' },
 });
