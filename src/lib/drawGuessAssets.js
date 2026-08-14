@@ -1,13 +1,5 @@
-// ═══════════════════════════════════════════════════════
-// drawGuessAssets —— 画作导出 / 画廊 / 自定义词库 数据层
-//
-// 优化点：
-//   1. 光栅化固定为 480×480，而不是跟着屏幕宽度走。
-//      原来在大屏手机上是 ~1100×1100（纯 JS 逐像素盖圆点），
-//      像素量是现在的 5 倍以上，保存一次要卡好几秒。
-//   2. 上传统一走 ArrayBuffer，RN 环境最稳。
-//   3. 保存前先查同一局同一轮是否已存过，避免双方各存一张重复画作。
-// ═══════════════════════════════════════════════════════
+// 画作导出、画廊与私房词库数据层。
+// PNG 固定输出 480×480，避免高分辨率设备在 JS 中逐像素光栅化导致明显卡顿。
 import { supabase } from './supabase';
 import { fetchWithTimeout } from './fetchWithTimeout';
 import { strokesToPNG } from './drawGuessPng';
@@ -16,24 +8,36 @@ export const PNG_SIZE = 480;
 export const BUCKET = 'photos';
 
 function scaleStrokes(strokes, scale) {
-  return (strokes || []).map((s) => ({
-    color: s.color,
-    isEraser: !!s.isEraser,
-    width: Math.max(1, (s.width || 3) * scale),
-    points: (s.points || []).map((p) => ({ x: p.x * scale, y: p.y * scale })),
+  return (strokes || []).map((stroke) => ({
+    color: stroke.color,
+    isEraser: !!stroke.isEraser,
+    width: Math.max(1, (stroke.width || 3) * scale),
+    points: (stroke.points || []).map((point) => ({
+      x: point.x * scale,
+      y: point.y * scale,
+    })),
   }));
 }
 
-function toArrayBuffer(u8) {
-  return u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
+function toArrayBuffer(bytes) {
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 }
 
-// ─── 画作 → PNG → Storage ───
+async function removeUploadedPath(path) {
+  if (!path) return;
+  try {
+    await supabase.storage.from(BUCKET).remove([path]);
+  } catch (error) {
+    console.warn('[DrawGuessAssets] 回滚上传文件失败:', error.message);
+  }
+}
+
 export async function uploadDrawing({ gameId, round, strokes, canvasSize }) {
   const scale = PNG_SIZE / Math.max(1, canvasSize || PNG_SIZE);
   const bytes = strokesToPNG(scaleStrokes(strokes, scale), PNG_SIZE, PNG_SIZE);
-  const path = 'drawguess/dg_' + gameId + '_r' + round + '_' + Date.now() + '.png';
+  const path = `drawguess/dg_${gameId}_r${round}_${Date.now()}.png`;
 
+  // 上传不使用自动重试：超时后盲目重试会生成不可追踪的孤儿文件。
   const { error } = await supabase.storage
     .from(BUCKET)
     .upload(path, toArrayBuffer(bytes), {
@@ -44,13 +48,14 @@ export async function uploadDrawing({ gameId, round, strokes, canvasSize }) {
   if (error) throw error;
 
   const { data } = supabase.storage.from(BUCKET).getPublicUrl(path);
-  return { path, publicUrl: data && data.publicUrl };
+  const publicUrl = data && data.publicUrl;
+  if (!publicUrl) {
+    await removeUploadedPath(path);
+    throw new Error('未能获取图片地址');
+  }
+  return { path, publicUrl };
 }
 
-/**
- * 保存一轮画作到画廊。
- * @returns {Promise<{saved: boolean, reason?: string, row?: object}>}
- */
 export async function saveDrawingToGallery({
   gameId,
   round,
@@ -62,45 +67,68 @@ export async function saveDrawingToGallery({
   result,
   durationSec,
 }) {
-  if (!gameId || !strokes || strokes.length === 0) {
+  if (!gameId || !round || !strokes || strokes.length === 0) {
     return { saved: false, reason: '画布还是空的' };
   }
 
-  // 同一局同一轮只存一张（双方都点保存也不会重复）
-  const { data: exists, error: findError } = await fetchWithTimeout(() =>
+  const { data: existingRows, error: findError } = await fetchWithTimeout(() =>
     supabase
       .from('drawguess_gallery')
-      .select('id')
+      .select('*')
       .eq('game_id', gameId)
       .eq('round', round)
       .limit(1)
   );
   if (findError) throw findError;
-  if (exists && exists.length > 0) {
-    return { saved: false, reason: '这一轮的画已经在画廊里了' };
+  if (existingRows && existingRows[0]) {
+    return {
+      saved: false,
+      reason: '这一轮的画已经在画廊里了',
+      row: existingRows[0],
+    };
   }
 
-  const { publicUrl } = await uploadDrawing({ gameId, round, strokes, canvasSize });
-  if (!publicUrl) throw new Error('未能获取图片地址');
+  const uploaded = await uploadDrawing({ gameId, round, strokes, canvasSize });
+  const record = {
+    game_id: gameId,
+    drawer_id: drawerId,
+    guesser_id: guesserId,
+    word: word || '未知题目',
+    image_url: uploaded.publicUrl,
+    result: result || 'timeout',
+    duration_sec: durationSec != null ? durationSec : null,
+    round,
+  };
 
   const { data, error } = await fetchWithTimeout(() =>
-    supabase
-      .from('drawguess_gallery')
-      .insert([
-        {
-          game_id: gameId,
-          drawer_id: drawerId,
-          guesser_id: guesserId,
-          word: word || '未知题目',
-          image_url: publicUrl,
-          result: result || 'timeout',
-          duration_sec: durationSec != null ? durationSec : null,
-          round: round || null,
-        },
-      ])
-      .select()
+    supabase.from('drawguess_gallery').insert([record]).select()
   );
-  if (error) throw error;
+
+  if (error) {
+    // 双方同时点保存时，唯一索引只允许一个写入。若这是本次请求在网络超时前
+    // 已成功落库，则保留文件并返回成功；若对方先写入，则删除自己的多余上传。
+    if (error.code === '23505') {
+      const { data: rows } = await supabase
+        .from('drawguess_gallery')
+        .select('*')
+        .eq('game_id', gameId)
+        .eq('round', round)
+        .limit(1);
+      const existing = rows && rows[0];
+      if (existing && existing.image_url === uploaded.publicUrl) {
+        return { saved: true, row: existing };
+      }
+      await removeUploadedPath(uploaded.path);
+      return {
+        saved: false,
+        reason: '这一轮的画已经被对方保存了',
+        row: existing || null,
+      };
+    }
+    await removeUploadedPath(uploaded.path);
+    throw error;
+  }
+
   return { saved: true, row: data && data[0] };
 }
 
@@ -111,21 +139,19 @@ export async function deleteGalleryItem(item) {
   );
   if (error) throw error;
 
-  // 顺手清掉 Storage 里的文件（失败不影响主流程）
   try {
     const url = item.image_url || '';
     const marker = '/' + BUCKET + '/';
     const index = url.indexOf(marker);
     if (index >= 0) {
       const path = decodeURIComponent(url.slice(index + marker.length).split('?')[0]);
-      await supabase.storage.from(BUCKET).remove([path]);
+      await removeUploadedPath(path);
     }
-  } catch (e) {
-    console.warn('[DGAssets] 删除图片文件失败（记录已删除）:', e.message);
+  } catch (cleanupError) {
+    console.warn('[DrawGuessAssets] 记录已删除，但图片文件清理失败:', cleanupError.message);
   }
 }
 
-// ─── 自定义词库 ───
 export async function addCustomWord(userId, word) {
   const value = String(word || '').trim();
   if (!userId || !value) return null;
