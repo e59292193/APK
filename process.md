@@ -37,3 +37,17 @@
   - 根因：新架构 edge-to-edge（gradle.properties `edgeToEdgeEnabled=true`）下 Android adjustResize 失效，而 KAV 写法 `Platform.OS === 'ios' ? 'padding' : undefined` 在 Android 上等于未启用
   - 修复：三处统一改为 `behavior="padding"`——App.js 登录页、DrawGuessGameScreen 猜词/提示输入、CustomWordsModal 私房词库弹窗（DrawGuessModals.js）
 - **构建**：`BUILD SUCCESSFUL in 1m 10s`，APK 重新生成（87.5 MB，2026-08-14 22:56）
+
+### 2026-08-14 深度复查：小纸条与录音二次修复
+- **背景**：用户执行 SQL 后，小纸条仍不显示内容；录音计时仍停 0 秒
+- **服务端验证**：curl 端到端测试（INSERT → claim）完全正常，content 正确返回 → 服务端无问题，病灶在客户端
+- **录音根因（实锤）**：查 expo-audio 源码（node_modules/expo-audio/src/utils/useAudioRecorderState.ts + Audio.types.ts），`RecorderState` 的字段名是 **`durationMillis`**，而代码用的 `recorderState.durationMs` 永远是 undefined → 计时停 0、停止后时长 0 报"录音太短"。另外 preset 未含 `isMeteringEnabled`，波形 metering 也是 undefined
+- **录音修复**（VoiceMailboxScreen.js）：`durationMs` → `durationMillis`（3 处）；`useAudioRecorder({ ...RecordingPresets.HIGH_QUALITY, isMeteringEnabled: true })`
+- **小纸条根因（高嫌疑）**：`fetchWithTimeout` 默认重试 3 次——claim 是有副作用（at-most-once）的 RPC，首次超时但服务端已 claim 成功时，重试拿到空结果 → 纸条被误判 empty，内容永久丢失
+- **小纸条修复**：
+  1. ephemeralService.js：claimNote/claimVoice 改 `retries: 0, timeout: 20000`（绝不自动重试有副作用的操作）
+  2. SQL（ephemeral_schema.sql）：claim RPC 新增 `p_client_id` 幂等参数 + `claim_request_id` 列/索引——同一客户端超时重试返回同一张纸条，彻底防丢
+  3. 两个 Screen：claimSessionRef 会话 ID 贯穿失败重试（失败保留、成功清空）
+- **⚠️ 用户操作顺序（重要）**：**先**在 Supabase SQL Editor 重新执行 `src/lib/ephemeral_schema.sql`（幂等列 + 新 RPC 签名），**再**安装 23:15 新 APK。顺序反了会因 RPC 签名不匹配报错（新 APK 传 p_client_id，旧 SQL 无此参数）
+- **旧 APK 提醒**：上一轮 22:12/22:56 的 APK 中录音修复不完整（durationMillis 字段名 bug 是本轮才发现的），必须安装本轮 23:15 的 APK
+- **构建**：`BUILD SUCCESSFUL in 54s`，APK 87.5 MB（2026-08-14 23:15）

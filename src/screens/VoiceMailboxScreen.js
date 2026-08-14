@@ -59,6 +59,8 @@ export default function VoiceMailboxScreen({ userId, onBack }) {
   const sceneRef = useRef(null);
   const mountedRef = useRef(true);
   const claimInFlightRef = useRef(false);
+  // 本次抽取的幂等会话 ID：失败重试时复用，服务端返回同一段语音（防超时丢失）
+  const claimSessionRef = useRef(null);
 
   useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
 
@@ -101,8 +103,11 @@ export default function VoiceMailboxScreen({ userId, onBack }) {
     setSignedUrl(null);
     setSignedUrlError(false);
     try {
-      const voice = await claimVoice(userId);
+      if (!claimSessionRef.current) claimSessionRef.current = newClientRequestId();
+      const voice = await claimVoice(userId, claimSessionRef.current);
       if (!mountedRef.current) return;
+      // 成功或空都结束本次会话
+      claimSessionRef.current = null;
       if (!voice) {
         setDrawState('empty');
       } else {
@@ -117,6 +122,8 @@ export default function VoiceMailboxScreen({ userId, onBack }) {
         }
       }
     } catch (e) {
+      console.warn('[voice] 抽取语音失败:', e && (e.code || e.message || e));
+      // 保留会话 ID 供重试幂等
       if (mountedRef.current) {
         setErrorMsg('网络开小差了，稍后再试');
         setDrawState('error');
@@ -340,7 +347,11 @@ function VoiceIdleScene({ drawState, pendingCount, errorMsg, onDraw, reduceMotio
 // 录音场景
 // ═══════════════════════════════════════════════════════
 function RecordScene({ userId, partnerId, reduceMotion, onSent, onError }) {
-  const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  // isMeteringEnabled: true —— 波形（metering）依赖此选项，preset 默认未开启
+  const audioRecorder = useAudioRecorder({
+    ...RecordingPresets.HIGH_QUALITY,
+    isMeteringEnabled: true,
+  });
   const recorderState = useAudioRecorderState(audioRecorder);
 
   const [permissionGranted, setPermissionGranted] = useState(null); // null=未请求
@@ -366,24 +377,25 @@ function RecordScene({ userId, partnerId, reduceMotion, onSent, onError }) {
   }, [recorderState.metering]);
 
   // 同步录音状态与时长到 ref
+  // 注意：RecorderState 的字段名是 durationMillis（不是 durationMs）
   useEffect(() => {
     isRecordingRef.current = !!recorderState.isRecording;
     if (recorderState.isRecording) {
-      durationRef.current = Math.max(durationRef.current, recorderState.durationMs || 0);
+      durationRef.current = Math.max(durationRef.current, recorderState.durationMillis || 0);
     }
-  }, [recorderState.isRecording, recorderState.durationMs]);
+  }, [recorderState.isRecording, recorderState.durationMillis]);
 
   // 录音时长
   useEffect(() => {
     if (recorderState.isRecording) {
-      setDurationMs(recorderState.durationMs || 0);
+      setDurationMs(recorderState.durationMillis || 0);
       // 超过最大时长自动停止
-      if ((recorderState.durationMs || 0) >= MAX_DURATION_MS) {
+      if ((recorderState.durationMillis || 0) >= MAX_DURATION_MS) {
         stopRecording();
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [recorderState.isRecording, recorderState.durationMs]);
+  }, [recorderState.isRecording, recorderState.durationMillis]);
 
   // 卸载时清理
   useEffect(() => {
@@ -567,7 +579,7 @@ function RecordScene({ userId, partnerId, reduceMotion, onSent, onError }) {
             />
           </View>
 
-          <Text style={recStyles.timer}>{fmt(recorderState.isRecording ? recorderState.durationMs : 0)}</Text>
+          <Text style={recStyles.timer}>{fmt(recorderState.isRecording ? (recorderState.durationMillis || 0) : 0)}</Text>
 
           <TouchableOpacity
             style={[recStyles.recordBtn, recorderState.isRecording && recStyles.recordBtnActive]}

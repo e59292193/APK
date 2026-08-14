@@ -93,11 +93,18 @@ export async function sendNote({ senderId, receiverId, content, paperStyle, clie
 /**
  * 原子随机抽取一张发给当前用户、尚未查看的小纸条
  * @param {string} receiverId
+ * @param {string} [clientId] 本次抽取会话 ID（幂等）：超时重试时服务端返回同一张纸条
  * @returns {Promise<Object|null>} { id, sender_id, content, paper_style, claim_token, created_at }
  */
-export async function claimNote(receiverId) {
-  const { data, error } = await fetchWithTimeout(() =>
-    supabase.rpc('claim_ephemeral_note', { p_receiver: receiverId })
+export async function claimNote(receiverId, clientId) {
+  // claim 是有副作用（at-most-once）的操作，绝不能自动重试：
+  // 首次请求若超时，服务端可能已 claim 成功，自动重试会拿到空结果导致纸条丢失
+  const { data, error } = await fetchWithTimeout(
+    () => supabase.rpc('claim_ephemeral_note', {
+      p_receiver: receiverId,
+      ...(clientId ? { p_client_id: clientId } : {}),
+    }),
+    { retries: 0, timeout: 20000 }
   );
   if (error) throw error;
   // RPC 返回数组（RETURNS TABLE）；取第一条
@@ -220,11 +227,16 @@ export async function sendVoice({
 /**
  * 原子随机抽取一段语音
  * @param {string} receiverId
+ * @param {string} [clientId] 幂等会话 ID，同 claimNote
  * @returns {Promise<Object|null>}
  */
-export async function claimVoice(receiverId) {
-  const { data, error } = await fetchWithTimeout(() =>
-    supabase.rpc('claim_ephemeral_voice', { p_receiver: receiverId })
+export async function claimVoice(receiverId, clientId) {
+  const { data, error } = await fetchWithTimeout(
+    () => supabase.rpc('claim_ephemeral_voice', {
+      p_receiver: receiverId,
+      ...(clientId ? { p_client_id: clientId } : {}),
+    }),
+    { retries: 0, timeout: 20000 }
   );
   if (error) throw error;
   const row = Array.isArray(data) && data.length > 0 ? data[0] : null;

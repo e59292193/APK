@@ -127,8 +127,14 @@ END $$;
 --    使用 FOR UPDATE SKIP LOCKED 防止两台设备同时抽到同一张
 --    阅后即逝采用 at-most-once 语义：一旦 claimed，即使客户端
 --    崩溃不再 consume，该纸条也不会回到待抽取池（视为已送达并消失）。
+--    p_client_id 支持幂等：客户端超时重试时，同一请求 ID 返回同一张纸条，
+--    避免“服务端已 claim 成功、客户端超时重试拿到空结果导致纸条丢失”。
 -- ═══════════════════════════════════════════════════════
-CREATE OR REPLACE FUNCTION claim_ephemeral_note(p_receiver text)
+ALTER TABLE ephemeral_notes ADD COLUMN IF NOT EXISTS claim_request_id text;
+CREATE INDEX IF NOT EXISTS idx_ephemeral_notes_claim_req
+  ON ephemeral_notes(claim_request_id) WHERE claim_request_id IS NOT NULL;
+
+CREATE OR REPLACE FUNCTION claim_ephemeral_note(p_receiver text, p_client_id text DEFAULT NULL)
 RETURNS TABLE (
   id uuid,
   sender_id varchar,
@@ -142,6 +148,22 @@ DECLARE
   v_token uuid;
   v_row RECORD;
 BEGIN
+  -- 幂等恢复：该客户端请求此前已 claim 成功（如网络超时后重试），直接返回那张纸条
+  IF p_client_id IS NOT NULL THEN
+    SELECT e.* INTO v_row
+    FROM ephemeral_notes e
+    WHERE e.claim_request_id = p_client_id
+      AND e.status = 'claimed'
+      AND e.receiver_id = p_receiver
+    LIMIT 1;
+    IF FOUND THEN
+      RETURN QUERY
+        SELECT v_row.id, v_row.sender_id, v_row.content, v_row.paper_style,
+               v_row.claim_token, v_row.created_at;
+      RETURN;
+    END IF;
+  END IF;
+
   SELECT e.id INTO v_id
   FROM ephemeral_notes e
   WHERE e.receiver_id = p_receiver
@@ -158,7 +180,8 @@ BEGIN
   -- 注意：WHERE 必须用表名限定 id，否则与 RETURNS TABLE 的 OUT 参数 id
   -- 产生 42702 ambiguous column reference 错误（前端表现为“网络开小差”）
   UPDATE ephemeral_notes
-    SET status = 'claimed', claimed_at = now(), claim_token = v_token
+    SET status = 'claimed', claimed_at = now(), claim_token = v_token,
+        claim_request_id = p_client_id
     WHERE ephemeral_notes.id = v_id
     RETURNING * INTO v_row;
 
@@ -186,9 +209,13 @@ $$ LANGUAGE plpgsql;
 
 
 -- ═══════════════════════════════════════════════════════
--- 6. RPC：原子随机抽取语音
+-- 6. RPC：原子随机抽取语音（p_client_id 幂等，同小纸条）
 -- ═══════════════════════════════════════════════════════
-CREATE OR REPLACE FUNCTION claim_ephemeral_voice(p_receiver text)
+ALTER TABLE ephemeral_voice_messages ADD COLUMN IF NOT EXISTS claim_request_id text;
+CREATE INDEX IF NOT EXISTS idx_ephemeral_voice_claim_req
+  ON ephemeral_voice_messages(claim_request_id) WHERE claim_request_id IS NOT NULL;
+
+CREATE OR REPLACE FUNCTION claim_ephemeral_voice(p_receiver text, p_client_id text DEFAULT NULL)
 RETURNS TABLE (
   id uuid,
   sender_id varchar,
@@ -205,6 +232,22 @@ DECLARE
   v_token uuid;
   v_row RECORD;
 BEGIN
+  IF p_client_id IS NOT NULL THEN
+    SELECT e.* INTO v_row
+    FROM ephemeral_voice_messages e
+    WHERE e.claim_request_id = p_client_id
+      AND e.status = 'claimed'
+      AND e.receiver_id = p_receiver
+    LIMIT 1;
+    IF FOUND THEN
+      RETURN QUERY
+        SELECT v_row.id, v_row.sender_id, v_row.storage_path, v_row.duration_ms,
+               v_row.waveform, v_row.mime_type, v_row.file_size,
+               v_row.claim_token, v_row.created_at;
+      RETURN;
+    END IF;
+  END IF;
+
   SELECT e.id INTO v_id
   FROM ephemeral_voice_messages e
   WHERE e.receiver_id = p_receiver
@@ -220,7 +263,8 @@ BEGIN
   v_token := gen_random_uuid();
   -- 同上：表名限定 id，避免与 OUT 参数 id 歧义（42702）
   UPDATE ephemeral_voice_messages
-    SET status = 'claimed', claimed_at = now(), claim_token = v_token
+    SET status = 'claimed', claimed_at = now(), claim_token = v_token,
+        claim_request_id = p_client_id
     WHERE ephemeral_voice_messages.id = v_id
     RETURNING * INTO v_row;
 

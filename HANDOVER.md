@@ -16,10 +16,18 @@
 - 构建方式：`gradlew assembleRelease --no-daemon`，使用 JDK 21（D:\AndroidStudio\jbr）
 - 注意：release APK 用的是 `android/app/debug.keystore` 签名，仅适合开发调试，正式发布需配置正式签名（keystore）
 
+### 任务：小纸条与录音深度复查二次修复（2026-08-14 深夜）
+- 服务端已用 curl 端到端验证正常（INSERT → claim → content 返回），病灶在客户端
+- **录音根因**：expo-audio `RecorderState` 字段名是 `durationMillis`（源码实证），原代码 `durationMs` 恒为 undefined；且需 `isMeteringEnabled: true` 才有波形
+- **小纸条根因**：fetchWithTimeout 自动重试副作用 RPC（claim）→ 超时后重试拿到空 → 纸条丢失
+- **⚠️ 必须按顺序操作**：
+  1. 先在 Supabase SQL Editor 重新执行 `src/lib/ephemeral_schema.sql`（新增 claim_request_id 列 + claim RPC 带 p_client_id 幂等参数）
+  2. 再把 2026-08-14 23:15 打包的 app-release.apk 装到手机（旧 APK 的录音修复不完整）
+- 新 RPC 签名 `claim_ephemeral_note(p_receiver, p_client_id DEFAULT NULL)` 向后兼容旧客户端
+- 经验：写代码前先查 node_modules 里库的源码确认字段名；有副作用的 RPC 调用禁止自动重试
+
 ### 任务：修复小纸条/语音信箱/你画我猜问题（2026-08-14 晚）
 - 已修复 4 个问题（详见 process.md 同日记录），重新打包 APK 并推送 GitHub
-- **⚠️ 关键待办：小纸条修复需在 Supabase Dashboard → SQL Editor 重新执行 `src/lib/ephemeral_schema.sql`**（claim RPC 的 42702 歧义错误在服务端，仅改代码文件不生效）
-- 验证方法：执行 SQL 后，可 curl `POST /rest/v1/rpc/claim_ephemeral_note` body `{"p_receiver":"momo"}`，应返回 `[]` 或纸条数据而非 400 错误
 - 语音信箱录音修复要点：`await audioRecorder.record()`；试听 Player 拆为 PreviewPanel 子组件按需创建
 - 键盘遮挡根因：新架构 edge-to-edge 下 Android adjustResize 失效，所有 KeyboardAvoidingView 必须显式 `behavior="padding"`
 - 后续如有新输入界面，务必带上 KAV padding，勿再用 `Platform.OS === 'ios' ? 'padding' : undefined`

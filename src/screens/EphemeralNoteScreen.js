@@ -65,6 +65,9 @@ export default function EphemeralNoteScreen({ userId, onBack }) {
   const sceneRef = useRef(null);
   const mountedRef = useRef(true);
   const claimInFlightRef = useRef(false);
+  // 本次抽取的幂等会话 ID：失败重试时复用同一 ID，
+  // 服务端会把已 claim 的同一张纸条返回（防超时后纸条丢失）
+  const claimSessionRef = useRef(null);
 
   useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
 
@@ -112,8 +115,11 @@ export default function EphemeralNoteScreen({ userId, onBack }) {
     setDrawState('loading');
     setErrorMsg('');
     try {
-      const note = await claimNote(userId);
+      if (!claimSessionRef.current) claimSessionRef.current = newClientRequestId();
+      const note = await claimNote(userId, claimSessionRef.current);
       if (!mountedRef.current) return;
+      // 无论成功还是空，本次抽取会话结束；下次点击是新会话
+      claimSessionRef.current = null;
       if (!note) {
         setDrawState('empty');
       } else {
@@ -122,6 +128,7 @@ export default function EphemeralNoteScreen({ userId, onBack }) {
       }
     } catch (e) {
       console.warn('[ephemeral] 抽取纸条失败:', e && (e.code || e.message || e));
+      // 保留 claimSessionRef：重试时复用同一 ID，服务端幂等返回同一张纸条
       if (mountedRef.current) {
         setErrorMsg('网络开小差了，稍后再试');
         setDrawState('error');
