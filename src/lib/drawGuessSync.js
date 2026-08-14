@@ -116,11 +116,7 @@ function validSequence(value) {
 
 /**
  * 将 stroke_begin / stroke_pts / stroke_end 重组为完整笔画。
- *
- * 每个 stroke_pts 可携带 q（从 1 开始），stroke_end 携带最后一个 q。
- * IM 与 DB 的同一片段由 uid 去重，不同片段即便跨通道乱序，也会先放入 Map，
- * 只按 q 连续追加。end 先到时等待缺段；下一笔开始且上一笔没有 end 时才兜底收尾。
- * 不带 q 的旧客户端信号仍按到达顺序兼容处理。
+ * points 带 q（从 1 开始），end 带最后一个 q；旧客户端无 q 时仍兼容到达顺序。
  */
 export function createStrokeAssembler({
   width,
@@ -233,12 +229,13 @@ export function createStrokeAssembler({
       if (!si || done.has(si)) return;
       prunePending();
       const session = getSession(si);
-      if (session.stroke) return;
+      if (session.stroke || session.ready) return;
 
-      // 新 begin 证明上一笔手势已经结束；仅当上一笔连 end 都没收到时兜底收尾。
+      // 新 begin 是上一笔的硬边界。先拼上所有连续已到片段，再兜底收尾；
+      // 即使上一笔最后一段真的双通道都丢了，也不能阻塞后续全部笔画。
       if (activeSi && activeSi !== si) {
         const previous = sessions.get(activeSi);
-        if (previous && !previous.ended) markReady(previous);
+        if (previous && !previous.ready) markReady(previous);
       }
 
       session.stroke = {
@@ -258,6 +255,7 @@ export function createStrokeAssembler({
       if (!si || done.has(si)) return;
       prunePending();
       const session = getSession(si);
+      if (session.ready) return;
       const q = validSequence(sequence);
       if (q != null) {
         if (q >= session.nextQ && !session.chunks.has(q)) {
@@ -276,6 +274,7 @@ export function createStrokeAssembler({
       if (!si || done.has(si)) return;
       prunePending();
       const session = getSession(si);
+      if (session.ready) return;
       session.ended = true;
       const q = Number(lastSequence);
       session.endQ = Number.isInteger(q) && q >= 0 ? q : null;
