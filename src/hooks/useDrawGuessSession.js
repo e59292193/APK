@@ -1,7 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { AppState, PanResponder } from 'react-native';
 import { emitSignal, onSignal } from '../lib/realtimeSignal';
-import { pollSignals, pushSignal, pushSignals } from '../lib/drawGuessSignalQueue';
+import {
+  getLatestSignalId,
+  pollSignals,
+  pushSignal,
+  pushSignals,
+} from '../lib/drawGuessSignalQueue';
 import { isCorrectGuess } from '../lib/drawGuessUtils';
 import { saveDrawingToGallery } from '../lib/drawGuessAssets';
 import * as sync from '../lib/drawGuessSync';
@@ -34,11 +39,11 @@ const GAME_POLL_ACTIVE = 2500;
 const GAME_POLL_IDLE = 6000;
 const SIGNAL_POLL_DRAWING = 900;
 const SIGNAL_POLL_IDLE = 2400;
+const SIGNAL_PAGE_SIZE = 200;
 const OUTBOX_FLUSH_MS = 220;
 const PTS_FLUSH_MS = 80;
 const MAX_STROKE_POINTS = 900;
 const FEED_TTL = 4200;
-const PRIME_PAGE = 200;
 
 function roleOf(row, userId) {
   return row && row.creator_id === userId ? 'creator' : 'invitee';
@@ -123,6 +128,7 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
   const activeIdRef = useRef(gameId || null);
   const strokesRef = useRef([]);
   const liveRef = useRef(null);
+  const remoteLiveRef = useRef(null);
   const toolRef = useRef(tool);
   const customWordsRef = useRef([]);
   const canDrawRef = useRef(false);
@@ -153,9 +159,11 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
       width: size,
       height: size,
       onLive: (stroke) => {
+        remoteLiveRef.current = stroke;
         if (mountedRef.current) setRemoteStroke(stroke);
       },
       onComplete: (stroke) => {
+        remoteLiveRef.current = null;
         if (!mountedRef.current) return;
         const next = strokesRef.current.concat([stroke]);
         strokesRef.current = next;
@@ -202,6 +210,7 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
   function resetBoard() {
     setStrokeList([]);
     liveRef.current = null;
+    remoteLiveRef.current = null;
     strokeIdRef.current = null;
     lastPointRef.current = null;
     ptsRef.current = { si: null, flat: [], q: 0 };
@@ -214,6 +223,7 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
 
   function applyRow(rawRow, opts) {
     if (!rawRow || !mountedRef.current) return;
+    if (activeIdRef.current && rawRow.id !== activeIdRef.current) return;
     const previous = gameRef.current;
     const force = !!(opts && opts.force);
     if (
@@ -230,17 +240,23 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
     const leftDrawing = !!previous && previous.status === 'drawing' && row.status !== 'drawing';
     const enteredDrawing = !!previous && previous.status !== 'drawing' && row.status === 'drawing';
 
-    if (previous && (roundChanged || leftDrawing) && strokesRef.current.length > 0) {
-      snapshotRef.current = {
-        gameId: previous.id,
-        round: previous.round,
-        word: previous.word,
-        strokes: strokesRef.current,
-        drawerId:
-          previous.current_drawer === 'creator' ? previous.creator_id : previous.invitee_id,
-        guesserId:
-          previous.current_drawer === 'creator' ? previous.invitee_id : previous.creator_id,
-      };
+    if (previous && (roundChanged || leftDrawing)) {
+      const trailing = liveRef.current || remoteLiveRef.current;
+      const captured = trailing && trailing.points && trailing.points.length > 0
+        ? strokesRef.current.concat([sync.withPath(trailing)])
+        : strokesRef.current;
+      if (captured.length > 0) {
+        snapshotRef.current = {
+          gameId: previous.id,
+          round: previous.round,
+          word: previous.word,
+          strokes: captured,
+          drawerId:
+            previous.current_drawer === 'creator' ? previous.creator_id : previous.invitee_id,
+          guesserId:
+            previous.current_drawer === 'creator' ? previous.invitee_id : previous.creator_id,
+        };
+      }
     }
 
     if (roundChanged || enteredDrawing) {
@@ -813,6 +829,10 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
           apiRef.current.ensureJoined(row);
           setErrorText('');
         } else {
+          gameRef.current = null;
+          canDrawRef.current = false;
+          resetBoard();
+          setGame(null);
           setErrorText('这局游戏不存在或已被取消');
         }
       } catch (error) {
@@ -837,6 +857,18 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
     let cancelled = false;
     let timer = null;
 
+    const requestSnapshotIfNeeded = () => {
+      const current = gameRef.current;
+      if (
+        current &&
+        current.status === 'drawing' &&
+        !isDrawerOf(current, userId) &&
+        strokesRef.current.length === 0
+      ) {
+        apiRef.current.sendSignal('sync_request', { round: current.round });
+      }
+    };
+
     const schedule = () => {
       if (cancelled) return;
       const current = gameRef.current;
@@ -853,13 +885,29 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
         return;
       }
       try {
+        // 正常路径一次查询直接跳到队尾；失败时才退回每页 200 条的历史对齐。
+        if (primeRef.current) {
+          const latestId = await getLatestSignalId(activeId);
+          if (cancelled) return;
+          if (latestId !== null) {
+            lastSignalIdRef.current = latestId;
+            primeRef.current = false;
+            requestSnapshotIfNeeded();
+            schedule();
+            return;
+          }
+        }
+
         const result = await pollSignals(activeId, lastSignalIdRef.current);
         if (cancelled) return;
         lastSignalIdRef.current = result.maxId;
         const list = result.signals || [];
         const wasPriming = primeRef.current;
         if (wasPriming) {
-          if (list.length < PRIME_PAGE) primeRef.current = false;
+          if (list.length < SIGNAL_PAGE_SIZE) {
+            primeRef.current = false;
+            requestSnapshotIfNeeded();
+          }
         } else {
           for (let index = 0; index < list.length; index += 1) {
             const item = list[index];
@@ -867,21 +915,10 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
             apiRef.current.handleSignal(Object.assign({ type: item.type }, item.data || {}));
           }
         }
-        if (wasPriming && !primeRef.current) {
-          const current = gameRef.current;
-          if (
-            current &&
-            current.status === 'drawing' &&
-            !isDrawerOf(current, userId) &&
-            strokesRef.current.length === 0
-          ) {
-            apiRef.current.sendSignal('sync_request', { round: current.round });
-          }
-        }
       } catch (error) {
         // 静默兜底。
       } finally {
-        schedule();
+        if (!cancelled && !timer) schedule();
       }
     };
 
