@@ -13,6 +13,10 @@
 import { supabase } from './supabase';
 import { fetchWithTimeout } from './fetchWithTimeout';
 import { emitSignal } from './realtimeSignal';
+import { newClientRequestId, normalizeWaveform } from './ephemeralUtils';
+
+// 纯函数已迁移至 ephemeralUtils.js，此处再导出保持旧引用兼容
+export { newClientRequestId, normalizeWaveform };
 
 // 私有 Storage bucket（需在 Supabase 控制台手动创建，见交付说明）
 export const VOICE_BUCKET = 'ephemeral-voice';
@@ -68,8 +72,10 @@ export async function sendNote({ senderId, receiverId, content, paperStyle, clie
   };
 
   try {
-    const { data, error } = await fetchWithTimeout(() =>
-      supabase.from('ephemeral_notes').insert([row]).select().single()
+    const { data, error } = await fetchWithTimeout(
+      () => supabase.from('ephemeral_notes').insert([row]).select().single(),
+      // client_request_id 唯一键保证幂等，超时重试安全
+      { kind: 'write', idempotent: true }
     );
     if (error) throw error;
     notifyNote('created', data.id);
@@ -119,8 +125,10 @@ export async function claimNote(receiverId, clientId) {
  * @returns {Promise<boolean>} 是否成功
  */
 export async function consumeNote(id, claimToken) {
-  const { data, error } = await fetchWithTimeout(() =>
-    supabase.rpc('consume_ephemeral_note', { p_id: id, p_claim_token: claimToken })
+  const { data, error } = await fetchWithTimeout(
+    () => supabase.rpc('consume_ephemeral_note', { p_id: id, p_claim_token: claimToken }),
+    // consume 是一次性删除语义：超时后重试可能把“已消费”误报为失败
+    { retries: 0, timeout: 20000 }
   );
   if (error) throw error;
   const ok = !!data;
@@ -167,7 +175,7 @@ export async function sendVoice({
   if (!localUri) throw new Error('缺少录音文件');
   if (!clientRequestId) throw new Error('缺少 client_request_id');
 
-  // 1. 上传到私有 bucket：senderId/uuid.m4a
+  // 1. 上传到私有 bucket：senderId/uuid.m4a（路径确定性 → 重试可幂等）
   const ext = mimeType === 'audio/m4a' ? 'm4a' : 'm4a';
   const storagePath = `${senderId}/${clientRequestId}.${ext}`;
 
@@ -179,12 +187,16 @@ export async function sendVoice({
     throw new Error('读取录音文件失败: ' + e.message);
   }
 
-  const { error: upErr } = await fetchWithTimeout(() =>
-    supabase.storage
+  const { error: upErr } = await fetchWithTimeout(
+    () => supabase.storage
       .from(VOICE_BUCKET)
-      .upload(storagePath, body, { contentType: mimeType, upsert: false })
+      .upload(storagePath, body, { contentType: mimeType, upsert: false }),
+    // 上传不自动重试：路径确定，重试时下方 Duplicate 分支兜底幂等
+    { retries: 0, timeout: 30000 }
   );
-  if (upErr) throw upErr;
+  // 同一 clientRequestId 重试时文件可能已在上次尝试中上传成功——
+  // Duplicate 不是错误，直接进入写库步骤命中 23505 幂等恢复
+  if (upErr && !/duplicate/i.test(String(upErr.message || ''))) throw upErr;
 
   // 2. 写库（仅存 storage_path，不存公共 URL）
   const row = {
@@ -199,16 +211,19 @@ export async function sendVoice({
   };
 
   try {
-    const { data, error } = await fetchWithTimeout(() =>
-      supabase.from('ephemeral_voice_messages').insert([row]).select().single()
+    const { data, error } = await fetchWithTimeout(
+      () => supabase.from('ephemeral_voice_messages').insert([row]).select().single(),
+      // client_request_id 唯一键 + 23505 恢复 → 幂等，可安全重试
+      { kind: 'write', idempotent: true }
     );
     if (error) throw error;
     notifyVoice('created', data.id);
     return { id: data.id, storagePath };
   } catch (e) {
     if (e && e.code === '23505') {
-      // 库已存在（重复发送），回滚刚才的上传避免孤儿文件
-      supabase.storage.from(VOICE_BUCKET).remove([storagePath]).catch(() => {});
+      // 库中已有同一 clientRequestId 的行（重试场景）。
+      // ⚠️ 不删除 storagePath：路径由 clientRequestId 决定，删除会
+      // 把已存在行引用的文件一并删掉，造成语音永久丢失。
       const { data: existing } = await fetchWithTimeout(() =>
         supabase
           .from('ephemeral_voice_messages')
@@ -217,9 +232,16 @@ export async function sendVoice({
           .maybeSingle()
       );
       if (existing) return { id: existing.id, storagePath: existing.storage_path };
+      // 23505 却查不到行（极端）：留给定时清理，不再盲目删文件
+      throw e;
     }
-    // 写库失败：尽力删除已上传的孤儿文件
-    supabase.storage.from(VOICE_BUCKET).remove([storagePath]).catch(() => {});
+    // 写库失败：只有确定行未落库时才回滚上传。
+    // 超时类失败无法确定服务端结果——保留文件，避免删掉已成功行的音频；
+    // 孤儿文件由消费清理与定时任务兜底。
+    const isDefiniteFailure = !(e instanceof Error) || !/超时/.test(e.message || '');
+    if (isDefiniteFailure) {
+      supabase.storage.from(VOICE_BUCKET).remove([storagePath]).catch(() => {});
+    }
     throw e;
   }
 }
@@ -265,14 +287,18 @@ export async function createSignedVoiceUrl(storagePath) {
  * @returns {Promise<boolean>}
  */
 export async function consumeVoice(id, claimToken, storagePath) {
-  const { data, error } = await fetchWithTimeout(() =>
-    supabase.rpc('consume_ephemeral_voice', { p_id: id, p_claim_token: claimToken })
+  const { data, error } = await fetchWithTimeout(
+    () => supabase.rpc('consume_ephemeral_voice', { p_id: id, p_claim_token: claimToken }),
+    // consume 是一次性语义：超时后重试可能把“已消费”误报为失败
+    { retries: 0, timeout: 20000 }
   );
   if (error) throw error;
 
-  // RPC 返回 { ok, storage_path }
-  const ok = !!(data && data.ok);
-  const pathToDelete = (data && data.storage_path) || storagePath;
+  // consume_ephemeral_voice 是 RETURNS TABLE(ok, storage_path)，
+  // PostgREST 会返回数组 [{ ok, storage_path }]；兼容单对象与数组两种形态。
+  const result = Array.isArray(data) ? data[0] : data;
+  const ok = !!(result && result.ok);
+  const pathToDelete = (result && result.storage_path) || storagePath;
 
   if (ok) {
     notifyVoice('consumed', id);
@@ -313,44 +339,4 @@ export async function countPendingVoice(receiverId) {
   );
   if (error) throw error;
   return count || 0;
-}
-
-/**
- * 生成客户端去重 UUID（不依赖 crypto-js 的复杂用法）
- */
-export function newClientRequestId() {
-  // react-native-get-random-values 已在 App.js 顶部 import，polyfill UUID
-  // 使用 crypto.getRandomValues 构造 v4 UUID
-  const b = new Uint8Array(16);
-  crypto.getRandomValues(b);
-  b[6] = (b[6] & 0x0f) | 0x40;
-  b[8] = (b[8] & 0x3f) | 0x80;
-  const h = [...b].map((x) => x.toString(16).padStart(2, '0'));
-  return `${h.slice(0, 4).join('')}-${h.slice(4, 6).join('')}-${h.slice(6, 8).join('')}-${h.slice(8, 10).join('')}-${h.slice(10, 16).join('')}`;
-}
-
-/**
- * 把录音 metering（dB，通常 -160 ~ 0）采样归一化为 [0..1] 波形点
- * @param {number[]} samples  原始 metering 采样
- * @param {number} targetLen  目标点数（32~64）
- * @returns {number[]}
- */
-export function normalizeWaveform(samples, targetLen = 40) {
-  if (!samples || samples.length === 0) return new Array(targetLen).fill(0.06);
-  // 归一化：-50dB → 0，0dB → 1
-  const norm = samples.map((db) => {
-    const v = (db + 50) / 50; // -50..0 → 0..1
-    return Math.max(0.04, Math.min(1, v));
-  });
-  // 压缩/重采样到 targetLen
-  const out = [];
-  const step = norm.length / targetLen;
-  for (let i = 0; i < targetLen; i++) {
-    const start = Math.floor(i * step);
-    const end = Math.min(norm.length, Math.floor((i + 1) * step));
-    const slice = norm.slice(start, end || start + 1);
-    const peak = slice.reduce((m, x) => Math.max(m, x), 0.04);
-    out.push(Number(peak.toFixed(3)));
-  }
-  return out;
 }

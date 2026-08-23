@@ -30,7 +30,9 @@ let currentAppUserId = null;
 let initialized = false;
 let unsubMessage = null;
 let unsubKicked = null;
-let reconnecting = false;
+let reconnectTimer = null;
+let reconnectDelayMs = 3000;
+const RECONNECT_MAX_DELAY_MS = 60000;
 
 // ─── 初始化（登录）───
 export async function initSignal(appUserId) {
@@ -64,27 +66,32 @@ export async function initSignal(appUserId) {
   });
 
   unsubKicked = tim.onKickedOut(() => {
-    console.warn('[realtimeSignal] 被踢下线，3 秒后尝试重连');
+    console.warn(`[realtimeSignal] 被踢下线，${Math.round(reconnectDelayMs / 1000)} 秒后尝试重连`);
     scheduleReconnect(appUserId);
   });
 
+  reconnectDelayMs = 3000;
   initialized = true;
 }
 
-// ─── 重连（被踢/网络恢复）───
+// ─── 重连（被踢/网络恢复）：指数退避 3s→6s→…→60s ───
 function scheduleReconnect(appUserId) {
-  if (reconnecting) return;
-  reconnecting = true;
-  setTimeout(async () => {
-    reconnecting = false;
+  if (reconnectTimer) return; // 已有重连在排队
+  const delay = reconnectDelayMs;
+  reconnectDelayMs = Math.min(reconnectDelayMs * 2, RECONNECT_MAX_DELAY_MS);
+  reconnectTimer = setTimeout(async () => {
+    reconnectTimer = null;
+    // 退出登录 / 切换账号后不再重连
+    if (!initialized || currentAppUserId !== appUserId) return;
     try {
       await tim.login(appUserId);
+      reconnectDelayMs = 3000; // 成功后复位
       console.log('[realtimeSignal] 重连成功');
     } catch (e) {
-      console.warn('[realtimeSignal] 重连失败，30 秒后再试:', e.message);
+      console.warn(`[realtimeSignal] 重连失败，${Math.round(reconnectDelayMs / 1000)} 秒后再试:`, e.message);
       scheduleReconnect(appUserId);
     }
-  }, 3000);
+  }, delay);
 }
 
 // ─── 订阅 topic，返回取消订阅函数 ───
@@ -116,6 +123,11 @@ export async function emitSignal(topic, payload) {
 
 // ─── 断开（退出登录）───
 export async function disconnectSignal() {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  reconnectDelayMs = 3000;
   if (unsubMessage) { unsubMessage(); unsubMessage = null; }
   if (unsubKicked) { unsubKicked(); unsubKicked = null; }
   subscribers.clear();

@@ -21,16 +21,21 @@ let isReady = false;
 
 // 等待 SDK_READY（login 后异步触发）
 // 增加 5 秒超时：SDK 偶发 NOT_READY 时避免 sendCustom 永久挂起导致信号丢失
+// 超时后把自己从 resolver 队列移除，避免残留回调与数组增长
 function waitReady() {
   if (isReady) return Promise.resolve();
   return new Promise((resolve, reject) => {
+    let resolver = null;
     const timer = setTimeout(() => {
+      const index = readyResolvers.indexOf(resolver);
+      if (index >= 0) readyResolvers.splice(index, 1);
       reject(new Error('[tim] SDK_READY 等待超时'));
     }, 5000);
-    readyResolvers.push(() => {
+    resolver = () => {
       clearTimeout(timer);
       resolve();
-    });
+    };
+    readyResolvers.push(resolver);
   });
 }
 
