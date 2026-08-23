@@ -1245,7 +1245,7 @@ export default function GomokuGameScreen({ gameId, userId, onBack, onNavigateGam
       <Modal visible={adjustVisible} animationType="slide" transparent={false}>
         <KeyboardAvoidingView
           style={{ flex: 1 }}
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          behavior="padding"
         >
           <View style={[styles.modalContainer, { paddingTop: insets.top }]}>
             <View style={styles.modalHeader}>

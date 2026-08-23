@@ -1,7 +1,14 @@
 import React from 'react';
-import { Modal, View, Text, Pressable, StyleSheet, KeyboardAvoidingView, Platform, ScrollView } from 'react-native';
+import {
+  Modal,
+  View,
+  Text,
+  Pressable,
+  StyleSheet,
+  KeyboardAvoidingView,
+  ScrollView,
+} from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Ionicons } from '@expo/vector-icons';
 import { colors, typography, radius, spacing, shadows } from '../../theme';
 import IconButton from './IconButton';
 import Button from './Button';
@@ -22,11 +29,24 @@ export function BottomSheetContainer({
   const insets = useSafeAreaInsets();
 
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <Pressable style={styles.overlay} onPress={onClose}>
-        <Pressable
-          style={[styles.sheet, { paddingBottom: insets.bottom + spacing[3] }, style]}
-          onPress={(e) => e.stopPropagation()}
+    <Modal
+      visible={visible}
+      transparent
+      animationType="slide"
+      statusBarTranslucent
+      onRequestClose={onClose}
+    >
+      <KeyboardAvoidingView
+        behavior="padding"
+        style={styles.overlay}
+      >
+        <Pressable style={styles.backdrop} onPress={onClose} />
+        <View
+          style={[
+            styles.sheet,
+            { maxHeight, paddingBottom: insets.bottom + spacing[3] },
+            style,
+          ]}
         >
           <View style={styles.handle} />
           <View style={styles.header}>
@@ -34,10 +54,7 @@ export function BottomSheetContainer({
             <IconButton icon="close" size={22} onPress={onClose} accessibilityLabel="关闭" />
           </View>
 
-          <KeyboardAvoidingView
-            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-            style={{ flex: 1 }}
-          >
+          {scrollable ? (
             <ScrollView
               style={styles.body}
               contentContainerStyle={{ paddingBottom: spacing[4] }}
@@ -46,7 +63,9 @@ export function BottomSheetContainer({
             >
               {children}
             </ScrollView>
-          </KeyboardAvoidingView>
+          ) : (
+            <View style={styles.body}>{children}</View>
+          )}
 
           {actionLabel && (
             <View style={styles.footer}>
@@ -62,8 +81,8 @@ export function BottomSheetContainer({
               </Button>
             </View>
           )}
-        </Pressable>
-      </Pressable>
+        </View>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }
@@ -74,13 +93,16 @@ const styles = StyleSheet.create({
     backgroundColor: colors.overlay,
     justifyContent: 'flex-end',
   },
+  backdrop: {
+    ...StyleSheet.absoluteFillObject,
+  },
   sheet: {
     backgroundColor: colors.surface,
     borderTopLeftRadius: radius.xl,
     borderTopRightRadius: radius.xl,
     paddingTop: spacing[2],
     paddingHorizontal: spacing[5],
-    maxHeight: '85%',
+    flexShrink: 1,
     ...shadows.floating,
   },
   handle: {
@@ -98,8 +120,15 @@ const styles = StyleSheet.create({
     marginBottom: spacing[3],
   },
   title: { color: colors.textPrimary, flex: 1 },
-  body: { maxHeight: 400 },
-  footer: { paddingTop: spacing[3], borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border },
+  body: {
+    flexShrink: 1,
+  },
+  footer: {
+    paddingTop: spacing[3],
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.border,
+  },
 });
 
 export default BottomSheetContainer;
+

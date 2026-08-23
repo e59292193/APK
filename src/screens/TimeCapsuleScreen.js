@@ -814,7 +814,7 @@ export default function TimeCapsuleScreen({ userId: propUserId, onLogout }) {
         onRequestClose={handleModalClose}
       >
         <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          behavior="padding"
           style={styles.writeScreen}
         >
           {/* Write Header */}
