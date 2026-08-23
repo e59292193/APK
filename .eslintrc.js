@@ -8,6 +8,7 @@ module.exports = {
   env: {
     es2022: true,
     node: true,
+    jest: true,
   },
   plugins: ['react', 'react-hooks'],
   globals: {

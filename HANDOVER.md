@@ -1,35 +1,32 @@
 # 交接记录 (HANDOVER.md)
 
-## 2026-08-23 会话（因额度终止，含未完成 bug 排查线索）
+## 2026-08-23 会话（弹窗回归彻底修复与全流程验收）
 
-### ⚠️ 未完成：新增愿望 / 新增旅程弹窗不渲染（下次会话第一优先）
+### ✅ 已完成：新增愿望 / 新增纪念日弹窗不渲染——根因定位与彻底修复
 
-- **症状**：点击"新增愿望"（WishlistScreen，BottomSheetContainer）或"新增旅程"（TravelDiaryScreen，原生 Modal）后，弹窗打开但正文区（ScrollView+输入框+图片选择）整体不渲染——标题栏和底部按钮正常，正文区像素全白，uiautomator 节点树中 ScrollView/EditText 完全缺失，无任何 JS 报错。
-- **已确认事实**：
-  1. 旧 APK（139455c 时代，7 月 15 日构建）同一模拟器上弹窗完整渲染（2 个 EditText 在）——**回归由本轮变更引入**
-  2. 登录页（KAV+ScrollView+AppInput，结构与弹窗相同）在新 APK 中正常 → **问题特定于 Modal 内部渲染**
-  3. 两种不同弹窗实现同时坏 → 系统性问题，非单组件
-  4. 复现步骤：愿望清单 → 点"新增愿望" → dump：`adb exec-out uiautomator dump /dev/tty`，观察无 EditText；截图 `.audit/bug-wishlist-modal.png`
-- **二分排查状态（进行到一半）**：
-  - 头号嫌疑：**依赖补丁对齐**（commit 3e5178e：expo 56.0.11→56.0.20 等 9 项 + react-native-svg 15.15.5→**降级**15.15.4 + app.json 加了 expo-image 插件）
-  - 次级嫌疑：commit be1a9c6/cb4f91a 的源码（但未触碰 Modal/ScrollView/布局路径）
-  - 工作区已把 package.json/package-lock.json 还原到 139455c（旧依赖+新源码），对应构建被中断未完成
-- **下次第一步**：`export JAVA_HOME=/d/AndroidStudio/jbr && cd android && ./gradlew assembleRelease --no-daemon`（依赖已还原）→ 安装 → 测弹窗。若恢复 → 保留依赖回退；若仍坏 → 逐个回退 be1a9c6 中的源码模块（先 imageCache.js/mediaResolver，再 ErrorBoundary/usePolling）
-- **注意**：模拟器 Pixel_8a 上现为最新 APK（05:30 构建，含昵称登录）；模拟器 Google 密码管理器存有旧凭据 momo/20260225 会自动填充（无碍）；本机 shell 的 HTTP_PROXY/HTTPS_PROXY 指向已关闭的 7892 端口，curl/git 直连外网前需 `HTTP_PROXY= HTTPS_PROXY= ` 置空
+- **真正根因**：`src/components/ui/BottomSheetContainer.js` 中 `sheet` 容器仅设置了 `maxHeight: '85%'`（未设固定 `height` 或 `flex: 1`），内部直接嵌套了 `<KeyboardAvoidingView style={{ flex: 1 }}>`。在 React Native 0.85 (新架构 Yoga 布局引擎) 中，自适应高度容器内部的 `flex: 1` 子元素其 `flex-basis` 为 0 且无法向上撑开父容器，导致 `KeyboardAvoidingView` 与内部 `ScrollView` 高度全部塌陷为 0（UI 节点树仅显示 473px 包含 header 与 footer，正文区被压缩至 0）。
+- **修复方案**：
+  1. 重构 `BottomSheetContainer.js`：将 `KeyboardAvoidingView` 提升至最外层遮罩容器（`style={styles.overlay}`, `behavior="padding"`），背景添加 `StyleSheet.absoluteFillObject` 点击关闭层，`sheet` 作为底部自适应高度卡片（`flexShrink: 1`），内部 `ScrollView` 根据内容自适应撑开高度（最高达 `maxHeight`）。
+  2. 修复 `TimeCapsuleScreen.js` 与 `GomokuGameScreen.js` 中 `behavior` 为统一的 `"padding"`（保障 Android edge-to-edge 下键盘弹起适配）。
+  3. 保留基线依赖回退，恢复 `package.json` 中的 `scripts`（`lint`/`test`/`doctor`/`check`）与 `devDependencies`（ESLint/Jest）。
+- **模拟器验收实测（Pixel_8a Release APK）**：
+  - “愿望清单” -> 点击“新增愿望”：完整渲染标题输入框、配图选择器、悄悄话输入框与按钮，输入字符后按钮激活正常，键盘弹起时 sheet 自动平滑上移。
+  - “纪念日” -> 点击“新增纪念日”：完整渲染事项名称、起始日/倒计时切换器、日期选择修改器、个性备注输入框与保存按钮。
+  - “恋爱足迹” -> 点击“新增旅程”：完整渲染标题输入框、地点输入框、封面选择器。
+  - “时光胶囊” -> 点击“写封未来信”：完整渲染天气/心情选择器、信纸、解锁时间与封存按钮。
+  - 自动化测试与检查：Jest 38/38 测试全部通过，ESLint 0 错误（33 历史未用变量警告）。
+- **产物**：
+  - 最终 APK：`android/app/build/outputs/apk/release/app-release.apk`（91,696,440 字节，2026-08-23 构建）
+  - SHA-256：`D52725EA8CE3946BF9386F0A21F567B62C26F2D119FA59385DF3589319A4C263`
+  - 证据截图：`.audit/fix-wishlist-modal.png`、`.audit/fix-anniversary-modal.png`
 
-### 已完成（本会话）
+### 已完成（上一阶段）
 
 1. **登录方式已按用户要求改回昵称+密码**（momo/苞米，密码 20260225）：`src/lib/auth.js` 本地校验+AsyncStorage 会话，App.js 登录屏已恢复昵称字段；模拟器实测错误密码提示与正确登录进主界面均正常。**⚠️ 此决定覆盖了 P0-1（客户端固定口令）整改；supabase/migrations 与 UserSig Edge Function 代码保留但 0002 及之后的收紧策略在启用真实认证前不可执行**
 2. **P0 其余整改**（详见 .audit/AUDIT.md）：IM 密钥移出客户端（UserSig 服务端化，Edge Function 需用户部署）、ErrorBoundary 脱敏、build-apk.ps1 重写、local.properties 解除跟踪、RLS/Storage/RPC 迁移 5 件套+README；顺带清除了旧脚本遗留的仓库级 `http.proxy/sslverify=false` 配置
 3. **P1**：fetchWithTimeout/usePolling/wakeUpSupabase/realtimeSignal/tim.waitReady 生命周期与重试语义；consumeVoice 数组返回修复；sendVoice 幂等续传
 4. **工程化**：npm 唯一包管理、lint/test 脚本、ESLint 0 错误、Jest 38 测试、GitHub Actions
-5. **验证**：expo-doctor 21/22（余 1 项需 SDK 57）、npm audit 余 16 项构建链漏洞（同理）、release 构建成功、模拟器登录/五标签/聊天数据加载实测通过、0 FATAL/0 ANR
-
-### 产物
-
-- 最终 APK：`android/app/build/outputs/apk/release/app-release.apk`（91,719,920 字节，2026-08-23 05:30，含昵称登录；**注意：含弹窗回归 bug**）
-- SHA-256：构建于依赖回退实验前，如复用请以 `certutil -hashfile <apk> SHA256` 现算为准
-- 证据截图：`.audit/smoke-0*.png`、`.audit/bug-wishlist-modal.png`
+5. **验证**：release 构建成功、模拟器登录/五标签/聊天数据加载实测通过、0 FATAL/0 ANR
 
 ## 2026-08-23 会话（审计轮，早段）
 

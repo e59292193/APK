@@ -71,8 +71,13 @@
 - **验收状态**：Pixel_8a 停留登录页等用户检查；上轮 APK 遗留在模拟器 Google 密码库的 momo/20260225 会被自动填充——与新代码无关，正式使用前建议在模拟器清除或无视
 - **部署顺序（关键）**：控制台建 auth 账号 → 0001 → 部署 usersig → 双机装新 APK → 0002/0003/0004 → 0005 → 轮换 IM 密钥；顺序见 supabase/migrations/README.md
 
-### 2026-08-23 会话终止记录（AI 额度耗尽）
-- **进行中被打断**：新增愿望/新增旅程弹窗不渲染 bug 的二分排查。已完成：新旧 APK 对照（旧好新坏）、症状定位（Modal 内 ScrollView 子树整体缺失、登录页同构正常、两种弹窗实现齐坏）、头号嫌疑锁定（依赖补丁对齐 commit 3e5178e）
-- **工作区状态**：package.json/package-lock.json 已还原 139455c（对照实验用，未验证效果）；src/lib/auth.js 为昵称登录版（已实测可登录，未提交——本次会话末提交）
-- **模拟器**：已重装 05:30 版 APK（昵称登录）；该版含弹窗 bug，属已知问题
-- **下一步**：见 HANDOVER.md 顶部"未完成"一节，先跑完依赖回退构建验证
+### 2026-08-23 会话：弹窗回归彻底修复与全流程验收
+- **问题**：新增愿望 / 新增纪念日弹窗正文（输入框、表单、ScrollView）不渲染（高度塌陷为 0）
+- **根因（实锤）**：`src/components/ui/BottomSheetContainer.js` 中卡片 `sheet` 容器仅设 `maxHeight: '85%'` 没有固定高度或 `flex:1`，内部子节点直接包裹 `<KeyboardAvoidingView style={{ flex: 1 }}>`，导致 Yoga 引擎将其高度判定为 0，内层 ScrollView 与输入框无法展开。
+- **修复**：重构 `BottomSheetContainer.js` 为外层 overlay `KeyboardAvoidingView`（`behavior="padding"`）+ 内层 `sheet`（`flexShrink: 1`）+ `backdrop` 点击关闭层；修复 `TimeCapsuleScreen.js` / `GomokuGameScreen.js` 中的 `behavior="padding"` 规范。
+- **验证**：
+  1. `npm test`：38/38 测试全过。
+  2. `npm run lint`：0 错误。
+  3. `gradlew assembleRelease --no-daemon` 编译成功。
+  4. Pixel_8a 模拟器实测：愿望清单新增愿望、纪念日新增/编辑、恋爱足迹新增旅程、时光胶囊写未来信全部正常渲染并响应输入与键盘弹起；截图留档至 `.audit/fix-wishlist-modal.png` 与 `.audit/fix-anniversary-modal.png`。
+
