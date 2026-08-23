@@ -51,3 +51,15 @@
 - **⚠️ 用户操作顺序（重要）**：**先**在 Supabase SQL Editor 重新执行 `src/lib/ephemeral_schema.sql`（幂等列 + 新 RPC 签名），**再**安装 23:15 新 APK。顺序反了会因 RPC 签名不匹配报错（新 APK 传 p_client_id，旧 SQL 无此参数）
 - **旧 APK 提醒**：上一轮 22:12/22:56 的 APK 中录音修复不完整（durationMillis 字段名 bug 是本轮才发现的），必须安装本轮 23:15 的 APK
 - **构建**：`BUILD SUCCESSFUL in 54s`，APK 87.5 MB（2026-08-14 23:15）
+
+### 2026-08-14 终局修复：小纸条正文不显示（信纸高度塌陷）
+- **背景**：SQL 幂等修复后 claim 链路已通（RPC 测试正常返回 content），但模拟器实测信纸展开后正文区域仍空白（标题"来自 xx 的纸条"和"让它飞走"按钮可见，唯正文缺失）
+- **诊断方法**：
+  1. 用 anon key 直接调 REST/RPC 验证服务端 → claim 正常返回 content（"猪猪猪"），排除服务端
+  2. 模拟器安装 APK + uiautomator dump + 截图像素分析复现 → 信纸展开但正文区 0 像素内容
+- **根因（实锤）**：[NoteRevealScene.js](file:///d:/APK/APK/src/components/ephemeral/NoteRevealScene.js) 中 `letterWrap` 仅设 `maxHeight: '74%'` 而无确定高度 → 内部 `letter(flex:1)` → 正文 `Animated.View(flex:1)` → `ScrollView(flex:1)` 整条链高度塌陷为 0 → 正文 Text 无渲染空间
+- **修复**：`maxHeight: '74%'` → `height: '74%'`（flex 链获得确定父高度，正常撑开）
+- **验证**：重新构建 APK（23:42）安装模拟器，claim 真实成功（DB claimed_at 更新），用户确认功能正常
+- **测试数据**：测试用纸条 id `95c94d96...`（苞米→momo，"猪猪猪"）测试中被 claim 后已重置 pending，未丢失
+- **提交**：`139455c fix(ephemeral): 小纸条正文不显示——信纸高度塌陷修复`，已推送 origin/main
+- **构建**：`BUILD SUCCESSFUL in 1m 18s`，APK 87.5 MB（2026-08-14 23:42）

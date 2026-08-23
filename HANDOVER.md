@@ -2,6 +2,15 @@
 
 ## 2026-08-14 会话
 
+### 任务：小纸条正文不显示——终局修复（2026-08-14 深夜第二轮）
+- **真正根因（前几轮 SQL/重试修复都是必要的，但不是本症状的直接原因）**：NoteRevealScene.js 的 `letterWrap` 样式只有 `maxHeight: '74%'` 没有确定高度，RN 布局中内部整条 `flex:1` 链（letter → 正文 Animated.View → ScrollView）高度塌陷为 0 → claim 成功、数据正常，但正文 Text 无渲染空间，信纸空白
+- **修复**：一行改动 `maxHeight: '74%'` → `height: '74%'`，提交 `139455c` 已推送 GitHub
+- **最终 APK**：`android/app/build/outputs/apk/release/app-release.apk`（87.5 MB，2026-08-14 23:42），已含全部修复（SQL 幂等 + durationMillis + 高度塌陷），模拟器实测小纸条正常显示
+- **经验**：
+  1. "网络开小差"类报错不一定是网络问题——本次 UI 布局塌陷与 RPC 修复混在一起，需模拟器实测复现才能分离
+  2. RN 中 `maxHeight` 不构成"确定高度"，flex:1 子链需要父级有 height/flex 撑开
+  3. 模拟器 + uiautomator dump + 截图像素分析可以无多模态能力时验证渲染结果
+
 ### 任务：更新项目到 GitHub 最新版本
 - 本地项目已更新至 GitHub 最新提交 `4567780 fix(navigation): 修复加号模块全屏层穿透与点击失效`
 - 当前分支 `main` 与 `origin/main` 完全一致
