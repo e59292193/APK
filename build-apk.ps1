@@ -1,14 +1,27 @@
-﻿# =====================================================================
-# MOMO Corn - APK 一键打包脚本
-# 功能：拉取最新代码 → 自动探测环境 → 打包 release APK → 显示路径
-# 换电脑可用：自动探测 JDK / Android SDK / 代理，无需硬编码路径
 # =====================================================================
+# MOMO Corn - Android release APK 构建脚本（安全整改版）
+#
+# 与旧版的区别：
+#   - 不执行任何 git 操作（不 pull、不改全局代理、不关闭 SSL 校验）
+#   - 构建前显示当前 commit，由操作者确认代码状态
+#   - 步骤拆分、每步失败即退出并保留完整日志（build-output.log）
+#
+# 用法：
+#   .\build-apk.ps1                 # 直接构建（依赖已安装）
+#   .\build-apk.ps1 -InstallDeps    # 先执行 npm ci 再构建
+#   .\build-apk.ps1 -ProxyPort 7892 # 构建进程走本地代理（只影响本次，不改全局）
+# =====================================================================
+
+param(
+    [switch]$InstallDeps,
+    [int]$ProxyPort = 0
+)
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = $PSScriptRoot
 $AndroidDir = Join-Path $ProjectRoot "android"
+$LogFile = Join-Path $ProjectRoot "build-output.log"
 
-# ---------- 工具函数 ----------
 function Write-Step($msg) {
     Write-Host ""
     Write-Host "==========================================" -ForegroundColor Cyan
@@ -16,10 +29,15 @@ function Write-Step($msg) {
     Write-Host "==========================================" -ForegroundColor Cyan
 }
 
-function Write-OK($msg)    { Write-Host "[OK]   $msg" -ForegroundColor Green }
-function Write-Info($msg)  { Write-Host "[INFO] $msg" -ForegroundColor Yellow }
-function Write-Err($msg)   { Write-Host "[FAIL] $msg" -ForegroundColor Red }
-function Write-Detail($msg){ Write-Host "       $msg" -ForegroundColor Gray }
+function Write-OK($msg)   { Write-Host "[OK]   $msg" -ForegroundColor Green }
+function Write-Info($msg) { Write-Host "[INFO] $msg" -ForegroundColor Yellow }
+function Write-Err($msg)  { Write-Host "[FAIL] $msg" -ForegroundColor Red }
+
+function Fail($msg) {
+    Write-Err $msg
+    Write-Err "完整日志: $LogFile"
+    exit 1
+}
 
 function Test-PortOpen($port) {
     try {
@@ -31,61 +49,87 @@ function Test-PortOpen($port) {
     } catch { return $false }
 }
 
-# ---------- 环境探测 ----------
+# ---------- 步骤 0：确认代码状态 ----------
+Write-Step "步骤 0/4：确认代码状态（不做任何 git 操作）"
+
+if (Get-Command git -ErrorAction SilentlyContinue) {
+    $commit = git log --oneline -1 2>$null
+    $branch = git rev-parse --abbrev-ref HEAD 2>$null
+    $dirty = git status --porcelain 2>$null
+    Write-Host "  分支: $branch"
+    Write-Host "  提交: $commit"
+    if ($dirty) {
+        Write-Info "工作区有未提交改动，将按当前磁盘内容打包（不会自动拉取或覆盖）："
+        $dirty | Select-Object -First 8 | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
+    }
+} else {
+    Write-Info "未检测到 git，跳过版本展示"
+}
+
+# ---------- 步骤 1：依赖（可选） ----------
+Write-Step "步骤 1/4：依赖安装"
+
+if ($InstallDeps) {
+    if (-not (Test-Path (Join-Path $ProjectRoot "package-lock.json"))) {
+        Fail "缺少 package-lock.json，无法执行 npm ci"
+    }
+    Push-Location $ProjectRoot
+    try {
+        npm ci 2>&1 | Tee-Object -FilePath $LogFile -Append | Out-Null
+        if ($LASTEXITCODE -ne 0) { Fail "npm ci 失败" }
+        Write-OK "依赖安装完成"
+    } finally { Pop-Location }
+} else {
+    if (-not (Test-Path (Join-Path $ProjectRoot "node_modules"))) {
+        Fail "node_modules 不存在，请加 -InstallDeps 或先手动 npm ci"
+    }
+    Write-OK "跳过依赖安装（node_modules 已存在）"
+}
+
+# ---------- 步骤 2：探测 JDK ----------
+Write-Step "步骤 2/4：探测 JDK（需要 17+，推荐 21）"
+
 function Find-JdkHome {
-    # 1) JAVA_HOME
     if ($env:JAVA_HOME -and (Test-Path (Join-Path $env:JAVA_HOME "bin\javac.exe"))) {
         return $env:JAVA_HOME
     }
-    # 2) PATH 中的 javac
     $javacCmd = Get-Command javac.exe -ErrorAction SilentlyContinue
     if ($javacCmd) {
         $candidate = Split-Path (Split-Path $javacCmd.Source)
         if (Test-Path (Join-Path $candidate "bin\javac.exe")) { return $candidate }
     }
-    # 3) 常见安装路径
-    $candidates = @()
-    # 项目内（便携 JDK）
-    $candidates += (Get-ChildItem $ProjectRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^(jdk|jre|java)' }).FullName
-    # D 盘常见位置
-    $candidates += @("D:\Java\*", "D:\jdk*", "D:\Program Files\Java\*", "D:\Program Files\Eclipse Adoptium\*")
-    # C 盘常见位置
     $userName = $env:USERNAME
-    $candidates += @(
+    $candidates = @(
+        "D:\AndroidStudio\jbr",
+        "C:\Program Files\Android\Android Studio\jbr",
+        "D:\Program Files\Android\Android Studio\jbr",
         "C:\Program Files\Java\*",
         "C:\Program Files\Eclipse Adoptium\*",
         "C:\Program Files\Microsoft\jdk-*",
-        "C:\Program Files\Zulu\*",
-        "C:\Users\$userName\.jdks\*",
-        "C:\Users\$userName\AppData\Local\Programs\Eclipse Adoptium\*"
-    )
-    # Android Studio 内置 JBR
-    $candidates += @(
-        "D:\AndroidStudio\jbr",
-        "C:\Program Files\Android\Android Studio\jbr",
-        "D:\Program Files\Android\Android Studio\jbr"
+        "C:\Users\$userName\.jdks\*"
     )
     foreach ($pattern in $candidates) {
-        if (-not $pattern) { continue }
-        $paths = @()
-        if ($pattern -like "*\*") {
-            $paths = Get-Item $pattern -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
-        } else {
-            if (Test-Path $pattern) { $paths = @($pattern) }
-        }
+        $paths = Get-Item $pattern -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
         foreach ($p in $paths) {
-            if (-not $p) { continue }
-            if (Test-Path (Join-Path $p "bin\javac.exe")) { return $p }
+            if ($p -and (Test-Path (Join-Path $p "bin\javac.exe"))) { return $p }
         }
     }
     return $null
 }
 
+$jdkHome = Find-JdkHome
+if (-not $jdkHome) { Fail "未找到 JDK，请安装 JDK 21 或设置 JAVA_HOME" }
+$env:JAVA_HOME = $jdkHome
+$env:PATH = "$jdkHome\bin;" + $env:PATH
+$javacVer = & "$jdkHome\bin\javac.exe" -version 2>&1 | Out-String
+Write-OK "JDK: $jdkHome ($($javacVer.Trim()))"
+
+# ---------- 步骤 3：探测 Android SDK ----------
+Write-Step "步骤 3/4：探测 Android SDK"
+
 function Find-AndroidSdk {
-    # 1) 环境变量
     if ($env:ANDROID_HOME -and (Test-Path $env:ANDROID_HOME)) { return $env:ANDROID_HOME }
     if ($env:ANDROID_SDK_ROOT -and (Test-Path $env:ANDROID_SDK_ROOT)) { return $env:ANDROID_SDK_ROOT }
-    # 2) android/local.properties
     $localProps = Join-Path $AndroidDir "local.properties"
     if (Test-Path $localProps) {
         $line = Get-Content $localProps | Where-Object { $_ -match '^sdk\.dir=' } | Select-Object -First 1
@@ -94,16 +138,13 @@ function Find-AndroidSdk {
             if (Test-Path $sdk) { return $sdk }
         }
     }
-    # 3) 常见路径
     $userName = $env:USERNAME
     $candidates = @(
-        "D:\Android\Sdk",
         "D:\AndroidStudio\Sdk",
+        "D:\Android\Sdk",
         "D:\Sdk",
-        "D:\Android SDK",
         "C:\Android\Sdk",
-        "C:\Users\$userName\AppData\Local\Android\Sdk",
-        "C:\Users\$userName\AppData\Local\Android\sdk"
+        "C:\Users\$userName\AppData\Local\Android\Sdk"
     )
     foreach ($p in $candidates) {
         if (Test-Path $p) { return $p }
@@ -111,146 +152,41 @@ function Find-AndroidSdk {
     return $null
 }
 
-# =====================================================================
-# 主流程
-# =====================================================================
-
-Write-Host ""
-Write-Host "================================================" -ForegroundColor Magenta
-Write-Host "    MOMO Corn - APK 一键打包工具" -ForegroundColor Magenta
-Write-Host "================================================" -ForegroundColor Magenta
-Write-Host "  项目目录: $ProjectRoot"
-
-# ---------- 步骤 1：检测 Git 并拉取最新代码 ----------
-Write-Step "步骤 1/4：从 GitHub 拉取最新代码"
-
-if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-    Write-Err "未检测到 git，请先安装 Git 并加入 PATH"
-    exit 1
-}
-
-# 配置代理（仅当 7892 端口开放时）
-$proxyPort = 7892
-if (Test-PortOpen $proxyPort) {
-    Write-Info "检测到本地代理端口 $proxyPort 开放，启用代理"
-    $env:HTTP_PROXY  = "http://127.0.0.1:$proxyPort"
-    $env:HTTPS_PROXY = "http://127.0.0.1:$proxyPort"
-    git config http.proxy "http://127.0.0.1:$proxyPort" 2>$null
-    git config https.proxy "http://127.0.0.1:$proxyPort" 2>$null
-    git config http.sslBackend openssl 2>$null
-    git config http.sslVerify false 2>$null
-} else {
-    Write-Info "未检测到代理（端口 $proxyPort 未开放），使用直连"
-    git config --unset http.proxy 2>$null
-    git config --unset https.proxy 2>$null
-}
-
-# 配置 git 身份（若未设置）
-if (-not (git config user.name)) { git config user.name "e59292193" }
-if (-not (git config user.email)) { git config user.email "e59292193@users.noreply.github.com" }
-
-Write-Info "正在拉取远程最新代码..."
-try {
-    $pullOutput = git pull origin main 2>&1 | Out-String
-    Write-Host $pullOutput -ForegroundColor Gray
-    if ($LASTEXITCODE -eq 0) {
-        Write-OK "代码已更新到最新版本"
-    } else {
-        Write-Err "git pull 失败（继续尝试打包...）"
-    }
-} catch {
-    Write-Err "git pull 异常: $_（继续尝试打包...）"
-}
-
-$commit = git log --oneline -1
-Write-Host "当前版本: $commit" -ForegroundColor Gray
-
-# ---------- 步骤 2：探测 JDK ----------
-Write-Step "步骤 2/4：探测 JDK 环境"
-
-$jdkHome = Find-JdkHome
-if (-not $jdkHome) {
-    Write-Err "未找到 JDK（需要 JDK 17+，推荐 JDK 21）"
-    Write-Host ""
-    Write-Host "已尝试以下位置：" -ForegroundColor Yellow
-    Write-Host "  - JAVA_HOME 环境变量"
-    Write-Host "  - PATH 中的 javac"
-    Write-Host "  - 项目根目录下的 jdk 文件夹"
-    Write-Host "  - D:\Java\*, D:\AndroidStudio\jbr"
-    Write-Host "  - C:\Program Files\Java\*"
-    Write-Host '  - C:\Users\<用户名>\.jdks\*'
-    Write-Host ""
-    Write-Host "解决方法：" -ForegroundColor Yellow
-    Write-Host "  1. 安装 JDK 21 (推荐 Temurin): https://adoptium.net/"
-    Write-Host "  2. 或将 JDK 解压到项目根目录，命名为 jdk"
-    Write-Host '  3. 或设置环境变量: setx JAVA_HOME "<JDK路径>"'
-    exit 1
-}
-
-$env:JAVA_HOME = $jdkHome
-$env:PATH = "$jdkHome\bin;" + $env:PATH
-Write-OK "JDK: $jdkHome"
-$javacVer = & "$jdkHome\bin\javac.exe" -version 2>&1 | Out-String
-Write-Detail "javac 版本: $($javacVer.Trim())"
-
-# ---------- 步骤 3：探测 Android SDK ----------
-Write-Step "步骤 3/4：探测 Android SDK 环境"
-
 $sdkHome = Find-AndroidSdk
-if (-not $sdkHome) {
-    Write-Err "未找到 Android SDK"
-    Write-Host ""
-    Write-Host "已尝试以下位置：" -ForegroundColor Yellow
-    Write-Host "  - ANDROID_HOME / ANDROID_SDK_ROOT 环境变量"
-    Write-Host "  - android/local.properties"
-    Write-Host "  - D:\Android\Sdk, D:\AndroidStudio\Sdk"
-    Write-Host '  - C:\Users\<用户名>\AppData\Local\Android\Sdk'
-    Write-Host ""
-    Write-Host "解决方法：" -ForegroundColor Yellow
-    Write-Host "  1. 安装 Android Studio (含 SDK): https://developer.android.com/studio"
-    Write-Host '  2. 或设置环境变量: setx ANDROID_HOME "<SDK路径>"'
-    exit 1
-}
-
+if (-not $sdkHome) { Fail "未找到 Android SDK，请安装 Android Studio 或设置 ANDROID_HOME" }
 $env:ANDROID_HOME = $sdkHome
 $env:ANDROID_SDK_ROOT = $sdkHome
-$env:PATH = "$sdkHome\platform-tools;$sdkHome\cmdline-tools\latest\bin;" + $env:PATH
 Write-OK "Android SDK: $sdkHome"
 
-# 写入 local.properties（确保 Gradle 能找到 SDK）
-$localProps = Join-Path $AndroidDir "local.properties"
-$sdkPathEscaped = $sdkHome -replace '\\', '\\'
-"sdk.dir=$sdkPathEscaped" | Out-File -FilePath $localProps -Encoding ASCII -Force
-Write-Detail "已写入 $localProps"
-
-# ---------- 步骤 4：打包 release APK ----------
-Write-Step "步骤 4/4：打包 release APK（内嵌 JS bundle）"
+# ---------- 步骤 4：构建 ----------
+Write-Step "步骤 4/4：构建 release APK（内嵌 JS bundle，无需 Metro）"
 
 $gradlew = Join-Path $AndroidDir "gradlew.bat"
-if (-not (Test-Path $gradlew)) {
-    Write-Err "未找到 gradlew.bat: $gradlew"
-    exit 1
+if (-not (Test-Path $gradlew)) { Fail "未找到 gradlew.bat: $gradlew（android/ 目录缺失时先运行 npx expo prebuild --platform android）" }
+
+if ($ProxyPort -gt 0) {
+    if (Test-PortOpen $ProxyPort) {
+        Write-Info "构建进程使用本地代理 127.0.0.1:$ProxyPort（仅本次进程生效）"
+        $env:HTTP_PROXY = "http://127.0.0.1:$ProxyPort"
+        $env:HTTPS_PROXY = "http://127.0.0.1:$ProxyPort"
+    } else {
+        Write-Info "代理端口 $ProxyPort 未开放，直连构建"
+    }
 }
 
-Write-Info "开始构建（首次构建需 15-25 分钟，增量构建约 3-8 分钟）..."
-Write-Info "构建过程中会自动打包 JS bundle 到 APK，无需 Metro 开发服务器"
-Write-Host ""
-
+$env:NODE_ENV = "production"
 $startTime = Get-Date
 
-# Gradle 会向 stderr 输出警告（非错误），需要临时放宽错误策略
 $prevEAP = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
-$env:NODE_ENV = "production"
-
 Push-Location $AndroidDir
+$exitCode = 1
 try {
-    & $gradlew assembleRelease --no-daemon 2>&1 | ForEach-Object {
-        $line = $_.ToString()
-        if ($line -match 'Task |BUILD |FAILED|error:|Error|warning:.*deprecated') {
-            Write-Host $line -ForegroundColor Gray
+    & $gradlew assembleRelease --no-daemon 2>&1 | Tee-Object -FilePath $LogFile -Append |
+        ForEach-Object {
+            $line = $_.ToString()
+            if ($line -match 'Task |BUILD |FAILED|error:|Error') { Write-Host $line -ForegroundColor Gray }
         }
-    }
     $exitCode = $LASTEXITCODE
 } finally {
     Pop-Location
@@ -260,44 +196,19 @@ try {
 $elapsed = (Get-Date) - $startTime
 $elapsedStr = "{0}m {1}s" -f [int]$elapsed.TotalMinutes, $elapsed.Seconds
 
-# ---------- 结果展示 ----------
-Write-Step "打包结果"
+# ---------- 结果 ----------
+Write-Step "构建结果"
 
 if ($exitCode -eq 0) {
     $apkPath = Join-Path $AndroidDir "app\build\outputs\apk\release\app-release.apk"
-    if (Test-Path $apkPath) {
-        $apkFile = Get-Item $apkPath
-        $sizeMB = [math]::Round($apkFile.Length / 1MB, 2)
-
-        Write-OK "打包成功！耗时 $elapsedStr"
-        Write-Host ""
-        Write-Host "================================================" -ForegroundColor Green
-        Write-Host "  APK 文件信息" -ForegroundColor Green
-        Write-Host "================================================" -ForegroundColor Green
-        Write-Host "  路径: $($apkFile.FullName)" -ForegroundColor White
-        Write-Host "  大小: $sizeMB MB" -ForegroundColor White
-        Write-Host "  时间: $($apkFile.LastWriteTime)" -ForegroundColor White
-        Write-Host "================================================" -ForegroundColor Green
-        Write-Host ""
-        Write-Info "将上述 APK 文件传到手机安装即可使用"
-        Write-Info "此版本已内嵌 JS bundle，无需连接 Metro 开发服务器"
-
-        # 尝试在资源管理器中定位文件
-        try {
-            explorer.exe /select,$apkPath
-        } catch {}
-    } else {
-        Write-Err "构建成功但未找到 APK 文件: $apkPath"
-    }
+    if (-not (Test-Path $apkPath)) { Fail "构建成功但未找到 APK: $apkPath" }
+    $apkFile = Get-Item $apkPath
+    $sizeMB = [math]::Round($apkFile.Length / 1MB, 2)
+    Write-OK "构建成功！耗时 $elapsedStr"
+    Write-Host "  路径: $($apkFile.FullName)"
+    Write-Host "  大小: $sizeMB MB"
+    Write-Host "  时间: $($apkFile.LastWriteTime)"
+    exit 0
 } else {
-    Write-Err "打包失败！退出码: $exitCode，耗时 $elapsedStr"
-    Write-Host ""
-    Write-Host "常见问题排查：" -ForegroundColor Yellow
-    Write-Host "  1. 依赖下载失败 -> 确认网络/代理可用"
-    Write-Host "  2. SDK 版本不对 -> 检查 Android SDK Manager 安装 API 36"
-    Write-Host "  3. JDK 版本不对 -> 需要 JDK 17+，推荐 JDK 21"
-    Write-Host "  4. NDK 缺失     -> 通过 SDK Manager 安装 NDK 27.1.12297006"
-    Write-Host ""
-    Write-Host "完整构建日志请重新运行并查看控制台输出" -ForegroundColor Gray
-    exit $exitCode
+    Fail "构建失败，退出码 $exitCode，耗时 $elapsedStr"
 }

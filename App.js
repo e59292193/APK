@@ -12,7 +12,6 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useKeyboardHeight } from './src/hooks/useKeyboardHeight';
@@ -20,6 +19,15 @@ import { ErrorBoundary } from './src/components/ErrorBoundary';
 import { Button, AppInput } from './src/components/ui';
 import { colors, typography, spacing, radius } from './src/theme';
 import { lazyScreen } from './src/lib/lazyScreen';
+import {
+  signIn,
+  restoreSession,
+  restoreDevSession,
+  signOutSupabase,
+  devLogin,
+  isDevLoginAvailable,
+  KNOWN_USERS,
+} from './src/lib/auth';
 
 // loader 仅在页面第一次实际渲染时执行；未访问页面不会参与冷启动模块求值。
 const TimeCapsuleScreen = lazyScreen(() => require('./src/screens/TimeCapsuleScreen'));
@@ -35,30 +43,41 @@ const DrawGuessGameScreen = lazyScreen(() => require('./src/screens/DrawGuessGam
 const EphemeralNoteScreen = lazyScreen(() => require('./src/screens/EphemeralNoteScreen'));
 const VoiceMailboxScreen = lazyScreen(() => require('./src/screens/VoiceMailboxScreen'));
 
-const VALID_USERS = { momo: '20260225', '苞米': '20260225' };
-
 function LoginScreen({ onLogin }) {
   const insets = useSafeAreaInsets();
-  const [nickname, setNickname] = useState('');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  const devMode = isDevLoginAvailable();
 
   const handleLogin = async () => {
-    const name = nickname.trim();
-    if (!name || !password.trim()) {
-      setErrorMsg('请输入昵称和密码');
+    if (loading) return; // 防连点
+    const trimmedEmail = email.trim();
+    if (!trimmedEmail || !password.trim()) {
+      setErrorMsg('请输入邮箱和密码');
       return;
     }
     setErrorMsg('');
     setLoading(true);
     try {
-      if (VALID_USERS[name] === password) {
-        await AsyncStorage.setItem('user_id', name);
-        onLogin(name);
-      } else {
-        setErrorMsg('昵称或密码错误，请重新输入');
-      }
+      const { username } = await signIn(trimmedEmail, password);
+      onLogin(username);
+    } catch (error) {
+      setErrorMsg(error.message || '登录失败，请重试');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDevLogin = async (nickname) => {
+    if (loading) return;
+    setLoading(true);
+    try {
+      const { username } = await devLogin(nickname);
+      onLogin(username);
+    } catch (error) {
+      setErrorMsg(error.message);
     } finally {
       setLoading(false);
     }
@@ -93,15 +112,18 @@ function LoginScreen({ onLogin }) {
           <View style={loginStyles.formCard}>
             <Text style={loginStyles.formTitle}>欢迎回来</Text>
             <AppInput
-              label="昵称"
-              placeholder="输入你的昵称"
-              value={nickname}
+              label="邮箱"
+              placeholder="输入你的邮箱"
+              value={email}
               onChangeText={(value) => {
-                setNickname(value);
+                setEmail(value);
                 setErrorMsg('');
               }}
               autoCapitalize="none"
               autoCorrect={false}
+              keyboardType="email-address"
+              autoComplete="email"
+              textContentType="emailAddress"
             />
             <AppInput
               label="密码"
@@ -133,6 +155,23 @@ function LoginScreen({ onLogin }) {
               登录
             </Button>
             <Text style={loginStyles.hintText}>专属账号，仅限两人使用</Text>
+            {devMode ? (
+              <View style={loginStyles.devSection}>
+                <Text style={loginStyles.devHint}>开发模式（仅调试构建）：选择测试身份</Text>
+                <View style={loginStyles.devRow}>
+                  {KNOWN_USERS.map((name) => (
+                    <TouchableOpacity
+                      key={name}
+                      style={loginStyles.devBtn}
+                      onPress={() => handleDevLogin(name)}
+                      disabled={loading}
+                    >
+                      <Text style={loginStyles.devBtnText}>{name}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
+            ) : null}
           </View>
         </ScrollView>
       </KeyboardAvoidingView>
@@ -214,17 +253,21 @@ function MainApp() {
 
   useEffect(() => {
     let alive = true;
-    AsyncStorage.getItem('user_id')
-      .then((storedId) => {
-        if (alive && storedId && VALID_USERS[storedId]) {
-          setUserId(storedId);
+    (async () => {
+      try {
+        // 正式模式：恢复 Supabase Auth 会话；开发构建额外支持本地测试身份
+        let session = await restoreSession().catch(() => null);
+        if (!session && isDevLoginAvailable()) {
+          session = await restoreDevSession();
+        }
+        if (alive && session) {
+          setUserId(session.username);
           setIsLoggedIn(true);
         }
-      })
-      .catch((error) => console.warn('[App] 读取登录状态失败:', error.message))
-      .finally(() => {
+      } finally {
         if (alive) setInitializing(false);
-      });
+      }
+    })();
     return () => {
       alive = false;
     };
@@ -286,7 +329,7 @@ function MainApp() {
           } catch (error) {
             // IM 可能尚未加载，不影响退出。
           }
-          await AsyncStorage.removeItem('user_id');
+          await signOutSupabase();
           setFullscreenPage(null);
           setUserId('');
           setIsLoggedIn(false);
@@ -518,6 +561,26 @@ const loginStyles = StyleSheet.create({
     marginTop: spacing[4],
     color: colors.textMuted,
   },
+  devSection: {
+    marginTop: spacing[4],
+    padding: spacing[3],
+    borderRadius: radius.md,
+    backgroundColor: colors.primary[50],
+  },
+  devHint: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    textAlign: 'center',
+    marginBottom: spacing[2],
+  },
+  devRow: { flexDirection: 'row', justifyContent: 'center', gap: spacing[3] },
+  devBtn: {
+    paddingVertical: spacing[2],
+    paddingHorizontal: spacing[4],
+    borderRadius: radius.pill,
+    backgroundColor: colors.primary[100],
+  },
+  devBtnText: { ...typography.bodyMedium, color: colors.primaryAction },
 });
 
 const tabStyles = StyleSheet.create({

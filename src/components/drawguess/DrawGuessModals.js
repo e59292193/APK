@@ -20,8 +20,8 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
+import { ResolvedImage } from '../../lib/imageCache';
 
 const SCREEN_WIDTH = Dimensions.get('window').width;
 const THUMB = Math.floor((SCREEN_WIDTH - 48) / 2);
@@ -98,9 +98,9 @@ export const GalleryModal = memo(function GalleryModal({
               {list.map((item) => (
                 <View key={String(item.id)} style={styles.card}>
                   <TouchableOpacity activeOpacity={0.85} onPress={() => onOpenItem && onOpenItem(item)}>
-                    <Image
+                    <ResolvedImage
                       style={styles.thumb}
-                      source={{ uri: imageUri(item) }}
+                      value={imageUri(item)}
                       contentFit="cover"
                       cachePolicy="memory-disk"
                       transition={120}
@@ -147,9 +147,9 @@ export const ViewerModal = memo(function ViewerModal({
     <Modal visible transparent animationType="fade" onRequestClose={onClose}>
       <Pressable style={styles.viewerBackdrop} onPress={onClose}>
         <Pressable style={styles.viewerBody} onPress={() => {}}>
-          <Image
+          <ResolvedImage
             style={styles.viewerImage}
-            source={{ uri: imageUri(item) }}
+            value={imageUri(item)}
             contentFit="contain"
             cachePolicy="memory-disk"
             transition={150}

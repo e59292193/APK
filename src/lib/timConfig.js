@@ -1,20 +1,14 @@
 // ═══════════════════════════════════════════════════════
 // 腾讯云 IM 配置
 //
-// ⚠️ 使用前请先完成腾讯云控制台配置（见会话末尾的指引），
-//    然后把下面两个值替换成你的实际值。
+// ⚠️ SecretKey 绝不出现在客户端。
+// UserSig 由 Supabase Edge Function（supabase/functions/usersig）
+// 基于已登录会话签发，客户端只保存短期签名。
+// SDKAppID 本身是公开标识，可以留在客户端。
 // ═══════════════════════════════════════════════════════
 
-// 在【即时通信 IM 控制台】→【应用管理】→ 新建应用 后，
-// 应用详情页顶部能看到 SDKAppID（一串数字）
-export const TIM_SDKAPPID = 1600149512; // TODO: 替换为你的 SDKAppID（数字类型，例如 1400123456）
-
-// 在应用详情页 →【辅助功能】→【UserSig 工具】或【密钥】处查看
-// 一串 64 位十六进制字符串（形如 5bd2850fff3ecb11d7c805251c51ee463a25727bddc2385f3fa8bfee1bb93b5e）
-export const TIM_SECRET_KEY = '7364e2eb4c0e4804bb3a332e4ca7074abeb2c145df39c5bfe528ad59147c55ad'; // TODO: 替换为你的 SecretKey
-
-// UserSig 有效期（秒）。180 天 = 180 * 86400
-export const USER_SIG_EXPIRE = 180 * 24 * 3600;
+// 在【即时通信 IM 控制台】→【应用管理】中查看 SDKAppID（一串数字）
+export const TIM_SDKAPPID = 1600149512;
 
 // ─── 用户 ID 映射 ───
 // 腾讯 IM 的 userID 只允许大小写字母、数字、下划线、连字符，不支持中文。

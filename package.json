@@ -48,7 +48,10 @@
   "private": true,
   "devDependencies": {
     "@babel/core": "^7.25.0",
+    "@babel/eslint-parser": "^8.0.1",
     "eslint": "^8.57.0",
+    "eslint-plugin-react": "^7.37.5",
+    "eslint-plugin-react-hooks": "^7.1.1",
     "jest": "^29.7.0",
     "jest-expo": "~56.0.0"
   }

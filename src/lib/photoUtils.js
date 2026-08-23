@@ -13,7 +13,7 @@ const UPLOAD_CONCURRENCY = 4;
  * @param {object} options
  * @param {number} [options.quality=0.5] - JPEG quality 0-1
  * @param {number} [options.maxWidth=1080] - Max width in pixels
- * @returns {Promise<string|null>} - Public URL or null if cancelled
+ * @returns {Promise<string|null>} - Storage path or null if cancelled
  */
 export async function pickAndUploadImage(options = {}) {
   const {
@@ -56,7 +56,8 @@ export async function pickAndUploadImage(options = {}) {
  * @param {number} [options.quality=0.5] - JPEG quality 0-1
  * @param {number} [options.maxWidth=1080] - Max width in pixels
  * @param {string} [options.folder='uploads'] - Storage folder name
- * @returns {Promise<string>} - Public URL of uploaded image
+ * @returns {Promise<string>} - Storage path inside the private photos bucket.
+ *                              渲染时经 mediaResolver.resolvePhotosUrl 换取 signed URL。
  */
 export async function compressAndUpload(uri, options = {}) {
   const {
@@ -105,16 +106,8 @@ export async function compressAndUpload(uri, options = {}) {
     throw new Error('图片上传失败，请重试');
   }
 
-  // Step 3: Get public URL
-  const { data: urlData } = supabase.storage
-    .from('photos')
-    .getPublicUrl(filePath);
-
-  if (!urlData || !urlData.publicUrl) {
-    throw new Error('获取图片链接失败');
-  }
-
-  return urlData.publicUrl;
+  // Step 3: photos 为私有 bucket——只返回路径，不生成公开 URL
+  return filePath;
 }
 
 /**
@@ -122,7 +115,7 @@ export async function compressAndUpload(uri, options = {}) {
  * Alias for compressAndUpload — keeps backward compatibility.
  * @param {string} uri - Local file URI
  * @param {object} [options]
- * @returns {Promise<string>} - Public URL
+ * @returns {Promise<string>} - Storage path
  */
 export async function uploadImage(uri, options = {}) {
   return compressAndUpload(uri, options);
@@ -134,7 +127,7 @@ export async function uploadImage(uri, options = {}) {
  * JS thread blocking and memory pressure from simultaneous compression.
  * @param {string[]} uris - Array of local file URIs
  * @param {object} [options] - Same options as compressAndUpload
- * @returns {Promise<string[]>} - Array of public URLs
+ * @returns {Promise<string[]>} - Array of storage paths
  */
 export async function uploadImages(uris, options = {}) {
   const results = [];

@@ -6,15 +6,36 @@
  * Optimized: React.memo prevents unnecessary re-renders from parent.
  * Modal is lazy-mounted (only when user taps to preview).
  */
-import React, { useState, useCallback, memo } from 'react';
+import React, { useState, useEffect, useCallback, memo } from 'react';
 import { Image } from 'expo-image';
 import { Modal, View, TouchableOpacity, StyleSheet, Text, ActivityIndicator, Platform } from 'react-native';
 import { saveImageToGallery } from './imageSaver';
+import { resolvePhotosUrl } from './mediaResolver';
 
 const DEFAULT_BLURHASH = 'L6PZfSi_.AyE_3t7t7R**0o#DgR4';
 
 function CachedImageInner({ style, source, contentFit, placeholder, transition, previewable = true, ...rest }) {
-  const imageSource = typeof source === 'string' ? source : source?.uri || source;
+  const rawSource = typeof source === 'string' ? source : source?.uri || source;
+
+  // photos bucket 已私有化：数据库里存的可能是 bucket 路径或旧公开 URL，
+  // 统一在这里异步换取 signed URL（模块级缓存，二次渲染零开销）。
+  const [imageSource, setImageSource] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    setImageSource(null);
+    if (!rawSource) return undefined;
+    resolvePhotosUrl(rawSource)
+      .then((url) => {
+        if (alive) setImageSource(url || rawSource);
+      })
+      .catch(() => {
+        // 解析失败时回退原始值（bucket 尚未私有化的兼容窗口内仍可显示）
+        if (alive) setImageSource(rawSource);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [rawSource]);
 
   const [modalVisible, setModalVisible] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -114,6 +135,37 @@ function CachedImageInner({ style, source, contentFit, placeholder, transition, 
 
 // Memoize to prevent re-renders when parent re-renders but props haven't changed
 export const CachedImage = memo(CachedImageInner);
+
+/**
+ * 轻量解析版图片：直接接收数据库存的图片值（bucket 路径或旧 URL），
+ * 自动换取 signed URL 后渲染。无预览交互，适合缩略图网格等场景。
+ */
+export function ResolvedImage({ value, ...props }) {
+  const [uri, setUri] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    setUri(null);
+    if (!value) return undefined;
+    resolvePhotosUrl(value)
+      .then((url) => {
+        if (alive) setUri(url || value);
+      })
+      .catch(() => {
+        if (alive) setUri(value);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [value]);
+
+  return (
+    <Image
+      source={uri ? { uri } : null}
+      placeholder={{ blurhash: DEFAULT_BLURHASH }}
+      {...props}
+    />
+  );
+}
 
 const styles = StyleSheet.create({
   modalBg: {

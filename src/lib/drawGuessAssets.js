@@ -47,13 +47,8 @@ export async function uploadDrawing({ gameId, round, strokes, canvasSize }) {
     });
   if (error) throw error;
 
-  const { data } = supabase.storage.from(BUCKET).getPublicUrl(path);
-  const publicUrl = data && data.publicUrl;
-  if (!publicUrl) {
-    await removeUploadedPath(path);
-    throw new Error('未能获取图片地址');
-  }
-  return { path, publicUrl };
+  // 私有 bucket：只返回路径，渲染层经 mediaResolver 换取 signed URL
+  return { path };
 }
 
 export async function saveDrawingToGallery({
@@ -94,7 +89,7 @@ export async function saveDrawingToGallery({
     drawer_id: drawerId,
     guesser_id: guesserId,
     word: word || '未知题目',
-    image_url: uploaded.publicUrl,
+    image_url: uploaded.path,
     result: result || 'timeout',
     duration_sec: durationSec != null ? durationSec : null,
     round,
@@ -115,7 +110,7 @@ export async function saveDrawingToGallery({
         .eq('round', round)
         .limit(1);
       const existing = rows && rows[0];
-      if (existing && existing.image_url === uploaded.publicUrl) {
+      if (existing && existing.image_url === uploaded.path) {
         return { saved: true, row: existing };
       }
       await removeUploadedPath(uploaded.path);
