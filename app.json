@@ -6,8 +6,6 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "jsEngine": "hermes",
-    "newArchEnabled": true,
     "android": {
       "package": "com.ourspace.app",
       "softwareKeyboardLayoutMode": "resize",
@@ -47,7 +45,8 @@
       ],
       "expo-sharing",
       "expo-asset",
-      "expo-font"
+      "expo-font",
+      "expo-image"
     ],
     "extra": {
       "eas": {
