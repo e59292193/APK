@@ -63,3 +63,10 @@
 - **测试数据**：测试用纸条 id `95c94d96...`（苞米→momo，"猪猪猪"）测试中被 claim 后已重置 pending，未丢失
 - **提交**：`139455c fix(ephemeral): 小纸条正文不显示——信纸高度塌陷修复`，已推送 origin/main
 - **构建**：`BUILD SUCCESSFUL in 1m 18s`，APK 87.5 MB（2026-08-14 23:42）
+### 2026-08-23 全应用审计与 P0/P1 修复（audit/full-app-stabilization-20260823）
+- **审计实证**：仅用公开 anon key 即可读写全部生产表（430 条聊天、183 条打卡等）与匿名列出 photos bucket——P0 数据裸露实锤；drawguess_signals 已积 4704 行
+- **P0 修复**：Supabase Auth 登录（移除 App.js 固定口令 momo/苞米:20260225）；timConfig 移除 SecretKey、UserSig 服务端化（Edge Function 待用户部署）；RLS/Storage/RPC 迁移 0001-0005 待用户按 README 顺序执行；photos 路径化+signed URL；ErrorBoundary 脱敏；build-apk.ps1 重写；local.properties 解除跟踪
+- **P1 修复**：consumeVoice 把 RETURNS TABLE 数组按对象读导致音频永不删除（对照 schema 实锤）；sendVoice 23505 恢复误删同路径文件；fetchWithTimeout/usePolling/wakeUpSupabase/realtimeSignal/tim.waitReady 生命周期与重试语义
+- **验证**：npm ci ✅ / expo-doctor 21/22（余 1 项需 SDK 57） / lint 0 错误 / jest 38/38 / assembleRelease 4m10s ✅ / 模拟器安装启动 0 FATAL
+- **验收状态**：Pixel_8a 停留登录页等用户检查；上轮 APK 遗留在模拟器 Google 密码库的 momo/20260225 会被自动填充——与新代码无关，正式使用前建议在模拟器清除或无视
+- **部署顺序（关键）**：控制台建 auth 账号 → 0001 → 部署 usersig → 双机装新 APK → 0002/0003/0004 → 0005 → 轮换 IM 密钥；顺序见 supabase/migrations/README.md
