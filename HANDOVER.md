@@ -1,6 +1,37 @@
 # 交接记录 (HANDOVER.md)
 
-## 2026-08-23 会话
+## 2026-08-23 会话（因额度终止，含未完成 bug 排查线索）
+
+### ⚠️ 未完成：新增愿望 / 新增旅程弹窗不渲染（下次会话第一优先）
+
+- **症状**：点击"新增愿望"（WishlistScreen，BottomSheetContainer）或"新增旅程"（TravelDiaryScreen，原生 Modal）后，弹窗打开但正文区（ScrollView+输入框+图片选择）整体不渲染——标题栏和底部按钮正常，正文区像素全白，uiautomator 节点树中 ScrollView/EditText 完全缺失，无任何 JS 报错。
+- **已确认事实**：
+  1. 旧 APK（139455c 时代，7 月 15 日构建）同一模拟器上弹窗完整渲染（2 个 EditText 在）——**回归由本轮变更引入**
+  2. 登录页（KAV+ScrollView+AppInput，结构与弹窗相同）在新 APK 中正常 → **问题特定于 Modal 内部渲染**
+  3. 两种不同弹窗实现同时坏 → 系统性问题，非单组件
+  4. 复现步骤：愿望清单 → 点"新增愿望" → dump：`adb exec-out uiautomator dump /dev/tty`，观察无 EditText；截图 `.audit/bug-wishlist-modal.png`
+- **二分排查状态（进行到一半）**：
+  - 头号嫌疑：**依赖补丁对齐**（commit 3e5178e：expo 56.0.11→56.0.20 等 9 项 + react-native-svg 15.15.5→**降级**15.15.4 + app.json 加了 expo-image 插件）
+  - 次级嫌疑：commit be1a9c6/cb4f91a 的源码（但未触碰 Modal/ScrollView/布局路径）
+  - 工作区已把 package.json/package-lock.json 还原到 139455c（旧依赖+新源码），对应构建被中断未完成
+- **下次第一步**：`export JAVA_HOME=/d/AndroidStudio/jbr && cd android && ./gradlew assembleRelease --no-daemon`（依赖已还原）→ 安装 → 测弹窗。若恢复 → 保留依赖回退；若仍坏 → 逐个回退 be1a9c6 中的源码模块（先 imageCache.js/mediaResolver，再 ErrorBoundary/usePolling）
+- **注意**：模拟器 Pixel_8a 上现为最新 APK（05:30 构建，含昵称登录）；模拟器 Google 密码管理器存有旧凭据 momo/20260225 会自动填充（无碍）；本机 shell 的 HTTP_PROXY/HTTPS_PROXY 指向已关闭的 7892 端口，curl/git 直连外网前需 `HTTP_PROXY= HTTPS_PROXY= ` 置空
+
+### 已完成（本会话）
+
+1. **登录方式已按用户要求改回昵称+密码**（momo/苞米，密码 20260225）：`src/lib/auth.js` 本地校验+AsyncStorage 会话，App.js 登录屏已恢复昵称字段；模拟器实测错误密码提示与正确登录进主界面均正常。**⚠️ 此决定覆盖了 P0-1（客户端固定口令）整改；supabase/migrations 与 UserSig Edge Function 代码保留但 0002 及之后的收紧策略在启用真实认证前不可执行**
+2. **P0 其余整改**（详见 .audit/AUDIT.md）：IM 密钥移出客户端（UserSig 服务端化，Edge Function 需用户部署）、ErrorBoundary 脱敏、build-apk.ps1 重写、local.properties 解除跟踪、RLS/Storage/RPC 迁移 5 件套+README；顺带清除了旧脚本遗留的仓库级 `http.proxy/sslverify=false` 配置
+3. **P1**：fetchWithTimeout/usePolling/wakeUpSupabase/realtimeSignal/tim.waitReady 生命周期与重试语义；consumeVoice 数组返回修复；sendVoice 幂等续传
+4. **工程化**：npm 唯一包管理、lint/test 脚本、ESLint 0 错误、Jest 38 测试、GitHub Actions
+5. **验证**：expo-doctor 21/22（余 1 项需 SDK 57）、npm audit 余 16 项构建链漏洞（同理）、release 构建成功、模拟器登录/五标签/聊天数据加载实测通过、0 FATAL/0 ANR
+
+### 产物
+
+- 最终 APK：`android/app/build/outputs/apk/release/app-release.apk`（91,719,920 字节，2026-08-23 05:30，含昵称登录；**注意：含弹窗回归 bug**）
+- SHA-256：构建于依赖回退实验前，如复用请以 `certutil -hashfile <apk> SHA256` 现算为准
+- 证据截图：`.audit/smoke-0*.png`、`.audit/bug-wishlist-modal.png`
+
+## 2026-08-23 会话（审计轮，早段）
 
 ### 任务：全应用审计、P0/P1 修复、构建与模拟器验收（分支 audit/full-app-stabilization-20260823）
 - **基线**：main @ 139455c；审计分支 6 个提交（文档同步 / 基线整备 / P0 安全 / P1 网络与语音 / CI）
