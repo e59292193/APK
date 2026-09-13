@@ -1,7 +1,7 @@
 import React from 'react';
 import { View, Text, Pressable, StyleSheet } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { colors, typography, spacing, layout } from '../../theme';
+import { colors, typography, spacing, layout, useTheme } from '../../theme';
 import { IconButton } from './IconButton';
 
 export function AppHeader({
@@ -17,10 +17,21 @@ export function AppHeader({
   style,
 }) {
   const insets = useSafeAreaInsets();
+  const { colors: currentColors = colors } = useTheme();
   const height = compact ? layout.headerHeightCompact : layout.headerHeight;
 
   return (
-    <View style={[styles.container, { paddingTop: insets.top }, style]}>
+    <View
+      style={[
+        styles.container,
+        {
+          backgroundColor: currentColors.backgroundLavender,
+          borderBottomColor: currentColors.border,
+          paddingTop: insets.top,
+        },
+        style,
+      ]}
+    >
       <View style={[styles.content, { height }]}>
         <View style={styles.left}>
           {showBack ? (

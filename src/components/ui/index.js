@@ -14,3 +14,4 @@ export { Avatar } from './Avatar';
 export { BottomSheetContainer } from './BottomSheetContainer';
 export { BottomActionBar } from './BottomActionBar';
 export { SectionHeader } from './SectionHeader';
+export { CenterToast } from './CenterToast';

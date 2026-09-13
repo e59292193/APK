@@ -5,6 +5,7 @@ import { colors, layout } from '../../theme';
 
 export function IconButton({
   icon,
+  name,
   size = 24,
   color = colors.textPrimary,
   onPress,
@@ -13,6 +14,7 @@ export function IconButton({
   style,
   hitSlop,
 }) {
+  const iconName = icon || name;
   const minTouch = Math.max(layout.touchTarget, size + 16);
   return (
     <Pressable
@@ -29,7 +31,7 @@ export function IconButton({
         style,
       ]}
     >
-      <Ionicons name={icon} size={size} color={disabled ? colors.textDisabled : color} />
+      <Ionicons name={iconName} size={size} color={disabled ? colors.textDisabled : color} />
     </Pressable>
   );
 }

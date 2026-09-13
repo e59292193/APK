@@ -1,43 +1,12 @@
 import React from 'react';
-import { Pressable, Text, ActivityIndicator, View, StyleSheet } from 'react-native';
+import { Pressable, Text, ActivityIndicator, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { colors, radius, typography, layout } from '../../theme';
+import { colors, radius, typography, layout, useTheme } from '../../theme';
 
 const SIZES = {
   small: { height: layout.buttonHeightSmall, fontSize: 13, padH: 14, icon: 16 },
   medium: { height: layout.buttonHeightMedium, fontSize: 15, padH: 18, icon: 20 },
   large: { height: layout.buttonHeightLarge, fontSize: 16, padH: 22, icon: 22 },
-};
-
-const VARIANTS = {
-  primary: {
-    bg: colors.primaryAction,
-    bgPressed: colors.primaryActionPressed,
-    bgDisabled: colors.primaryActionDisabled,
-    text: '#FFFFFF',
-    textDisabled: '#FFFFFF',
-  },
-  secondary: {
-    bg: colors.primary[100],
-    bgPressed: colors.primary[200],
-    bgDisabled: colors.neutral[100],
-    text: colors.primary[700],
-    textDisabled: colors.textDisabled,
-  },
-  ghost: {
-    bg: 'transparent',
-    bgPressed: colors.primary[50],
-    bgDisabled: 'transparent',
-    text: colors.primaryAction,
-    textDisabled: colors.textDisabled,
-  },
-  danger: {
-    bg: colors.errorSoft,
-    bgPressed: '#FFE0DE',
-    bgDisabled: colors.neutral[100],
-    text: colors.error,
-    textDisabled: colors.textDisabled,
-  },
 };
 
 export function Button({
@@ -54,8 +23,41 @@ export function Button({
   style,
   textStyle,
 }) {
-  const s = SIZES[size];
-  const v = VARIANTS[variant];
+  const { colors: currentColors = colors } = useTheme();
+  const s = SIZES[size] || SIZES.medium;
+
+  const VARIANTS = {
+    primary: {
+      bg: currentColors.primaryAction,
+      bgPressed: currentColors.primaryActionPressed,
+      bgDisabled: currentColors.primaryActionDisabled,
+      text: '#FFFFFF',
+      textDisabled: '#FFFFFF',
+    },
+    secondary: {
+      bg: currentColors.primary ? currentColors.primary[100] : currentColors.surfaceSoft,
+      bgPressed: currentColors.primary ? currentColors.primary[200] : currentColors.border,
+      bgDisabled: currentColors.neutral ? currentColors.neutral[100] : '#F5F3F7',
+      text: currentColors.primary ? currentColors.primary[700] : currentColors.primaryAction,
+      textDisabled: currentColors.textDisabled,
+    },
+    ghost: {
+      bg: 'transparent',
+      bgPressed: currentColors.primary ? currentColors.primary[50] : currentColors.surfaceSoft,
+      bgDisabled: 'transparent',
+      text: currentColors.primaryAction,
+      textDisabled: currentColors.textDisabled,
+    },
+    danger: {
+      bg: currentColors.errorSoft,
+      bgPressed: '#FFE0DE',
+      bgDisabled: currentColors.neutral ? currentColors.neutral[100] : '#F5F3F7',
+      text: currentColors.error,
+      textDisabled: currentColors.textDisabled,
+    },
+  };
+
+  const v = VARIANTS[variant] || VARIANTS.primary;
   const isDisabled = disabled || loading;
   const bg = isDisabled ? v.bgDisabled : v.bg;
 

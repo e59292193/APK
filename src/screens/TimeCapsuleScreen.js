@@ -163,8 +163,12 @@ function LinedPaperBackground({ lineHeight = 22 }) {
   );
 }
 
-// ─── Main Component ───
-export default function TimeCapsuleScreen({ userId: propUserId, onLogout }) {
+export default function TimeCapsuleScreen({
+  userId: propUserId,
+  onLogout,
+  onNavigateMomiKitchen,
+  onNavigateThemeSelector,
+}) {
   const insets = useSafeAreaInsets();
   const [capsules, setCapsules] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -745,13 +749,33 @@ export default function TimeCapsuleScreen({ userId: propUserId, onLogout }) {
         title="时光胶囊"
         subtitle="把此刻，寄给未来的我们"
         rightAction={
-          <IconButton
-            icon="log-out-outline"
-            size={22}
-            color={colors.textSecondary}
-            onPress={onLogout}
-            accessibilityLabel="退出登录"
-          />
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            {onNavigateThemeSelector && (
+              <IconButton
+                icon="color-palette-outline"
+                size={22}
+                color={colors.textSecondary}
+                onPress={onNavigateThemeSelector}
+                accessibilityLabel="更换主题"
+              />
+            )}
+            {onNavigateMomiKitchen && (
+              <IconButton
+                icon="restaurant-outline"
+                size={22}
+                color={colors.textSecondary}
+                onPress={onNavigateMomiKitchen}
+                accessibilityLabel="momi厨房"
+              />
+            )}
+            <IconButton
+              icon="log-out-outline"
+              size={22}
+              color={colors.textSecondary}
+              onPress={onLogout}
+              accessibilityLabel="退出登录"
+            />
+          </View>
         }
       />
 

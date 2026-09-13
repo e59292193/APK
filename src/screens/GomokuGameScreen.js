@@ -27,6 +27,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { supabase } from '../lib/supabase';
 import { fetchWithTimeout } from '../lib/fetchWithTimeout';
+import { Ionicons } from '@expo/vector-icons';
 import { onSignal, emitSignal } from '../lib/realtimeSignal';
 import DanmakuLayer from '../components/DanmakuLayer';
 import {
@@ -37,9 +38,11 @@ import {
   isDraw,
   nextTurn,
   roleToStone,
+  stoneToRole,
   getWinLine,
+  undoLastMove,
 } from '../lib/gomokuUtils';
-import { IconButton } from '../components/ui';
+import { IconButton, CenterToast } from '../components/ui';
 import { colors } from '../theme';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
@@ -98,6 +101,14 @@ export default function GomokuGameScreen({ gameId, userId, onBack, onNavigateGam
     rematchStatusRef.current = s;
     setRematchStatusState(s);
   }, []);
+
+  // 悔棋状态（上一步：申请-确认制）
+  const [undoStatus, setUndoStatus] = useState('idle'); // 'idle' | 'requesting'
+  const [undoAskVisible, setUndoAskVisible] = useState(false);
+  const [undoCountdown, setUndoCountdown] = useState(15);
+  const [showUndoToast, setShowUndoToast] = useState(false);
+  const undoCountdownTimerRef = useRef(null);
+  const undoRequestTimeoutRef = useRef(null);
 
   // refs 用于在 realtime 回调中读取最新值，避免 channel 重建
   const onNavigateGameRef = useRef(onNavigateGame);
@@ -204,22 +215,30 @@ export default function GomokuGameScreen({ gameId, userId, onBack, onNavigateGam
         supabase.from('gomoku_games').select('*').eq('id', activeGameId).single()
       );
       if (error) throw error;
-      // 轮询兜底时避免覆盖进行中的乐观更新：只在 DB 状态更新（落子更多/状态变化/重赛变化）时才 setGame
+      // 轮询兜底时避免覆盖进行中的乐观更新：只在 DB 状态更新（落子变化/状态变化/重赛/悔棋）时才 setGame
       setGame((prev) => {
         if (!prev) return data;
         const prevMoves = prev.moves || [];
         const dbMoves = data.moves || [];
-        // DB 落子数更多 → 对方落子，采纳
-        if (dbMoves.length > prevMoves.length) return data;
-        // 落子数相同但状态变化 → 加入/认输/重赛等，采纳
-        if (dbMoves.length === prevMoves.length && data.status !== prev.status) return data;
+        // DB 落子数发生变化（增多 = 对方落子，减少 = 悔棋已在服务端生效）
+        if (dbMoves.length !== prevMoves.length && !placingRef.current) return data;
+        // 状态变化 → 加入/认输/重赛等，采纳
+        if (data.status !== prev.status) return data;
         // 重赛状态变化 → 采纳
         if (data.rematch_request_by !== prev.rematch_request_by) return data;
         if (data.rematch_game_id !== prev.rematch_game_id) return data;
-        // 落子数更少或全相同 → 保留本地（乐观更新或无变化）
+        // 悔棋申请状态变化 → 采纳
+        if (data.undo_request_by !== prev.undo_request_by) return data;
         return prev;
       });
       gameStatusRef.current = data.status;
+
+      // 对方发起的悔棋申请兜底同步（网络信号丢失时亦能弹出确认）
+      if (data.undo_request_by && data.undo_request_by !== userIdRef.current) {
+        setUndoAskVisible(true);
+      } else if (!data.undo_request_by && undoStatus === 'requesting') {
+        setUndoStatus('idle');
+      }
 
       // ── 从数据库同步重赛状态（重进入旧对局也能正确恢复 UI）──
       syncRematchFromDB(data);
@@ -603,9 +622,90 @@ export default function GomokuGameScreen({ gameId, userId, onBack, onNavigateGam
       if (payload && payload.text) addDanmaku(payload.text, 'other');
     });
 
+    // ── 功能四性能优化：直连轻量落子信令（~40ms 上屏）──
+    const unsubMove = onSignal(`gomoku:${activeGameId}:move`, (payload) => {
+      if (!payload) return;
+      const latency = Date.now() - (payload.ts || Date.now());
+      console.log(`[Gomoku] 端到端落子直连延迟: ${latency}ms`);
+      setGame((prev) => {
+        if (!prev || prev.status !== 'playing') return prev;
+        const curMoves = prev.moves || [];
+        if (payload.step <= curMoves.length) return prev;
+        const nextMoves = [...curMoves, { x: payload.x, y: payload.y, p: payload.p }];
+        const nextRole = nextTurn(payload.p);
+        const won = checkWin(buildBoard(nextMoves), payload.x, payload.y, payload.p);
+        const draw = !won && isDraw(nextMoves.length);
+        const update = {
+          moves: nextMoves,
+          current_turn: nextRole,
+        };
+        if (won || payload.status === 'finished') {
+          update.status = 'finished';
+          update.winner = payload.winner || stoneToRole(payload.p);
+          update.finished_at = payload.finished_at || new Date().toISOString();
+        } else if (draw) {
+          update.status = 'finished';
+          update.winner = 'draw';
+          update.finished_at = new Date().toISOString();
+        }
+        return { ...prev, ...update };
+      });
+    });
+
+    // ── 功能三悔棋：对方发起悔棋申请 ──
+    const unsubUndoReq = onSignal(`gomoku:${activeGameId}:undo_request`, (payload) => {
+      if (!payload || payload.from === userIdRef.current) return;
+      Vibration.vibrate([0, 30, 50, 30]);
+      setUndoAskVisible(true);
+      setUndoCountdown(15);
+      if (undoCountdownTimerRef.current) clearInterval(undoCountdownTimerRef.current);
+      undoCountdownTimerRef.current = setInterval(() => {
+        setUndoCountdown((prev) => {
+          if (prev <= 1) {
+            clearInterval(undoCountdownTimerRef.current);
+            setUndoAskVisible(false);
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    });
+
+    // ── 功能三悔棋：对方同意悔棋 ──
+    const unsubUndoAccept = onSignal(`gomoku:${activeGameId}:undo_accept`, (payload) => {
+      if (undoRequestTimeoutRef.current) clearTimeout(undoRequestTimeoutRef.current);
+      setUndoStatus('idle');
+      setShowUndoToast(true);
+      if (payload && payload.moves) {
+        setGame((prev) =>
+          prev
+            ? {
+                ...prev,
+                moves: payload.moves,
+                current_turn: payload.current_turn,
+                undo_request_by: null,
+              }
+            : prev
+        );
+      }
+    });
+
+    // ── 功能三悔棋：对方拒绝悔棋 ──
+    const unsubUndoReject = onSignal(`gomoku:${activeGameId}:undo_reject`, () => {
+      if (undoRequestTimeoutRef.current) clearTimeout(undoRequestTimeoutRef.current);
+      setUndoStatus('idle');
+      Alert.alert('提示', '对方未同意悔棋请求');
+    });
+
     return () => {
       unsubUpdate();
       unsubDanmaku();
+      unsubMove();
+      unsubUndoReq();
+      unsubUndoAccept();
+      unsubUndoReject();
+      if (undoCountdownTimerRef.current) clearInterval(undoCountdownTimerRef.current);
+      if (undoRequestTimeoutRef.current) clearTimeout(undoRequestTimeoutRef.current);
     };
   }, [activeGameId]);
 
@@ -711,6 +811,18 @@ export default function GomokuGameScreen({ gameId, userId, onBack, onNavigateGam
     // 获胜时强震动庆祝
     if (won) Vibration.vibrate([0, 20, 50, 20, 50]);
 
+    // ── 功能四性能优化：落子瞬间立即广播轻量直连信令，不等 DB 往返 ──
+    emitSignal(`gomoku:${activeGameId}:move`, {
+      x,
+      y,
+      p: myStone,
+      step: newMoves.length,
+      ts: Date.now(),
+      status: optimisticUpdate.status,
+      winner: optimisticUpdate.winner,
+      finished_at: optimisticUpdate.finished_at,
+    }).catch((e) => console.warn('[Gomoku] emit move failed:', e.message));
+
     setPlacing(true);
     placingRef.current = true;
     try {
@@ -718,7 +830,7 @@ export default function GomokuGameScreen({ gameId, userId, onBack, onNavigateGam
         supabase.from('gomoku_games').update(optimisticUpdate).eq('id', activeGameId).select()
       );
       if (error) throw error;
-      // 通过 IM 信号通知对方对局更新（数据层已写入 Supabase）
+      // 通过 IM 信号通知对方对局更新（数据层已写入 Supabase 作为基准）
       if (data && data[0]) emitSignal(`gomoku:${activeGameId}:update`, data[0]);
     } catch (error) {
       console.error('Error placing stone:', error);
@@ -730,6 +842,106 @@ export default function GomokuGameScreen({ gameId, userId, onBack, onNavigateGam
       placingRef.current = false;
     }
   }, [game, board, moves, myRole, placing, activeGameId, fetchGame]);
+
+  // ─── 功能三悔棋：发起申请（上一步）───
+  const handleRequestUndo = useCallback(async () => {
+    if (!game || game.status !== 'playing') return;
+    if (!moves || moves.length === 0) {
+      Alert.alert('提示', '当前棋盘暂无落子，无法悔棋');
+      return;
+    }
+    if (undoStatus !== 'idle') return;
+
+    setUndoStatus('requesting');
+    Vibration.vibrate(10);
+
+    // 立即广播悔棋申请信令
+    emitSignal(`gomoku:${activeGameId}:undo_request`, {
+      from: userId,
+      ts: Date.now(),
+    }).catch((e) => console.warn('[undo] emit request failed:', e.message));
+
+    // 同步到数据库
+    try {
+      await fetchWithTimeout(() =>
+        supabase
+          .from('gomoku_games')
+          .update({ undo_request_by: userId })
+          .eq('id', activeGameId)
+      );
+    } catch (e) {
+      console.warn('[undo] update undo_request_by failed:', e.message);
+    }
+
+    // 15 秒超时未响应自动取消
+    if (undoRequestTimeoutRef.current) clearTimeout(undoRequestTimeoutRef.current);
+    undoRequestTimeoutRef.current = setTimeout(() => {
+      setUndoStatus('idle');
+      Alert.alert('提示', '对方暂未响应悔棋请求');
+    }, 15000);
+  }, [game, moves, undoStatus, activeGameId, userId]);
+
+  // ─── 功能三悔棋：对方同意悔棋 ───
+  const handleAcceptUndo = useCallback(async () => {
+    if (undoCountdownTimerRef.current) clearInterval(undoCountdownTimerRef.current);
+    setUndoAskVisible(false);
+
+    const undoRes = undoLastMove(moves);
+    if (!undoRes) return;
+
+    // 本地先回退
+    const updatePayload = {
+      moves: undoRes.newMoves,
+      current_turn: undoRes.nextTurn,
+      undo_request_by: null,
+    };
+    setGame((prev) => (prev ? { ...prev, ...updatePayload } : prev));
+
+    // 精确弹出居中 Toast
+    setShowUndoToast(true);
+
+    // 通知对方悔棋已同意
+    emitSignal(`gomoku:${activeGameId}:undo_accept`, {
+      moves: undoRes.newMoves,
+      current_turn: undoRes.nextTurn,
+    }).catch((e) => console.warn('[undo] emit accept failed:', e.message));
+
+    // 写入数据库
+    try {
+      const { data, error } = await fetchWithTimeout(() =>
+        supabase
+          .from('gomoku_games')
+          .update(updatePayload)
+          .eq('id', activeGameId)
+          .select()
+      );
+      if (error) throw error;
+      if (data && data[0]) emitSignal(`gomoku:${activeGameId}:update`, data[0]);
+    } catch (e) {
+      console.error('[undo] DB accept failed:', e.message);
+    }
+  }, [moves, activeGameId]);
+
+  // ─── 功能三悔棋：对方拒绝悔棋 ───
+  const handleDeclineUndo = useCallback(async () => {
+    if (undoCountdownTimerRef.current) clearInterval(undoCountdownTimerRef.current);
+    setUndoAskVisible(false);
+
+    emitSignal(`gomoku:${activeGameId}:undo_reject`, { from: userId }).catch((e) =>
+      console.warn('[undo] emit reject failed:', e.message)
+    );
+
+    try {
+      await fetchWithTimeout(() =>
+        supabase
+          .from('gomoku_games')
+          .update({ undo_request_by: null })
+          .eq('id', activeGameId)
+      );
+    } catch (e) {
+      console.warn('[undo] clear undo_request_by failed:', e.message);
+    }
+  }, [activeGameId, userId]);
 
   // ─── 认输 ───
   const handleResign = useCallback(() => {
@@ -1119,9 +1331,39 @@ export default function GomokuGameScreen({ gameId, userId, onBack, onNavigateGam
         {!keyboardHeight && (
         <View style={styles.actionRow}>
           {isPlaying && (
-            <TouchableOpacity style={styles.resignBtn} onPress={handleResign} activeOpacity={0.7}>
-              <Text style={styles.resignBtnText}>🏳️ 认输</Text>
-            </TouchableOpacity>
+            <>
+              <TouchableOpacity
+                style={[
+                  styles.undoBtn,
+                  (moves.length === 0 || undoStatus !== 'idle') && styles.btnDisabled,
+                ]}
+                onPress={handleRequestUndo}
+                disabled={moves.length === 0 || undoStatus !== 'idle'}
+                activeOpacity={0.7}
+              >
+                <Ionicons
+                  name="arrow-undo-outline"
+                  size={16}
+                  color={
+                    moves.length === 0 || undoStatus !== 'idle'
+                      ? colors.textDisabled
+                      : colors.textPrimary
+                  }
+                  style={{ marginRight: 4 }}
+                />
+                <Text
+                  style={[
+                    styles.undoBtnText,
+                    (moves.length === 0 || undoStatus !== 'idle') && styles.btnTextDisabled,
+                  ]}
+                >
+                  {undoStatus === 'requesting' ? '等待同意...' : '上一步'}
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.resignBtn} onPress={handleResign} activeOpacity={0.7}>
+                <Text style={styles.resignBtnText}>🏳️ 认输</Text>
+              </TouchableOpacity>
+            </>
           )}
           {isFinished && rematchStatus === 'idle' && (
             <TouchableOpacity style={styles.restartBtn} onPress={handleRequestRematch} activeOpacity={0.7}>
@@ -1156,10 +1398,59 @@ export default function GomokuGameScreen({ gameId, userId, onBack, onNavigateGam
         )}
       </View>
 
+      {renderUndoModal()}
+      {/* 悔棋成功提示：文案必须一字不差 */}
+      <CenterToast
+        visible={showUndoToast}
+        message="下一次不要点错了哦~"
+        icon="arrow-undo"
+        onDismiss={() => setShowUndoToast(false)}
+      />
       {renderHistoryModal()}
       {renderAdjustModal()}
     </KeyboardAvoidingView>
   );
+
+  // ─── 悔棋确认 Modal（申请-确认制）───
+  function renderUndoModal() {
+    return (
+      <Modal
+        visible={undoAskVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={handleDeclineUndo}
+      >
+        <View style={styles.undoModalOverlay}>
+          <View style={styles.undoModalCard}>
+            <View style={styles.undoModalIconWrap}>
+              <Ionicons name="arrow-undo" size={28} color={colors.primaryAction} />
+            </View>
+            <Text style={styles.undoModalTitle}>悔棋申请</Text>
+            <Text style={styles.undoModalDesc}>
+              {partnerId} 请求悔棋（撤销最近一手），同意吗？
+            </Text>
+            <Text style={styles.undoModalCountdown}>剩余响应时间：{undoCountdown}s</Text>
+            <View style={styles.undoModalBtnRow}>
+              <TouchableOpacity
+                style={[styles.undoModalBtn, styles.undoDeclineBtn]}
+                onPress={handleDeclineUndo}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.undoDeclineText}>✕ 拒绝</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.undoModalBtn, styles.undoAcceptBtn]}
+                onPress={handleAcceptUndo}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.undoAcceptText}>✓ 同意</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+    );
+  }
 
   // ─── 历史战绩 Modal ───
   function renderHistoryModal() {
@@ -1645,8 +1936,32 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   actionRow: {
+    flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
     paddingVertical: 4,
+    gap: 12,
+  },
+  undoBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.surfaceSoft,
+    borderColor: colors.borderStrong,
+    borderWidth: 1,
+    borderRadius: 14,
+    paddingVertical: 12,
+    paddingHorizontal: 22,
+  },
+  undoBtnText: {
+    color: colors.textPrimary,
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  btnDisabled: {
+    opacity: 0.5,
+  },
+  btnTextDisabled: {
+    color: colors.textDisabled,
   },
   resignBtn: {
     backgroundColor: colors.errorSoft,
@@ -1654,7 +1969,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderRadius: 14,
     paddingVertical: 12,
-    paddingHorizontal: 32,
+    paddingHorizontal: 24,
   },
   resignBtnText: {
     color: colors.error,
@@ -1888,5 +2203,85 @@ const styles = StyleSheet.create({
     color: colors.neutral[0],
     fontSize: 16,
     fontWeight: 'bold',
+  },
+
+  // 悔棋确认 Modal 样式
+  undoModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  undoModalCard: {
+    width: '100%',
+    maxWidth: 320,
+    backgroundColor: colors.surface,
+    borderRadius: 20,
+    padding: 24,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+    elevation: 6,
+  },
+  undoModalIconWrap: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: colors.primary[100],
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  undoModalTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: colors.textPrimary,
+    marginBottom: 8,
+  },
+  undoModalDesc: {
+    fontSize: 14,
+    color: colors.textSecondary,
+    textAlign: 'center',
+    lineHeight: 20,
+    marginBottom: 12,
+  },
+  undoModalCountdown: {
+    fontSize: 12,
+    color: colors.primaryAction,
+    fontWeight: '600',
+    marginBottom: 20,
+  },
+  undoModalBtnRow: {
+    flexDirection: 'row',
+    gap: 12,
+    width: '100%',
+  },
+  undoModalBtn: {
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  undoDeclineBtn: {
+    backgroundColor: colors.neutral[100],
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  undoDeclineText: {
+    color: colors.textSecondary,
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  undoAcceptBtn: {
+    backgroundColor: colors.primaryAction,
+  },
+  undoAcceptText: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '700',
   },
 });

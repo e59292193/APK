@@ -1,7 +1,7 @@
 import React from 'react';
 import { View, ScrollView, StyleSheet } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { colors, spacing, layout } from '../../theme';
+import { colors, spacing, layout, useTheme } from '../../theme';
 
 export function ScreenContainer({
   children,
@@ -13,11 +13,12 @@ export function ScreenContainer({
   contentContainerStyle,
 }) {
   const insets = useSafeAreaInsets();
+  const { colors: currentColors = colors } = useTheme();
 
   if (scrollable) {
     return (
       <ScrollView
-        style={[styles.scroll, style]}
+        style={[{ backgroundColor: currentColors.background }, styles.scroll, style]}
         contentContainerStyle={[
           styles.scrollContent,
           padding && { paddingHorizontal: spacing[5] },
@@ -35,6 +36,7 @@ export function ScreenContainer({
   return (
     <View
       style={[
+        { backgroundColor: currentColors.background },
         styles.view,
         padding && { paddingHorizontal: spacing[5] },
         showBottomInset && { paddingBottom: insets.bottom },

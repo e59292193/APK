@@ -4,6 +4,7 @@ import React, { memo, useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  InteractionManager,
   KeyboardAvoidingView,
   ScrollView,
   StatusBar,
@@ -17,7 +18,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useKeyboardHeight } from './src/hooks/useKeyboardHeight';
 import { ErrorBoundary } from './src/components/ErrorBoundary';
 import { Button, AppInput } from './src/components/ui';
-import { colors, typography, spacing, radius } from './src/theme';
+import { colors, typography, spacing, radius, ThemeProvider, useTheme, prefetchThemeId } from './src/theme';
 import { lazyScreen } from './src/lib/lazyScreen';
 import {
   signIn,
@@ -38,9 +39,12 @@ const GomokuGameScreen = lazyScreen(() => require('./src/screens/GomokuGameScree
 const DrawGuessGameScreen = lazyScreen(() => require('./src/screens/DrawGuessGameScreen'));
 const EphemeralNoteScreen = lazyScreen(() => require('./src/screens/EphemeralNoteScreen'));
 const VoiceMailboxScreen = lazyScreen(() => require('./src/screens/VoiceMailboxScreen'));
+const MomiKitchenScreen = lazyScreen(() => require('./src/screens/MomiKitchenScreen'));
+const ThemeSelectorScreen = lazyScreen(() => require('./src/screens/ThemeSelectorScreen'));
 
 function LoginScreen({ onLogin }) {
   const insets = useSafeAreaInsets();
+  const { theme, colors } = useTheme();
   const [nickname, setNickname] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
@@ -61,8 +65,8 @@ function LoginScreen({ onLogin }) {
   };
 
   return (
-    <View style={loginStyles.container}>
-      <StatusBar barStyle="dark-content" backgroundColor={colors.backgroundLavender} />
+    <View style={[loginStyles.container, { backgroundColor: colors.backgroundLavender }]}>
+      <StatusBar barStyle={theme.statusBar || 'dark-content'} backgroundColor={colors.backgroundLavender} />
       {/* edge-to-edge 下 Android adjustResize 失效，必须显式 padding 才能避开键盘 */}
       <KeyboardAvoidingView style={styles.flex} behavior="padding">
         <ScrollView
@@ -146,6 +150,7 @@ const TAB_CONFIG = [
 
 const BottomTabBar = memo(function BottomTabBar({ currentTab, onTabChange, unreadCount }) {
   const insets = useSafeAreaInsets();
+  const { colors } = useTheme();
   const keyboardHeight = useKeyboardHeight();
   if (keyboardHeight > 0) return null;
 
@@ -199,6 +204,7 @@ function TabPage({ name, current, mounted, children }) {
 }
 
 function MainApp() {
+  const { theme, colors } = useTheme();
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [userId, setUserId] = useState('');
   const [currentTab, setCurrentTab] = useState('Capsule');
@@ -208,11 +214,23 @@ function MainApp() {
   const [fullscreenPage, setFullscreenPage] = useState(null);
   const [chatRefreshTrigger, setChatRefreshTrigger] = useState(0);
 
+  // 1. 启动初期后台非阻塞预热 Supabase
+  useEffect(() => {
+    try {
+      const { wakeUpSupabase } = require('./src/lib/wakeUpSupabase');
+      wakeUpSupabase().catch(() => {});
+    } catch (e) {}
+  }, []);
+
+  // 2. 并行恢复 session 与预取本地主题配置
   useEffect(() => {
     let alive = true;
     (async () => {
       try {
-        const session = await restoreSession();
+        const [session] = await Promise.all([
+          restoreSession(),
+          prefetchThemeId(),
+        ]);
         if (alive && session) {
           setUserId(session.username);
           setIsLoggedIn(true);
@@ -220,7 +238,16 @@ function MainApp() {
       } catch (error) {
         console.warn('[App] 读取登录状态失败:', error.message);
       } finally {
-        if (alive) setInitializing(false);
+        if (alive) {
+          setInitializing(false);
+          // 性能打点：首屏可交互时间记录
+          if (typeof global !== 'undefined' && global.__APP_START_TIME__) {
+            const startupDuration = Date.now() - global.__APP_START_TIME__;
+            global.__APP_INTERACTIVE_TIME__ = Date.now();
+            global.__APP_STARTUP_DURATION__ = startupDuration;
+            console.log(`[StartupTelemetry] App Interactive in ${startupDuration}ms`);
+          }
+        }
       }
     })();
     return () => {
@@ -228,11 +255,11 @@ function MainApp() {
     };
   }, []);
 
-  // 先完成首帧和主导航，随后再初始化网络重模块。
+  // 3. 首屏完成渲染后，通过 InteractionManager 调度重模块（TIM 信号等），不阻塞交互。
   useEffect(() => {
     if (!isLoggedIn || !userId) return undefined;
     let cancelled = false;
-    const timer = setTimeout(() => {
+    const task = InteractionManager.runAfterInteractions(() => {
       if (cancelled) return;
       const { wakeUpSupabase } = require('./src/lib/wakeUpSupabase');
       wakeUpSupabase().catch((error) => {
@@ -248,10 +275,11 @@ function MainApp() {
       } else {
         console.warn('[App] 腾讯 IM 未配置，将使用数据库兜底通道');
       }
-    }, 300);
+    });
+
     return () => {
       cancelled = true;
-      clearTimeout(timer);
+      if (task && task.cancel) task.cancel();
     };
   }, [isLoggedIn, userId]);
 
@@ -330,11 +358,16 @@ function MainApp() {
 
   return (
     <View style={appStyles.container}>
-      <StatusBar barStyle="dark-content" backgroundColor={colors.backgroundLavender} />
+      <StatusBar barStyle={theme.statusBar || 'dark-content'} backgroundColor={colors.background} />
 
       <View style={appStyles.screenContainer}>
         <TabPage name="Capsule" current={currentTab} mounted={mountedTabs.has('Capsule')}>
-          <TimeCapsuleScreen userId={userId} onLogout={handleLogout} />
+          <TimeCapsuleScreen
+            userId={userId}
+            onLogout={handleLogout}
+            onNavigateMomiKitchen={() => openFullscreen('MomiKitchen')}
+            onNavigateThemeSelector={() => openFullscreen('ThemeSelector')}
+          />
         </TabPage>
         <TabPage name="Wishlist" current={currentTab} mounted={mountedTabs.has('Wishlist')}>
           <WishlistScreen userId={userId} isActive={currentTab === 'Wishlist'} />
@@ -354,6 +387,8 @@ function MainApp() {
             onNavigateDrawGuessGame={(id) => openFullscreen('DrawGuessGame', { gameId: id })}
             onNavigateEphemeralNote={() => openFullscreen('EphemeralNote')}
             onNavigateVoiceMailbox={() => openFullscreen('VoiceMailbox')}
+            onNavigateMomiKitchen={() => openFullscreen('MomiKitchen')}
+            onNavigateThemeSelector={() => openFullscreen('ThemeSelector')}
             onUnreadChange={setUnreadCount}
             refreshTrigger={chatRefreshTrigger}
           />
@@ -417,6 +452,12 @@ function MainApp() {
             {full.screen === 'VoiceMailbox' ? (
               <VoiceMailboxScreen userId={userId} onBack={closeFullscreen} />
             ) : null}
+            {full.screen === 'MomiKitchen' ? (
+              <MomiKitchenScreen userId={userId} onBack={closeFullscreen} />
+            ) : null}
+            {full.screen === 'ThemeSelector' ? (
+              <ThemeSelectorScreen onBack={closeFullscreen} />
+            ) : null}
           </ErrorBoundary>
         </View>
       ) : null}
@@ -427,7 +468,9 @@ function MainApp() {
 export default function App() {
   return (
     <SafeAreaProvider>
-      <MainApp />
+      <ThemeProvider>
+        <MainApp />
+      </ThemeProvider>
     </SafeAreaProvider>
   );
 }

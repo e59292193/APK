@@ -141,3 +141,21 @@ export function getWinLine(board, x, y, p) {
   }
   return null;
 }
+
+/**
+ * 撤销最后一手棋（悔棋）
+ * @param {Array<{x:number,y:number,p:number}>} moves
+ * @returns {{ newMoves: Array<{x:number,y:number,p:number}>, removedMove: {x:number,y:number,p:number}, nextTurn: string }|null}
+ */
+export function undoLastMove(moves) {
+  if (!moves || moves.length === 0) return null;
+  const removedMove = moves[moves.length - 1];
+  const newMoves = moves.slice(0, -1);
+  // 回合权归还给上一手落子方
+  const restoredTurn = stoneToRole(removedMove.p);
+  return {
+    newMoves,
+    removedMove,
+    nextTurn: restoredTurn,
+  };
+}

@@ -10,6 +10,8 @@ import {
   BackHandler,
   Keyboard,
   RefreshControl,
+  Modal,
+  Pressable,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -103,6 +105,7 @@ export default function AnniversaryScreen({ userId }) {
 
   // Form / Modal State
   const [modalVisible, setModalVisible] = useState(false);
+  const [activeCardItem, setActiveCardItem] = useState(null); // Clicked anniversary item for actions
   const [editingId, setEditingId] = useState(null); // null means adding, number/string means editing
   const [formTitle, setFormTitle] = useState('');
   const [formType, setFormType] = useState('cumulative'); // 'cumulative' or 'countdown'
@@ -116,9 +119,13 @@ export default function AnniversaryScreen({ userId }) {
     fetchAnniversaries();
   }, []);
 
-  // Back button handler for modal
+  // Back button handler for modals
   useEffect(() => {
     const onBackPress = () => {
+      if (activeCardItem) {
+        setActiveCardItem(null);
+        return true;
+      }
       if (modalVisible) {
         closeModal();
         return true;
@@ -128,7 +135,7 @@ export default function AnniversaryScreen({ userId }) {
 
     const backHandler = BackHandler.addEventListener('hardwareBackPress', onBackPress);
     return () => backHandler.remove();
-  }, [modalVisible]);
+  }, [modalVisible, activeCardItem]);
 
   const fetchAnniversaries = async () => {
     try {
@@ -314,28 +321,9 @@ export default function AnniversaryScreen({ userId }) {
     ]);
   };
 
-  // Card Options: Pin, Edit, Delete
+  // Card Options: Pin, Edit, Delete (打开带空白遮罩的快捷操作弹窗)
   const handleCardPress = (item) => {
-    Alert.alert(
-      item.title,
-      '您想对该纪念日进行什么操作？',
-      [
-        {
-          text: item.is_pinned ? '取消置顶' : '置顶纪念日',
-          onPress: () => handleTogglePin(item),
-        },
-        {
-          text: '编辑',
-          onPress: () => handleOpenEdit(item),
-        },
-        {
-          text: '删除',
-          style: 'destructive',
-          onPress: () => handleDelete(item.id),
-        },
-        { text: '取消', style: 'cancel' },
-      ]
-    );
+    setActiveCardItem(item);
   };
 
   // Render Anniversary Card
@@ -544,6 +532,94 @@ export default function AnniversaryScreen({ userId }) {
           </Button>
         ) : null}
       </BottomSheetContainer>
+
+      {/* 纪念日记录快捷操作弹窗 (点击空白处/遮罩即退出) */}
+      <Modal
+        visible={Boolean(activeCardItem)}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setActiveCardItem(null)}
+      >
+        <Pressable
+          style={styles.actionModalOverlay}
+          onPress={() => setActiveCardItem(null)}
+        >
+          <Pressable
+            style={styles.actionModalCard}
+            onPress={(e) => {
+              if (e && e.stopPropagation) e.stopPropagation();
+            }}
+          >
+            <View style={styles.actionModalHeader}>
+              <Text style={styles.actionModalTitle} numberOfLines={2}>
+                {activeCardItem?.title}
+              </Text>
+              <Text style={styles.actionModalSubtitle}>您想对该纪念日进行什么操作？</Text>
+            </View>
+
+            <TouchableOpacity
+              style={styles.actionModalOption}
+              activeOpacity={0.7}
+              onPress={() => {
+                const item = activeCardItem;
+                setActiveCardItem(null);
+                handleTogglePin(item);
+              }}
+            >
+              <View style={[styles.actionModalIconWrap, { backgroundColor: colors.primary[100] }]}>
+                <Ionicons
+                  name={activeCardItem?.is_pinned ? 'pin-outline' : 'pin'}
+                  size={18}
+                  color={colors.primaryAction}
+                />
+              </View>
+              <Text style={styles.actionModalOptionText}>
+                {activeCardItem?.is_pinned ? '取消置顶' : '置顶纪念日'}
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.actionModalOption}
+              activeOpacity={0.7}
+              onPress={() => {
+                const item = activeCardItem;
+                setActiveCardItem(null);
+                handleOpenEdit(item);
+              }}
+            >
+              <View style={[styles.actionModalIconWrap, { backgroundColor: colors.primary[100] }]}>
+                <Ionicons name="create-outline" size={18} color={colors.primaryAction} />
+              </View>
+              <Text style={styles.actionModalOptionText}>编辑事项</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.actionModalOption, styles.actionModalDeleteOption]}
+              activeOpacity={0.7}
+              onPress={() => {
+                const item = activeCardItem;
+                setActiveCardItem(null);
+                handleDelete(item.id);
+              }}
+            >
+              <View style={[styles.actionModalIconWrap, { backgroundColor: colors.coral[100] }]}>
+                <Ionicons name="trash-outline" size={18} color={colors.coral[600]} />
+              </View>
+              <Text style={[styles.actionModalOptionText, { color: colors.coral[600] }]}>
+                删除记录
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.actionModalCancelBtn}
+              activeOpacity={0.7}
+              onPress={() => setActiveCardItem(null)}
+            >
+              <Text style={styles.actionModalCancelText}>取消</Text>
+            </TouchableOpacity>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </View>
   );
 }
@@ -552,6 +628,80 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: colors.background,
+  },
+  // ── Action Modal (点击空白退出) ──
+  actionModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.45)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: spacing[6],
+  },
+  actionModalCard: {
+    width: '100%',
+    maxWidth: 340,
+    backgroundColor: '#FFFFFF',
+    borderRadius: radius.xl,
+    padding: spacing[5],
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.15,
+    shadowRadius: 18,
+    elevation: 8,
+  },
+  actionModalHeader: {
+    marginBottom: spacing[4],
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.border,
+    paddingBottom: spacing[3],
+  },
+  actionModalTitle: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: colors.textPrimary,
+    textAlign: 'center',
+  },
+  actionModalSubtitle: {
+    fontSize: 13,
+    color: colors.textSecondary,
+    textAlign: 'center',
+    marginTop: 4,
+  },
+  actionModalOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: spacing[3],
+    paddingHorizontal: spacing[3],
+    borderRadius: radius.lg,
+    backgroundColor: colors.surfaceSoft,
+    marginBottom: spacing[2],
+  },
+  actionModalDeleteOption: {
+    backgroundColor: colors.coral[50],
+  },
+  actionModalIconWrap: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: spacing[3],
+  },
+  actionModalOptionText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: colors.textPrimary,
+  },
+  actionModalCancelBtn: {
+    marginTop: spacing[2],
+    paddingVertical: spacing[3],
+    alignItems: 'center',
+    borderRadius: radius.lg,
+  },
+  actionModalCancelText: {
+    fontSize: 15,
+    color: colors.textMuted,
+    fontWeight: '600',
   },
   loadingWrap: {
     flex: 1,

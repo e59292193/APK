@@ -11,11 +11,15 @@
 import { supabase } from './supabase';
 
 export const PHOTOS_BUCKET = 'photos';
+export const KITCHEN_BUCKET = 'kitchen-images';
 
 const SUPABASE_URL = 'https://kotakqdxwvienrmbcrnk.supabase.co';
 const LEGACY_PUBLIC_PREFIX = `${SUPABASE_URL}/storage/v1/object/public/${PHOTOS_BUCKET}/`;
 const LEGACY_SIGNED_PREFIX = `${SUPABASE_URL}/storage/v1/object/sign/${PHOTOS_BUCKET}/`;
 const LEGACY_AUTH_PREFIX = `${SUPABASE_URL}/storage/v1/object/authenticated/${PHOTOS_BUCKET}/`;
+
+const KITCHEN_PUBLIC_PREFIX = `${SUPABASE_URL}/storage/v1/object/public/${KITCHEN_BUCKET}/`;
+const KITCHEN_SIGNED_PREFIX = `${SUPABASE_URL}/storage/v1/object/sign/${KITCHEN_BUCKET}/`;
 
 // signed URL 有效期（秒）。Supabase 单次签名上限 7 天。
 const SIGNED_TTL = 7 * 24 * 3600;
@@ -28,9 +32,9 @@ const cache = new Map();
 const inFlight = new Map();
 
 /**
- * 把数据库中存的媒体值归一化为 photos bucket 内路径。
+ * 把数据库中存的媒体值归一化为 photos 或 kitchen-images bucket 内路径。
  * 支持：bucket 路径、旧公开 URL、旧签名 URL、authenticated URL。
- * 返回 null 表示不是 photos bucket 的内容（如 data: URI、外链）。
+ * 返回 null 表示不是支持的 Storage 内容（如 data: URI、外链）。
  */
 export function normalizeToPhotosPath(value) {
   if (!value || typeof value !== 'string') return null;
@@ -46,6 +50,12 @@ export function normalizeToPhotosPath(value) {
   if (trimmed.startsWith(LEGACY_AUTH_PREFIX)) {
     return decodeURIComponent(trimmed.slice(LEGACY_AUTH_PREFIX.length).split('?')[0]);
   }
+  if (trimmed.startsWith(KITCHEN_PUBLIC_PREFIX)) {
+    return `kitchen-images/${decodeURIComponent(trimmed.slice(KITCHEN_PUBLIC_PREFIX.length))}`;
+  }
+  if (trimmed.startsWith(KITCHEN_SIGNED_PREFIX)) {
+    return `kitchen-images/${decodeURIComponent(trimmed.slice(KITCHEN_SIGNED_PREFIX.length).split('?')[0])}`;
+  }
   if (trimmed.startsWith('http://') || trimmed.startsWith('https://') || trimmed.startsWith('data:')) {
     return null; // 外链或内联数据，原样使用
   }
@@ -54,9 +64,15 @@ export function normalizeToPhotosPath(value) {
 }
 
 async function createSignedUrl(path) {
+  const isKitchen = path.startsWith('kitchen-images/') || path.includes('dish_');
+  const bucket = isKitchen ? KITCHEN_BUCKET : PHOTOS_BUCKET;
+  const cleanPath = path.startsWith('kitchen-images/')
+    ? path.slice('kitchen-images/'.length)
+    : path;
+
   const { data, error } = await supabase.storage
-    .from(PHOTOS_BUCKET)
-    .createSignedUrl(path, SIGNED_TTL);
+    .from(bucket)
+    .createSignedUrl(cleanPath, SIGNED_TTL);
   if (error) throw error;
   if (!data?.signedUrl) throw new Error('生成图片链接失败');
   return data.signedUrl;

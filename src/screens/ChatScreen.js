@@ -34,7 +34,19 @@ const { width: SCREEN_WIDTH } = Dimensions.get('window');
 // ─── Valid Users ───
 const VALID_USERS = { momo: true, '苞米': true };
 
-export default function ChatScreen({ userId, onNavigateCheckinList, onNavigateGomokuGame, onNavigateDrawGuessGame, onNavigateEphemeralNote, onNavigateVoiceMailbox, onUnreadChange, isActive = true, refreshTrigger = 0 }) {
+export default function ChatScreen({
+  userId,
+  onNavigateCheckinList,
+  onNavigateGomokuGame,
+  onNavigateDrawGuessGame,
+  onNavigateEphemeralNote,
+  onNavigateVoiceMailbox,
+  onNavigateMomiKitchen,
+  onNavigateThemeSelector,
+  onUnreadChange,
+  isActive = true,
+  refreshTrigger = 0,
+}) {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(true);
   const [inputText, setInputText] = useState('');
@@ -1056,8 +1068,10 @@ export default function ChatScreen({ userId, onNavigateCheckinList, onNavigateGo
           {[
             { icon: 'checkmark-circle-outline', bg: colors.primary[100], color: colors.primaryAction, label: '二人打卡', onPress: () => { setPlusPanelVisible(false); setCheckinCreateVisible(true); } },
             { icon: 'images-outline', bg: colors.mint[100], color: colors.mint[600], label: '发送照片', onPress: handleSendPhoto },
+            { icon: 'restaurant-outline', bg: colors.amber ? colors.amber[100] : colors.primary[100], color: colors.amber ? colors.amber[600] : colors.primaryAction, label: 'momi厨房', onPress: () => { setPlusPanelVisible(false); onNavigateMomiKitchen && onNavigateMomiKitchen(); } },
+            { icon: 'color-palette-outline', bg: colors.partnerSoft, color: colors.primaryAction, label: '主题换装', onPress: () => { setPlusPanelVisible(false); onNavigateThemeSelector && onNavigateThemeSelector(); } },
             { icon: 'game-controller-outline', bg: colors.neutral[200], color: colors.neutral[600], label: '五子棋', onPress: handleOpenGomokuLobby },
-            { icon: 'color-palette-outline', bg: colors.coral[100], color: colors.coral[600], label: '你画我猜', onPress: handleOpenDrawGuessLobby },
+            { icon: 'brush-outline', bg: colors.coral[100], color: colors.coral[600], label: '你画我猜', onPress: handleOpenDrawGuessLobby },
             { icon: 'paper-plane-outline', bg: colors.primary[100], color: colors.primaryAction, label: '小纸条', onPress: handleOpenEphemeralNote },
             { icon: 'mic-outline', bg: colors.mint[100], color: colors.mint[600], label: '语音信箱', onPress: handleOpenVoiceMailbox },
           ].map((item, idx) => (

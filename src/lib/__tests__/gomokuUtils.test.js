@@ -6,6 +6,7 @@ import {
   isDraw,
   nextTurn,
   getWinLine,
+  undoLastMove,
 } from '../gomokuUtils';
 
 describe('gomokuUtils 五子棋规则', () => {
@@ -85,5 +86,30 @@ describe('gomokuUtils 五子棋规则', () => {
     expect(isDraw(BOARD_SIZE * BOARD_SIZE)).toBe(true);
     expect(nextTurn(STONE.BLACK)).toBe('invitee');
     expect(nextTurn(STONE.WHITE)).toBe('creator');
+  });
+
+  test('undoLastMove 悔棋测试', () => {
+    // 空棋盘无法悔棋
+    expect(undoLastMove([])).toBeNull();
+    expect(undoLastMove(null)).toBeNull();
+
+    // 撤销黑棋（第一步）：步数变为 0，回合权归还给 creator
+    const moves1 = [{ x: 7, y: 7, p: STONE.BLACK }];
+    const undo1 = undoLastMove(moves1);
+    expect(undo1).not.toBeNull();
+    expect(undo1.newMoves.length).toBe(0);
+    expect(undo1.removedMove).toEqual({ x: 7, y: 7, p: STONE.BLACK });
+    expect(undo1.nextTurn).toBe('creator');
+
+    // 撤销白棋（第二步）：步数变为 1，回合权归还给 invitee
+    const moves2 = [
+      { x: 7, y: 7, p: STONE.BLACK },
+      { x: 8, y: 8, p: STONE.WHITE },
+    ];
+    const undo2 = undoLastMove(moves2);
+    expect(undo2).not.toBeNull();
+    expect(undo2.newMoves.length).toBe(1);
+    expect(undo2.removedMove).toEqual({ x: 8, y: 8, p: STONE.WHITE });
+    expect(undo2.nextTurn).toBe('invitee');
   });
 });
