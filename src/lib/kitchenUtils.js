@@ -139,19 +139,32 @@ export async function uploadKitchenImage(uri, options = {}) {
 
 /**
  * 拉取菜品列表
- * @param {string} [category] 分类筛选 (可选)
+ * @param {string} [category] 分类筛选 (可选，如果传入 'momo_and_baomi' 等 coupleId 则作为 coupleId 查询全部)
  * @param {string} [coupleId='momo_and_baomi']
  */
 export async function fetchDishes(category, coupleId = 'momo_and_baomi') {
+  let targetCategory = category;
+  let targetCoupleId = coupleId;
+
+  // 容错：当第一个参数是 coupleId (例如 'momo_and_baomi' 或包含下划线) 时，查询该情侣全部菜品
+  if (category && (category === 'momo_and_baomi' || category.includes('_'))) {
+    targetCoupleId = category;
+    targetCategory = null;
+  }
+
   const res = await fetchWithTimeout(() => {
     let query = supabase
       .from('kitchen_dishes')
       .select('*')
-      .eq('couple_id', coupleId)
+      .eq('couple_id', targetCoupleId)
       .order('created_at', { ascending: false });
 
-    if (category) {
-      query = query.eq('category', category);
+    if (targetCategory) {
+      if (targetCategory === 'veg' || targetCategory === 'vegetable') {
+        query = query.in('category', ['veg', 'vegetable']);
+      } else {
+        query = query.eq('category', targetCategory);
+      }
     }
     return query;
   });
@@ -162,39 +175,59 @@ export async function fetchDishes(category, coupleId = 'momo_and_baomi') {
 /**
  * 创建或更新菜品
  */
-export async function saveDish(dishData) {
-  const isEdit = Boolean(dishData && dishData.id);
+export async function saveDish(dishData, dishId, userId) {
+  const targetId = dishData?.id || dishId;
+  const isEdit = Boolean(targetId);
   const now = new Date().toISOString();
 
+  // 数据库 check 约束要求 ('meat', 'vegetable', 'snack')，将前端简写 'veg' 统一规范化为 'vegetable'
+  const normalizeCategory = (cat) => {
+    if (!cat) return 'meat';
+    if (cat === 'veg' || cat === 'vegetable') return 'vegetable';
+    if (cat === 'snack') return 'snack';
+    return 'meat';
+  };
+
   if (isEdit) {
-    const { id, ...updates } = dishData;
+    const { id: _unused, ...updates } = dishData;
+    if (updates.category) {
+      updates.category = normalizeCategory(updates.category);
+    }
     updates.updated_at = now;
-    return fetchWithTimeout(() =>
-      supabase.from('kitchen_dishes').update(updates).eq('id', id).select()
+    const res = await fetchWithTimeout(() =>
+      supabase.from('kitchen_dishes').update(updates).eq('id', targetId).select()
     );
+    if (res && res.error) throw res.error;
+    return (Array.isArray(res?.data) ? res.data[0] : res?.data) || { id: targetId, ...dishData };
   }
 
   const payload = {
     ...dishData,
+    category: normalizeCategory(dishData?.category),
     couple_id: dishData.couple_id || 'momo_and_baomi',
+    created_by: dishData.created_by || userId || 'momo',
     created_at: now,
     updated_at: now,
   };
   // 确保新增时不传递任何 id 字段（避免传入 null/undefined 破坏 Postgres gen_random_uuid 默认值）
   delete payload.id;
 
-  return fetchWithTimeout(() =>
+  const res = await fetchWithTimeout(() =>
     supabase.from('kitchen_dishes').insert([payload]).select()
   );
+  if (res && res.error) throw res.error;
+  return (Array.isArray(res?.data) ? res.data[0] : res?.data) || payload;
 }
 
 /**
  * 删除菜品（级联删除周清单）
  */
 export async function deleteDish(id) {
-  return fetchWithTimeout(() =>
+  const res = await fetchWithTimeout(() =>
     supabase.from('kitchen_dishes').delete().eq('id', id)
   );
+  if (res && res.error) throw res.error;
+  return res;
 }
 
 /**

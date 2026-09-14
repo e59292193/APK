@@ -10,5 +10,5 @@ export { shadows } from './shadows';
 export { animations, durations, easings } from './animations';
 export { layout } from './layout';
 
-export { THEMES, THEME_LIST, THEME_IDS, DEFAULT_THEME } from './themes';
+export { themes, THEMES, THEME_LIST, THEME_IDS, DEFAULT_THEME } from './themes';
 export { ThemeProvider, useTheme, prefetchThemeId, THEME_STORAGE_KEY } from './ThemeContext';

@@ -25,7 +25,7 @@ export function AppHeader({
       style={[
         styles.container,
         {
-          backgroundColor: currentColors.backgroundLavender,
+          backgroundColor: currentColors.card || currentColors.background,
           borderBottomColor: currentColors.border,
           paddingTop: insets.top,
         },
@@ -35,7 +35,13 @@ export function AppHeader({
       <View style={[styles.content, { height }]}>
         <View style={styles.left}>
           {showBack ? (
-            <IconButton icon="chevron-back" size={24} onPress={onBack} accessibilityLabel="返回" />
+            <IconButton
+              icon="chevron-back"
+              size={24}
+              onPress={onBack}
+              accessibilityLabel="返回"
+              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+            />
           ) : leftAction ? (
             leftAction
           ) : icon ? (
@@ -47,12 +53,12 @@ export function AppHeader({
 
         <View style={styles.center}>
           {title && (
-            <Text style={[compact ? typography.cardTitle : typography.pageTitle, styles.title]} numberOfLines={1}>
+            <Text style={[compact ? typography.cardTitle : typography.pageTitle, styles.title, { color: currentColors.text || currentColors.textPrimary }]} numberOfLines={1}>
               {title}
             </Text>
           )}
           {subtitle && (
-            <Text style={[typography.caption, styles.subtitle]} numberOfLines={1}>
+            <Text style={[typography.caption, styles.subtitle, { color: currentColors.textSecondary || currentColors.textMuted }]} numberOfLines={1}>
               {subtitle}
             </Text>
           )}

@@ -1,21 +1,25 @@
 import React from 'react';
 import { View, Text, Image, StyleSheet } from 'react-native';
-import { colors, typography } from '../../theme';
+import { useTheme, typography } from '../../theme';
 
 export function Avatar({ uri, fallback, size = 40, style }) {
+  const { colors } = useTheme();
+  const primary = colors.primary || '#FF6B35';
+  const primarySoft = colors.primarySoft || colors.background || '#FFF0EB';
   const fontSize = Math.round(size * 0.42);
+
   return (
     <View
       style={[
         styles.base,
-        { width: size, height: size, borderRadius: size / 2, backgroundColor: colors.primary[100] },
+        { width: size, height: size, borderRadius: size / 2, backgroundColor: primarySoft },
         style,
       ]}
     >
       {uri ? (
         <Image source={{ uri }} style={{ width: size, height: size, borderRadius: size / 2 }} />
       ) : (
-        <Text style={[styles.fallback, { fontSize, color: colors.primary[700] }]}>{fallback || 'M'}</Text>
+        <Text style={[styles.fallback, { fontSize, color: primary }]}>{fallback || 'M'}</Text>
       )}
     </View>
   );

@@ -67,7 +67,11 @@ export function strokeToPath(points) {
 
 export function withPath(stroke) {
   const points = (stroke && stroke.points) || [];
+  const si = stroke && (stroke.strokeId || stroke.si);
   return {
+    strokeId: si,
+    si,
+    t: stroke && (stroke.t || stroke.timestamp),
     points,
     color: (stroke && stroke.color) || DEFAULT_COLOR,
     width: (stroke && stroke.width) || DEFAULT_WIDTH,
@@ -225,7 +229,7 @@ export function createStrokeAssembler({
   }
 
   return {
-    begin(si, meta) {
+    begin(si, meta, timestamp) {
       if (!si || done.has(si)) return;
       prunePending();
       const session = getSession(si);
@@ -238,7 +242,11 @@ export function createStrokeAssembler({
         if (previous && !previous.ready) markReady(previous);
       }
 
+      const t = timestamp || (meta && meta.t) || Date.now();
       session.stroke = {
+        strokeId: si,
+        si,
+        t,
         points: decodePoints(meta && meta.p, width, height),
         color: (meta && meta.c) || DEFAULT_COLOR,
         width: (meta && meta.w) || DEFAULT_WIDTH,
@@ -304,6 +312,8 @@ export function createStrokeAssembler({
 
 export function encodeStrokes(strokes, width, height) {
   return (strokes || []).map((stroke) => ({
+    si: stroke.strokeId || stroke.si,
+    t: stroke.t,
     c: stroke.color || DEFAULT_COLOR,
     w: stroke.width || DEFAULT_WIDTH,
     e: stroke.isEraser ? 1 : 0,
@@ -314,6 +324,9 @@ export function encodeStrokes(strokes, width, height) {
 export function decodeStrokes(list, width, height) {
   return (list || []).map((stroke) =>
     withPath({
+      strokeId: stroke && (stroke.si || stroke.strokeId),
+      si: stroke && (stroke.si || stroke.strokeId),
+      t: stroke && stroke.t,
       points: decodePoints(stroke && stroke.p, width, height),
       color: (stroke && stroke.c) || DEFAULT_COLOR,
       width: (stroke && stroke.w) || DEFAULT_WIDTH,

@@ -168,6 +168,7 @@ export default function TimeCapsuleScreen({
   onLogout,
   onNavigateMomiKitchen,
   onNavigateThemeSelector,
+  onNavigateSettings,
 }) {
   const insets = useSafeAreaInsets();
   const [capsules, setCapsules] = useState([]);
@@ -766,6 +767,15 @@ export default function TimeCapsuleScreen({
                 color={colors.textSecondary}
                 onPress={onNavigateMomiKitchen}
                 accessibilityLabel="momi厨房"
+              />
+            )}
+            {onNavigateSettings && (
+              <IconButton
+                icon="settings-outline"
+                size={22}
+                color={colors.textSecondary}
+                onPress={onNavigateSettings}
+                accessibilityLabel="设置"
               />
             )}
             <IconButton

@@ -55,7 +55,11 @@ const CompletedLayer = memo(
     return (
       <>
         {list.map((stroke, index) => (
-          <StrokeShape key={`s${index}`} stroke={stroke} boardColor={boardColor} />
+          <StrokeShape
+            key={stroke.strokeId || stroke.si || `s_${index}`}
+            stroke={stroke}
+            boardColor={boardColor}
+          />
         ))}
       </>
     );

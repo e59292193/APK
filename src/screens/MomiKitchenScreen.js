@@ -1,31 +1,26 @@
-/**
- * MomiKitchenScreen — momi厨房
- *
- * 两人共同打理的美食厨房模块：
- * - 3大分类 Tab：荤菜 / 蔬菜 / 小吃
- * - 菜品双列卡片瀑布流，支持图文菜谱、多图步骤查看
- * - "本周想吃" 点选，按自然周（周一为起点）归集
- * - 触发点选时弹出居中 Toast: "momi厨房正在准备食材，请耐心等待哦~"
- * - 实时同步 (Supabase Realtime)
- * - 菜单一键清空与单道移除
- */
+// ═══════════════════════════════════════════════════════
+// MomiKitchenScreen —— momi厨房 (功能9 UI 全面优化 & 功能2 入口)
+// 暖橙温暖美食风、渐变 Header、momi小助手入口、本周想吃横向滑动卡片、双列瀑布网格
+// ═══════════════════════════════════════════════════════
+
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   StyleSheet,
   Text,
   View,
-  Image,
   FlatList,
+  ScrollView,
   TouchableOpacity,
   RefreshControl,
   ActivityIndicator,
   Alert,
+  Dimensions,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { usePolling } from '../hooks/usePolling';
 import { supabase } from '../lib/supabase';
-import { typography, spacing } from '../theme';
+import { typography, spacing, radius, shadows, useTheme } from '../theme';
 import { CenterToast } from '../components/ui';
 import {
   DishCard,
@@ -43,34 +38,29 @@ import {
   clearWeeklyPicks,
   deleteDish,
 } from '../lib/kitchenUtils';
+import { CachedImage } from '../lib/imageCache';
 
-const CATEGORY_KEYS = ['meat', 'veg', 'snack'];
+const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
-const KITCHEN_CATEGORY_CONFIG = {
-  meat: {
-    key: 'meat',
-    label: '荤菜',
-    image: require('../../assets/kitchen/cat_meat.png'),
-    emptyImage: require('../../assets/kitchen/empty_meat.png'),
-  },
-  veg: {
-    key: 'veg',
-    label: '蔬菜',
-    image: require('../../assets/kitchen/cat_veg.png'),
-    emptyImage: require('../../assets/kitchen/empty_veg.png'),
-  },
-  snack: {
-    key: 'snack',
-    label: '小吃',
-    image: require('../../assets/kitchen/cat_snack.png'),
-    emptyImage: require('../../assets/kitchen/empty_snack.png'),
-  },
-};
+const CATEGORIES_DATA = [
+  { key: 'meat', label: '荤菜', icon: '🥩' },
+  { key: 'veg', label: '蔬菜', icon: '🥗' },
+  { key: 'snack', label: '小吃', icon: '🥟' },
+];
 
-const THEME_BG = '#FAF7EE';
-
-export default function MomiKitchenScreen({ userId, onBack }) {
+export default function MomiKitchenScreen({
+  userId,
+  onBack,
+  onNavigateMomiAssistant,
+}) {
   const insets = useSafeAreaInsets();
+  const { theme, colors } = useTheme();
+  const primary = colors.primary || '#FF6B35';
+  const bg = colors.background || '#FAFAF7';
+  const cardBg = colors.card || '#FFFFFF';
+  const textMain = colors.text || '#2D1B00';
+  const textMuted = colors.textSecondary || '#8B7355';
+  const border = colors.border || '#FFD6C7';
 
   // ─── State ───
   const [selectedCategory, setSelectedCategory] = useState('meat');
@@ -92,44 +82,56 @@ export default function MomiKitchenScreen({ userId, onBack }) {
   const [toastVisible, setToastVisible] = useState(false);
   const [toastMessage, setToastMessage] = useState('');
 
-  // 当前周一日期 (YYYY-MM-DD)
   const currentWeekStart = useMemo(() => getMondayOfWeek(), []);
 
-  // 快速查询某菜品本周是否已选
   const pickedDishIdMap = useMemo(() => {
     const map = new Set();
-    const list = Array.isArray(picks) ? picks : (picks && picks.data) || [];
-    list.forEach((p) => {
-      if (p && p.dish_id) map.add(p.dish_id);
-    });
+    for (const p of picks) {
+      if (p.dish_id) map.add(p.dish_id);
+    }
     return map;
   }, [picks]);
 
-  // 当前分类下的菜品列表
+  // 本周想吃关联的菜品列表
+  const weeklyPickedDishes = useMemo(() => {
+    return dishes.filter((d) => pickedDishIdMap.has(d.id));
+  }, [dishes, pickedDishIdMap]);
+
+  // 本周想吃清单（关联完整菜品对象，用于周清单弹窗展示）
+  const enrichedPicks = useMemo(() => {
+    const dishMap = new Map(dishes.map((d) => [d.id, d]));
+    return picks
+      .map((p) => {
+        const dish = p.dish || dishMap.get(p.dish_id);
+        return {
+          ...p,
+          dish: dish || null,
+        };
+      })
+      .filter((p) => Boolean(p.dish));
+  }, [picks, dishes]);
+
+  // 按分类过滤菜品
   const filteredDishes = useMemo(() => {
-    const list = Array.isArray(dishes) ? dishes : (dishes && dishes.data) || [];
-    return list.filter((d) => (d && (d.category || 'meat')) === selectedCategory);
+    return dishes.filter((d) => {
+      if (selectedCategory === 'veg') {
+        return d.category === 'veg' || d.category === 'vegetable';
+      }
+      return d.category === selectedCategory;
+    });
   }, [dishes, selectedCategory]);
 
-  // ─── Data Loading ───
-  const loadData = useCallback(async (isRefresh = false) => {
-    if (isRefresh) {
-      setRefreshing(true);
-    } else {
-      setLoading(true);
-    }
-
+  // ─── 数据加载 ───
+  const loadData = useCallback(async () => {
     try {
-      const [dishesRes, picksRes] = await Promise.all([
-        fetchDishes(),
-        fetchWeeklyPicks(currentWeekStart),
+      const [dishesData, picksData] = await Promise.all([
+        fetchDishes(null, 'momo_and_baomi'),
+        fetchWeeklyPicks(currentWeekStart, 'momo_and_baomi'),
       ]);
-      const safeDishes = Array.isArray(dishesRes) ? dishesRes : (dishesRes && dishesRes.data) || [];
-      const safePicks = Array.isArray(picksRes) ? picksRes : (picksRes && picksRes.data) || [];
-      setDishes(safeDishes);
-      setPicks(safePicks);
+      setDishes(dishesData || []);
+      setPicks(picksData || []);
     } catch (err) {
-      console.error('[MomiKitchen] 数据加载失败:', err);
+      console.warn('[MomiKitchen] 数据加载失败:', err.message);
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -140,106 +142,47 @@ export default function MomiKitchenScreen({ userId, onBack }) {
     loadData();
   }, [loadData]);
 
-  // 轮询兜底机制（与其他 Screen 架构统一保持 15s 活跃轮询）
+  // 15 秒轮询兜底
   usePolling(loadData, 15000);
 
-  // ─── Realtime Subscription ───
+  // 实时订阅 Supabase
   useEffect(() => {
-    let channel;
-    try {
-      if (supabase && typeof supabase.channel === 'function') {
-        channel = supabase
-          .channel('kitchen-realtime-sync')
-          .on(
-            'postgres_changes',
-            { event: '*', schema: 'public', table: 'kitchen_dishes' },
-            (payload) => {
-              if (payload.eventType === 'INSERT') {
-                setDishes((prev) => [payload.new, ...prev.filter((d) => d.id !== payload.new.id)]);
-              } else if (payload.eventType === 'UPDATE') {
-                setDishes((prev) =>
-                  prev.map((d) => (d.id === payload.new.id ? payload.new : d))
-                );
-                setSelectedDish((curr) => (curr && curr.id === payload.new.id ? payload.new : curr));
-              } else if (payload.eventType === 'DELETE') {
-                setDishes((prev) => prev.filter((d) => d.id !== payload.old.id));
-                setPicks((prev) => prev.filter((p) => p.dish_id !== payload.old.id));
-                setSelectedDish((curr) => (curr && curr.id === payload.old.id ? null : curr));
-              }
-            }
-          )
-          .on(
-            'postgres_changes',
-            { event: '*', schema: 'public', table: 'kitchen_weekly_picks' },
-            () => {
-              fetchWeeklyPicks(currentWeekStart).then((res) => {
-                const safe = Array.isArray(res) ? res : (res && res.data) || [];
-                setPicks(safe);
-              });
-            }
-          )
-          .subscribe();
-      }
-    } catch (e) {
-      console.warn('[MomiKitchen] Realtime 订阅失败:', e.message);
-    }
+    const channel = supabase
+      .channel('kitchen_realtime_channel')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'kitchen_dishes' },
+        () => loadData()
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'kitchen_weekly_picks' },
+        () => loadData()
+      )
+      .subscribe();
 
     return () => {
-      try {
-        if (channel && supabase && typeof supabase.removeChannel === 'function') {
-          supabase.removeChannel(channel);
-        }
-      } catch (e) {}
+      supabase.removeChannel(channel);
     };
-  }, [currentWeekStart]);
+  }, [loadData]);
 
-  // ─── Actions ───
-
-  // 点选 / 取消点选 "本周想吃"
+  // 切换本周想吃
   const handleTogglePick = async (dish) => {
-    if (!dish || !dish.id) return;
-
     try {
-      const result = await toggleWeeklyPick({
+      const res = await toggleWeeklyPick({
         dishId: dish.id,
         weekStart: currentWeekStart,
-        userId,
+        userId: userId || 'momo',
+        coupleId: 'momo_and_baomi',
       });
 
-      if (result.action === 'picked') {
-        // 刚加入本周菜单，按要求弹出特定文案的居中提示
-        setToastMessage('momi厨房正在准备食材，请耐心等待哦~');
+      if (res && res.action === 'picked') {
+        setToastMessage('momi厨房正在准备食材，请耐心等待哦~ 🍲');
         setToastVisible(true);
       }
-
-      // 刷新本周选菜列表
-      const updatedPicks = await fetchWeeklyPicks(currentWeekStart);
-      setPicks(updatedPicks || []);
+      loadData();
     } catch (err) {
-      console.error('[MomiKitchen] 切换想吃状态失败:', err);
-      Alert.alert('操作失败', '网络繁忙，请稍后重试');
-    }
-  };
-
-  // 从周菜单中移除单道菜
-  const handleRemovePick = async (dishId) => {
-    try {
-      await removeWeeklyPick(dishId, currentWeekStart);
-      setPicks((prev) => prev.filter((p) => p.dish_id !== dishId && p.id !== dishId));
-    } catch (err) {
-      console.error('[MomiKitchen] 移除菜品失败:', err);
-      Alert.alert('移除失败', '请检查网络连接后重试');
-    }
-  };
-
-  // 一键清空本周菜单
-  const handleClearPicks = async () => {
-    try {
-      await clearWeeklyPicks(currentWeekStart);
-      setPicks([]);
-    } catch (err) {
-      console.error('[MomiKitchen] 清空菜单失败:', err);
-      Alert.alert('清空失败', '请检查网络连接后重试');
+      console.error('[MomiKitchen] 切换本周想吃失败:', err);
     }
   };
 
@@ -259,275 +202,314 @@ export default function MomiKitchenScreen({ userId, onBack }) {
     }
   };
 
-  // 菜品保存成功
-  const handleDishSaved = (savedDish) => {
-    setEditModalVisible(false);
-    setEditingDish(null);
-    setDishes((prev) => {
-      const idx = prev.findIndex((d) => d.id === savedDish.id);
-      if (idx >= 0) {
-        const next = [...prev];
-        next[idx] = savedDish;
-        return next;
-      }
-      return [savedDish, ...prev];
-    });
-    // 如果正在查看详情，同步更新详情
-    if (selectedDish && selectedDish.id === savedDish.id) {
-      setSelectedDish(savedDish);
+  // 移除本周想吃
+  const handleRemoveWeeklyPick = async (dishIdOrPickId) => {
+    try {
+      const targetPick = picks.find(
+        (p) => p.id === dishIdOrPickId || p.dish_id === dishIdOrPickId
+      );
+      const targetDishId = targetPick ? targetPick.dish_id : dishIdOrPickId;
+      await removeWeeklyPick(targetDishId, currentWeekStart, 'momo_and_baomi');
+      await loadData();
+    } catch (err) {
+      console.warn('[MomiKitchen] 移除本周想吃失败:', err.message);
     }
   };
 
-  // 渲染单道菜品卡片
-  const renderDishItem = ({ item }) => {
-    const isPicked = pickedDishIdMap.has(item.id);
-    return (
-      <DishCard
-        dish={item}
-        isPicked={isPicked}
-        onPress={() => {
-          setSelectedDish(item);
-          setDetailModalVisible(true);
-        }}
-        onTogglePick={() => handleTogglePick(item)}
-      />
-    );
+  // 一键清空本周想吃
+  const handleClearWeeklyPicks = async () => {
+    try {
+      await clearWeeklyPicks(currentWeekStart, 'momo_and_baomi');
+      await loadData();
+    } catch (err) {
+      console.warn('[MomiKitchen] 清空本周想吃失败:', err.message);
+    }
+  };
+
+  const handleDishSaved = (savedDish) => {
+    setEditModalVisible(false);
+    setEditingDish(null);
+    if (!savedDish) {
+      loadData();
+      return;
+    }
+    const dishObj = Array.isArray(savedDish?.data)
+      ? savedDish.data[0]
+      : (savedDish?.data || savedDish);
+    if (dishObj && dishObj.id) {
+      setDishes((prev) => {
+        const idx = prev.findIndex((d) => d.id === dishObj.id);
+        if (idx >= 0) {
+          const next = [...prev];
+          next[idx] = dishObj;
+          return next;
+        }
+        return [dishObj, ...prev];
+      });
+      if (selectedDish && selectedDish.id === dishObj.id) {
+        setSelectedDish(dishObj);
+      }
+    }
+    loadData();
   };
 
   return (
-    <View style={[styles.container, { backgroundColor: THEME_BG }]}>
-      {/* 居中 Toast */}
+    <View style={[styles.container, { backgroundColor: bg }]}>
       <CenterToast
         visible={toastVisible}
         message={toastMessage}
-        duration={2500}
+        duration={2400}
         onDismiss={() => setToastVisible(false)}
       />
 
-      {/* 顶部导航栏 (1:1 复刻图一) */}
-      <View style={[styles.customHeader, { paddingTop: insets.top + 8 }]}>
-        <TouchableOpacity
-          style={styles.headerBackBtn}
-          activeOpacity={0.7}
-          onPress={onBack}
-          accessibilityLabel="返回"
-        >
-          <Ionicons name="chevron-back" size={26} color="#2D312E" />
-        </TouchableOpacity>
+      {/* 顶部 Header：活力主题背景 + momi 助手入口 */}
+      <View style={[styles.headerWrap, { paddingTop: insets.top + 8, backgroundColor: primary }]}>
+        <View style={styles.headerBar}>
+          <TouchableOpacity
+            style={styles.headerBtn}
+            onPress={onBack}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            accessibilityLabel="返回"
+          >
+            <Ionicons name="chevron-back" size={26} color="#FFFFFF" />
+          </TouchableOpacity>
 
-        <View style={styles.headerTitleWrap}>
-          <Text style={styles.headerTitle}>momi厨房</Text>
-          <Text style={styles.headerSubtitle}>今天吃什么？两人挑一挑</Text>
+          <View style={styles.headerTitleWrap}>
+            <Text style={styles.headerTitle}>momi厨房</Text>
+            <Text style={styles.headerSubtitle}>今天吃什么？两人挑一挑 🍳</Text>
+          </View>
+
+          <View style={styles.headerRightActions}>
+            {/* momi 助手入口图标按钮 (功能2) */}
+            <TouchableOpacity
+              style={styles.assistantBtn}
+              activeOpacity={0.8}
+              onPress={onNavigateMomiAssistant}
+              accessibilityLabel="打开 momi 小助手"
+            >
+              <Text style={{ fontSize: 16 }}>🐾</Text>
+              <Text style={[styles.assistantBtnText, { color: primary }]}>小助手</Text>
+            </TouchableOpacity>
+
+            {/* 本周菜单胶囊按钮 */}
+            <TouchableOpacity
+              style={styles.weeklyMenuPill}
+              activeOpacity={0.8}
+              onPress={() => setWeeklyModalVisible(true)}
+              accessibilityLabel="本周菜单"
+            >
+              <Ionicons name="restaurant-outline" size={14} color="#FFFFFF" />
+              <Text style={styles.weeklyMenuPillText}>本周菜单</Text>
+              {picks.length > 0 && (
+                <View style={styles.picksBadge}>
+                  <Text style={[styles.picksBadgeText, { color: primary }]}>{picks.length}</Text>
+                </View>
+              )}
+            </TouchableOpacity>
+          </View>
         </View>
 
-        <TouchableOpacity
-          style={styles.headerRightPill}
-          activeOpacity={0.75}
-          onPress={() => setWeeklyModalVisible(true)}
-          accessibilityLabel="查看本周菜单"
-        >
-          <Ionicons name="restaurant-outline" size={14} color="#558E73" style={{ marginRight: 4 }} />
-          <Text style={styles.headerRightPillText}>本周菜单</Text>
-          {picks.length > 0 && (
-            <View style={styles.headerPillBadge}>
-              <Text style={styles.headerPillBadgeText}>{picks.length}</Text>
-            </View>
-          )}
-        </TouchableOpacity>
-      </View>
-
-      {/* 自然周浮动卡片 (1:1 复刻图一) */}
-      <View style={styles.weekCard}>
-        <View style={styles.weekCardLeft}>
-          <View style={styles.weekCardRow}>
-            <Ionicons name="calendar-outline" size={15} color="#7A807A" style={styles.weekCardIcon} />
-            <Text style={styles.weekCardRange}>{formatWeekRangeDisplay(currentWeekStart)}</Text>
-          </View>
-          <View style={[styles.weekCardRow, { marginTop: 6 }]}>
-            <Ionicons name="bag-handle-outline" size={15} color="#7A807A" style={styles.weekCardIcon} />
-            <Text style={styles.weekCardPicks}>
-              已挑 <Text style={styles.weekCardPicksBold}>{picks.length}</Text> 道
-            </Text>
-          </View>
-        </View>
-
-        <TouchableOpacity
-          activeOpacity={0.7}
-          onPress={() => setWeeklyModalVisible(true)}
-        >
-          <Text style={styles.weekCardLink}>查看清单 &gt;</Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* 三大分类选择器 (带 3D 拟物立体插图，1:1 复刻图一) */}
-      <View style={styles.categoryBar}>
-        {CATEGORY_KEYS.map((catKey, index) => {
-          const catConfig = KITCHEN_CATEGORY_CONFIG[catKey] || {
-            label: catKey,
-            image: null,
-          };
-          const isSelected = selectedCategory === catKey;
-          const count = dishes.filter((d) => (d.category || 'meat') === catKey).length;
-
-          return (
-            <View key={catKey} style={styles.categoryCol}>
-              <TouchableOpacity
-                style={styles.categoryItem}
-                activeOpacity={0.8}
-                onPress={() => setSelectedCategory(catKey)}
-              >
-                {/* 3D 拟物大图 */}
-                <Image
-                  source={catConfig.image}
-                  style={styles.categoryImage}
-                  resizeMode="contain"
-                />
-
-                {/* 胶囊标签 */}
-                <View
-                  style={[
-                    styles.categoryPill,
-                    isSelected ? styles.categoryPillSelected : styles.categoryPillUnselected,
-                  ]}
+        {/* 分类 Tab 栏 (圆角胶囊样式) */}
+        <View style={styles.tabContainer}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.tabScrollContent}
+          >
+            {CATEGORIES_DATA.map((cat) => {
+              const active = selectedCategory === cat.key;
+              return (
+                <TouchableOpacity
+                  key={cat.key}
+                  style={[styles.categoryPill, active && [styles.categoryPillActive, { backgroundColor: cardBg }]]}
+                  activeOpacity={0.8}
+                  onPress={() => setSelectedCategory(cat.key)}
                 >
-                  <Text
-                    style={[
-                      styles.categoryLabel,
-                      isSelected ? styles.categoryLabelSelected : styles.categoryLabelUnselected,
-                    ]}
-                  >
-                    {catConfig.label}
+                  <Text style={{ fontSize: 16, marginRight: 6 }}>{cat.icon}</Text>
+                  <Text style={[styles.categoryPillText, active && [styles.categoryPillTextActive, { color: primary }]]}>
+                    {cat.label}
                   </Text>
-                  <View
-                    style={[
-                      styles.categoryCountBadge,
-                      isSelected ? styles.categoryBadgeSelected : styles.categoryBadgeUnselected,
-                    ]}
-                  >
-                    <Text
-                      style={[
-                        styles.categoryCountText,
-                        isSelected ? styles.categoryBadgeTextSelected : styles.categoryBadgeTextUnselected,
-                      ]}
-                    >
-                      {count}
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        </View>
+      </View>
+
+      {/* 主内容区 */}
+      <ScrollView
+        style={styles.mainScroll}
+        contentContainerStyle={{ paddingBottom: insets.bottom + 90 }}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => {
+              setRefreshing(true);
+              loadData();
+            }}
+            tintColor={primary}
+          />
+        }
+        showsVerticalScrollIndicator={false}
+      >
+        {/* 「本周想吃」横向卡片滑动列表 (功能9) */}
+        <View style={styles.weeklySection}>
+          <View style={styles.weeklySectionHeader}>
+            <View style={styles.weeklyTitleRow}>
+              <Ionicons name="heart" size={18} color={primary} />
+              <Text style={[styles.weeklyTitle, { color: textMain }]}>本周想吃</Text>
+              <View style={[styles.weekDateBadge, { backgroundColor: colors.primarySoft || bg }]}>
+                <Text style={[styles.weekDateText, { color: primary }]}>{formatWeekRangeDisplay(currentWeekStart)}</Text>
+              </View>
+            </View>
+            <TouchableOpacity onPress={() => setWeeklyModalVisible(true)}>
+              <Text style={[styles.weeklyDetailLink, { color: textMuted }]}>查看清单 ({picks.length}) ›</Text>
+            </TouchableOpacity>
+          </View>
+
+          {weeklyPickedDishes.length > 0 ? (
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.weeklyCardsScroll}
+            >
+              {weeklyPickedDishes.map((dish) => (
+                <TouchableOpacity
+                  key={`pick-${dish.id}`}
+                  style={[styles.weeklyCard, { backgroundColor: cardBg, borderColor: border }]}
+                  activeOpacity={0.9}
+                  onPress={() => {
+                    setSelectedDish(dish);
+                    setDetailModalVisible(true);
+                  }}
+                >
+                  <CachedImage
+                    source={dish.image_path}
+                    style={styles.weeklyCardImage}
+                    contentFit="cover"
+                    previewable={false}
+                  />
+                  <View style={styles.weeklyCardInfo}>
+                    <Text style={[styles.weeklyCardTitle, { color: textMain }]} numberOfLines={1}>
+                      {dish.title}
                     </Text>
                   </View>
-                </View>
-              </TouchableOpacity>
-
-              {/* 列间分割线 */}
-              {index < CATEGORY_KEYS.length - 1 && <View style={styles.categoryDivider} />}
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          ) : (
+            <View style={[styles.weeklyEmptyCard, { backgroundColor: cardBg, borderColor: border }]}>
+              <Ionicons name="cart-outline" size={24} color={textMuted} />
+              <Text style={[styles.weeklyEmptyText, { color: textMuted }]}>本周还没有挑中想吃的菜，在下方卡片点个心吧~</Text>
             </View>
-          );
-        })}
-      </View>
-
-      {/* 菜品列表 / 空状态 (1:1 复刻图一) */}
-      {loading ? (
-        <View style={styles.centerLoading}>
-          <ActivityIndicator size="large" color="#558E73" />
-          <Text style={styles.loadingText}>
-            momi厨房正在加载美味...
-          </Text>
+          )}
         </View>
-      ) : (
-        <FlatList
-          data={filteredDishes}
-          keyExtractor={(item) => item.id}
-          renderItem={renderDishItem}
-          numColumns={2}
-          columnWrapperStyle={styles.columnWrapper}
-          contentContainerStyle={[
-            styles.listContent,
-            { paddingBottom: insets.bottom + 90 },
-          ]}
-          refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={() => loadData(true)}
-              tintColor="#558E73"
-              colors={['#558E73']}
-            />
-          }
-          ListEmptyComponent={
-            <View style={styles.emptyContainer}>
-              <Image
-                source={
-                  (KITCHEN_CATEGORY_CONFIG[selectedCategory] || KITCHEN_CATEGORY_CONFIG.meat).emptyImage
-                }
-                style={styles.emptyImage}
-                resizeMode="contain"
-              />
-              <Text style={styles.emptyTitle}>
-                {(KITCHEN_CATEGORY_CONFIG[selectedCategory]?.label || '菜品')}池空空如也哦
-              </Text>
-              <Text style={styles.emptySubtitle}>
-                点击右下角「+」号，记录你们喜爱的{'\n'}专属私房菜吧！
-              </Text>
-            </View>
-          }
-          showsVerticalScrollIndicator={false}
-        />
-      )}
 
-      {/* 悬浮添加按钮 (FAB 1:1 复刻图一) */}
+        {/* 菜品瀑布流网格 */}
+        <View style={styles.gridSection}>
+          <View style={styles.gridSectionHeader}>
+            <Text style={[styles.gridSectionTitle, { color: textMain }]}>
+              {CATEGORIES_DATA.find((c) => c.key === selectedCategory)?.label || '菜品'}
+              {' '}({filteredDishes.length})
+            </Text>
+          </View>
+
+          {loading ? (
+            <View style={styles.centerLoading}>
+              <ActivityIndicator size="large" color={primary} />
+              <Text style={[styles.loadingText, { color: textMuted }]}>正在为您准备菜单...</Text>
+            </View>
+          ) : filteredDishes.length > 0 ? (
+            <View style={styles.dishGrid}>
+              {filteredDishes.map((dish) => (
+                <DishCard
+                  key={dish.id}
+                  dish={dish}
+                  isPicked={pickedDishIdMap.has(dish.id)}
+                  onPress={() => {
+                    setSelectedDish(dish);
+                    setDetailModalVisible(true);
+                  }}
+                  onTogglePick={() => handleTogglePick(dish)}
+                />
+              ))}
+            </View>
+          ) : (
+            <View style={styles.emptyGrid}>
+              <Ionicons name="restaurant-outline" size={48} color={textMuted} />
+              <Text style={[styles.emptyGridTitle, { color: textMain }]}>这个分类还没有菜品呢</Text>
+              <Text style={[styles.emptyGridDesc, { color: textMuted }]}>点击下方按钮或右下角加号，记录你们爱吃的美食吧！</Text>
+              <TouchableOpacity
+                style={[styles.emptyAddBtn, { backgroundColor: primary }]}
+                activeOpacity={0.85}
+                onPress={() => {
+                  setEditingDish(null);
+                  setEditModalVisible(true);
+                }}
+              >
+                <Ionicons name="add" size={18} color="#FFFFFF" />
+                <Text style={styles.emptyAddBtnText}>添加新菜品</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+        </View>
+      </ScrollView>
+
+      {/* FAB 悬浮添加按钮 (右下角主题色圆形，阴影效果) */}
       <TouchableOpacity
         style={[
-          styles.fab,
+          styles.fabBtn,
           {
-            bottom: insets.bottom > 0 ? insets.bottom + 20 : 28,
+            bottom: insets.bottom + 24,
+            backgroundColor: primary,
+            shadowColor: primary,
           },
         ]}
-        activeOpacity={0.85}
+        activeOpacity={0.88}
         onPress={() => {
           setEditingDish(null);
           setEditModalVisible(true);
         }}
-        accessibilityLabel="添加菜品"
+        accessibilityLabel="添加新菜品"
       >
         <Ionicons name="add" size={32} color="#FFFFFF" />
       </TouchableOpacity>
 
-      {/* 菜品编辑 / 新增弹窗 */}
+      {/* 菜品编辑抽屉 (功能1 & 功能9) */}
       <DishEditModal
         visible={editModalVisible}
         dish={editingDish}
         userId={userId}
-        onClose={() => {
-          setEditModalVisible(false);
-          setEditingDish(null);
-        }}
+        onClose={() => setEditModalVisible(false)}
         onSaved={handleDishSaved}
-        onDeleted={(deletedId) => handleDeleteDish(deletedId)}
+        onDeleted={handleDeleteDish}
       />
 
-      {/* 菜品详情与做法弹窗 */}
+      {/* 菜品详情全屏 (功能9) */}
       <DishDetailModal
         visible={detailModalVisible}
         dish={selectedDish}
         isPickedThisWeek={selectedDish ? pickedDishIdMap.has(selectedDish.id) : false}
-        onClose={() => {
-          setDetailModalVisible(false);
-          setSelectedDish(null);
-        }}
-        onTogglePick={(dish) => handleTogglePick(dish)}
+        onClose={() => setDetailModalVisible(false)}
+        onTogglePick={handleTogglePick}
         onEdit={(dish) => {
-          setDetailModalVisible(false);
           setEditingDish(dish);
           setEditModalVisible(true);
         }}
-        onDelete={(dishId) => handleDeleteDish(dishId)}
+        onDelete={handleDeleteDish}
       />
 
-      {/* 本周想吃清单弹窗 */}
+      {/* 本周菜单清单 Modal */}
       <WeeklyPicksModal
         visible={weeklyModalVisible}
-        picks={picks}
+        picks={enrichedPicks}
         weekStart={currentWeekStart}
+        coupleId="momo_and_baomi"
+        userId={userId}
         onClose={() => setWeeklyModalVisible(false)}
-        onRemovePick={handleRemovePick}
-        onClearPicks={handleClearPicks}
+        onPicksChanged={loadData}
+        onRemovePick={handleRemoveWeeklyPick}
+        onClearPicks={handleClearWeeklyPicks}
         onSelectDish={(dish) => {
           setWeeklyModalVisible(false);
           setSelectedDish(dish);
@@ -541,256 +523,248 @@ export default function MomiKitchenScreen({ userId, onBack }) {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: THEME_BG,
   },
-  // ── Custom Header (1:1 复刻图一) ──
-  customHeader: {
-    backgroundColor: THEME_BG,
+  headerWrap: {
+    borderBottomLeftRadius: 20,
+    borderBottomRightRadius: 20,
+    paddingBottom: 14,
+    ...shadows.soft,
+  },
+  headerBar: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingBottom: 8,
+    paddingHorizontal: spacing[3],
+    marginBottom: 10,
   },
-  headerBackBtn: {
-    width: 40,
-    height: 40,
-    alignItems: 'flex-start',
-    justifyContent: 'center',
+  headerBtn: {
+    padding: 6,
   },
   headerTitleWrap: {
-    alignItems: 'center',
-    justifyContent: 'center',
+    flex: 1,
+    marginLeft: 6,
   },
   headerTitle: {
-    fontSize: 21,
+    fontSize: 20,
     fontWeight: '800',
-    color: '#2B302C',
-    letterSpacing: -0.2,
+    color: '#FFFFFF',
   },
   headerSubtitle: {
-    fontSize: 13,
-    color: '#7C837D',
+    fontSize: 11,
+    color: 'rgba(255, 255, 255, 0.88)',
     marginTop: 2,
   },
-  headerRightPill: {
+  headerRightActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  assistantBtn: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#FFFFFF',
-    borderWidth: 1,
-    borderColor: '#B4D5C2',
-    borderRadius: 20,
+    paddingHorizontal: 9,
     paddingVertical: 5,
-    paddingHorizontal: 11,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.04,
-    shadowRadius: 3,
-    elevation: 1,
+    borderRadius: radius.pill,
+    gap: 4,
+    ...shadows.soft,
   },
-  headerRightPillText: {
-    fontSize: 13,
+  assistantBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  weeklyMenuPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.18)',
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    borderRadius: radius.pill,
+    gap: 4,
+  },
+  weeklyMenuPillText: {
+    fontSize: 12,
     fontWeight: '600',
-    color: '#528A6D',
-  },
-  headerPillBadge: {
-    marginLeft: 4,
-    backgroundColor: '#528A6D',
-    borderRadius: 8,
-    paddingHorizontal: 5,
-    paddingVertical: 1,
-  },
-  headerPillBadgeText: {
     color: '#FFFFFF',
-    fontSize: 10,
-    fontWeight: '700',
   },
-
-  // ── Floating Natural Week Card (1:1 复刻图一) ──
-  weekCard: {
+  picksBadge: {
     backgroundColor: '#FFFFFF',
-    borderRadius: 20,
-    marginHorizontal: 16,
-    marginTop: 8,
-    marginBottom: 8,
-    paddingVertical: 14,
-    paddingHorizontal: 18,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    shadowColor: '#3A423D',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.05,
-    shadowRadius: 10,
-    elevation: 2,
-  },
-  weekCardLeft: {
-    flex: 1,
-  },
-  weekCardRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  weekCardIcon: {
-    marginRight: 8,
-  },
-  weekCardRange: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: '#2B302C',
-  },
-  weekCardPicks: {
-    fontSize: 13,
-    color: '#636A65',
-  },
-  weekCardPicksBold: {
-    fontWeight: '700',
-    color: '#2B302C',
-  },
-  weekCardLink: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#528A6D',
-  },
-
-  // ── 3D Category Bar (1:1 复刻图一) ──
-  categoryBar: {
-    flexDirection: 'row',
-    paddingHorizontal: 10,
-    paddingTop: 4,
-    paddingBottom: 6,
-  },
-  categoryCol: {
-    flex: 1,
-    position: 'relative',
-  },
-  categoryItem: {
+    borderRadius: 8,
+    minWidth: 16,
+    height: 16,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 6,
+    paddingHorizontal: 4,
   },
-  categoryImage: {
-    width: 78,
-    height: 60,
-    marginBottom: 6,
+  picksBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+  },
+  tabContainer: {
+    paddingHorizontal: spacing[3],
+    marginTop: 4,
+  },
+  tabScrollContent: {
+    flexDirection: 'row',
+    gap: 8,
   },
   categoryPill: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 5,
-    paddingHorizontal: 12,
-    borderRadius: 16,
+    backgroundColor: 'rgba(255, 255, 255, 0.22)',
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: radius.pill,
   },
-  categoryPillSelected: {
-    backgroundColor: '#B7D8C6',
+  categoryPillActive: {
+    ...shadows.soft,
   },
-  categoryPillUnselected: {
-    backgroundColor: 'transparent',
+  categoryPillText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: 'rgba(255, 255, 255, 0.92)',
   },
-  categoryLabel: {
-    fontSize: 15,
+  categoryPillTextActive: {
     fontWeight: '700',
-    marginRight: 4,
   },
-  categoryLabelSelected: {
-    color: '#1C4B34',
+  mainScroll: {
+    flex: 1,
   },
-  categoryLabelUnselected: {
-    color: '#2D312E',
+  weeklySection: {
+    paddingHorizontal: spacing[4],
+    paddingTop: spacing[4],
+    paddingBottom: spacing[2],
+  },
+  weeklySectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  weeklyTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  weeklyTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  weekDateBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  weekDateText: {
+    fontSize: 11,
     fontWeight: '600',
   },
-  categoryCountBadge: {
-    width: 18,
-    height: 18,
-    borderRadius: 9,
+  weeklyDetailLink: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  weeklyCardsScroll: {
+    flexDirection: 'row',
+    gap: 12,
+    paddingBottom: 4,
+  },
+  weeklyCard: {
+    width: 140,
+    borderRadius: 16,
+    overflow: 'hidden',
+    borderWidth: 1,
+    ...shadows.soft,
+  },
+  weeklyCardImage: {
+    width: 140,
+    height: 105, // 4:3 比例
+  },
+  weeklyCardInfo: {
+    padding: 8,
     alignItems: 'center',
-    justifyContent: 'center',
   },
-  categoryBadgeSelected: {
-    backgroundColor: '#8DBEA3',
-  },
-  categoryBadgeUnselected: {
-    backgroundColor: '#DEE7E2',
-  },
-  categoryCountText: {
-    fontSize: 11,
+  weeklyCardTitle: {
+    fontSize: 12,
     fontWeight: '700',
   },
-  categoryBadgeTextSelected: {
-    color: '#1C4B34',
-  },
-  categoryBadgeTextUnselected: {
-    color: '#558770',
-  },
-  categoryDivider: {
-    position: 'absolute',
-    right: 0,
-    top: 36,
-    height: 36,
-    width: 1,
-    backgroundColor: '#E5E1D5',
-  },
-
-  // ── List & Empty State (1:1 复刻图一) ──
-  centerLoading: {
-    flex: 1,
+  weeklyEmptyCard: {
+    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
+    borderRadius: 14,
+    padding: 14,
+    gap: 10,
+    borderWidth: 1,
   },
-  loadingText: {
-    ...typography.caption,
-    marginTop: spacing.sm,
-    color: '#7C837D',
+  weeklyEmptyText: {
+    fontSize: 12,
+    flex: 1,
   },
-  listContent: {
-    paddingHorizontal: 14,
-    paddingTop: 8,
+  gridSection: {
+    paddingHorizontal: spacing[4],
+    paddingTop: spacing[3],
   },
-  columnWrapper: {
-    justifyContent: 'space-between',
+  gridSectionHeader: {
     marginBottom: 12,
   },
-  emptyContainer: {
+  gridSectionTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  dishGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+  },
+  centerLoading: {
+    paddingVertical: 60,
     alignItems: 'center',
-    justifyContent: 'center',
-    paddingTop: 30,
-    paddingHorizontal: 20,
   },
-  emptyImage: {
-    width: 320,
-    height: 250,
-    borderRadius: 18,
-  },
-  emptyTitle: {
-    fontSize: 19,
-    fontWeight: '700',
-    color: '#2B302C',
-    marginTop: 18,
-    textAlign: 'center',
-  },
-  emptySubtitle: {
-    fontSize: 14,
-    color: '#7C837D',
-    textAlign: 'center',
-    lineHeight: 22,
+  loadingText: {
+    fontSize: 13,
     marginTop: 8,
   },
-
-  // ── FAB (1:1 复刻图一) ──
-  fab: {
+  emptyGrid: {
+    alignItems: 'center',
+    paddingVertical: 50,
+  },
+  emptyGridTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    marginTop: 10,
+  },
+  emptyGridDesc: {
+    fontSize: 12,
+    marginTop: 4,
+  },
+  fabBtn: {
     position: 'absolute',
     right: 20,
     width: 58,
     height: 58,
     borderRadius: 29,
-    backgroundColor: '#5BA888',
     alignItems: 'center',
     justifyContent: 'center',
-    shadowColor: '#5BA888',
-    shadowOffset: { width: 0, height: 5 },
-    shadowOpacity: 0.38,
+    elevation: 8,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.35,
     shadowRadius: 8,
-    elevation: 6,
+  },
+  emptyAddBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 20,
+    marginTop: 16,
+    elevation: 2,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.15,
+    shadowRadius: 4,
+  },
+  emptyAddBtnText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '700',
   },
 });

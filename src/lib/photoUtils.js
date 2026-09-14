@@ -27,11 +27,10 @@ export async function pickAndUploadImage(options = {}) {
     throw new Error('需要相册权限才能上传图片');
   }
 
-  // Launch image picker — no base64, no editing crop for speed
+  // Launch image picker — 移除固定 aspect 比例，支持用户自由裁剪
   const result = await ImagePicker.launchImageLibraryAsync({
     mediaTypes: ['images'],
     allowsEditing: true,
-    aspect: [4, 3],
     quality: 1,
     allowsMultipleSelection: false,
   });

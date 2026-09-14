@@ -44,13 +44,13 @@ export default function ThemeSelectorScreen({ onBack }) {
         ]}
         showsVerticalScrollIndicator={false}
       >
-        <View style={styles.introCard}>
-          <View style={[styles.introIconWrap, { backgroundColor: colors.primary[100] }]}>
-            <Ionicons name="color-palette-outline" size={24} color={colors.primaryAction} />
+        <View style={[styles.introCard, { backgroundColor: colors.card || colors.surface }]}>
+          <View style={[styles.introIconWrap, { backgroundColor: colors.primarySoft || colors.background }]}>
+            <Ionicons name="color-palette-outline" size={24} color={colors.primary || colors.primaryAction} />
           </View>
           <View style={styles.introTextWrap}>
-            <Text style={[styles.introTitle, { color: colors.textPrimary }]}>双人专属氛围感</Text>
-            <Text style={[styles.introDesc, { color: colors.textSecondary }]}>
+            <Text style={[styles.introTitle, { color: colors.text || colors.textPrimary }]}>双人专属氛围感</Text>
+            <Text style={[styles.introDesc, { color: colors.textSecondary || colors.textMuted }]}>
               换肤后全 App 界面即刻统一更新，重启应用自动保持
             </Text>
           </View>
@@ -60,6 +60,7 @@ export default function ThemeSelectorScreen({ onBack }) {
           {THEME_LIST.map((item) => {
             const isSelected = item.id === themeId;
             const tColors = item.colors;
+            const bubbleMeTextColor = item.id === 'sakura' ? tColors.text : '#FFFFFF';
 
             return (
               <TouchableOpacity
@@ -67,8 +68,8 @@ export default function ThemeSelectorScreen({ onBack }) {
                 style={[
                   styles.themeCard,
                   {
-                    backgroundColor: colors.surface,
-                    borderColor: isSelected ? colors.primaryAction : colors.border,
+                    backgroundColor: colors.card || colors.surface,
+                    borderColor: isSelected ? (colors.primary || colors.primaryAction) : colors.border,
                     borderWidth: isSelected ? 2 : 1,
                   },
                 ]}
@@ -78,10 +79,10 @@ export default function ThemeSelectorScreen({ onBack }) {
                 {/* 顶部标题与选中态 */}
                 <View style={styles.cardHeader}>
                   <View style={styles.titleArea}>
-                    <Text style={[styles.themeTitle, { color: colors.textPrimary }]}>
-                      {item.name}
+                    <Text style={[styles.themeTitle, { color: colors.text || colors.textPrimary }]}>
+                      {item.emoji} {item.name}
                     </Text>
-                    <Text style={[styles.themeSubtitle, { color: colors.textSecondary }]}>
+                    <Text style={[styles.themeSubtitle, { color: colors.textSecondary || colors.textMuted }]}>
                       {item.subtitle}
                     </Text>
                   </View>
@@ -90,7 +91,7 @@ export default function ThemeSelectorScreen({ onBack }) {
                       <Ionicons name="checkmark-circle" size={14} color="#FFFFFF" /> 使用中
                     </Badge>
                   ) : (
-                    <View style={[styles.unselectedRadio, { borderColor: colors.borderStrong }]} />
+                    <View style={[styles.unselectedRadio, { borderColor: colors.border }]} />
                   )}
                 </View>
 
@@ -102,8 +103,8 @@ export default function ThemeSelectorScreen({ onBack }) {
                   ]}
                 >
                   {/* 模拟顶栏 */}
-                  <View style={[styles.mockupHeader, { backgroundColor: tColors.backgroundLavender }]}>
-                    <View style={[styles.mockupDot, { backgroundColor: tColors.primaryAction }]} />
+                  <View style={[styles.mockupHeader, { backgroundColor: tColors.card, borderColor: tColors.border, borderWidth: StyleSheet.hairlineWidth }]}>
+                    <View style={[styles.mockupDot, { backgroundColor: tColors.primary }]} />
                     <View style={[styles.mockupBar, { backgroundColor: tColors.border }]} />
                   </View>
 
@@ -112,30 +113,30 @@ export default function ThemeSelectorScreen({ onBack }) {
                     <View
                       style={[
                         styles.mockupBubbleMe,
-                        { backgroundColor: tColors.primaryAction },
+                        { backgroundColor: tColors.primary },
                       ]}
                     >
-                      <Text style={styles.mockupBubbleTextMe}>今天吃什么？</Text>
+                      <Text style={[styles.mockupBubbleTextMe, { color: bubbleMeTextColor }]}>今天吃什么？</Text>
                     </View>
                     <View
                       style={[
                         styles.mockupBubblePartner,
-                        { backgroundColor: tColors.partnerSoft, borderColor: tColors.partner },
+                        { backgroundColor: tColors.card, borderColor: tColors.border },
                       ]}
                     >
-                      <Text style={[styles.mockupBubbleTextPartner, { color: tColors.partner }]}>
-                        去 momi 厨房看看吧~
+                      <Text style={[styles.mockupBubbleTextPartner, { color: tColors.text }]}>
+                        去 momi 厨房看看吧~ 🐾
                       </Text>
                     </View>
                   </View>
 
                   {/* 色板色块条 */}
                   <View style={styles.paletteRow}>
-                    <View style={[styles.swatch, { backgroundColor: tColors.primaryAction }]} />
-                    <View style={[styles.swatch, { backgroundColor: tColors.primary[300] }]} />
-                    <View style={[styles.swatch, { backgroundColor: tColors.partner }]} />
-                    <View style={[styles.swatch, { backgroundColor: tColors.partnerSoft }]} />
-                    <View style={[styles.swatch, { backgroundColor: tColors.surfaceSoft }]} />
+                    <View style={[styles.swatch, { backgroundColor: tColors.primary, borderColor: tColors.border }]} />
+                    <View style={[styles.swatch, { backgroundColor: tColors.accent, borderColor: tColors.border }]} />
+                    <View style={[styles.swatch, { backgroundColor: tColors.card, borderColor: tColors.border }]} />
+                    <View style={[styles.swatch, { backgroundColor: tColors.background, borderColor: tColors.border }]} />
+                    <View style={[styles.swatch, { backgroundColor: tColors.border, borderColor: tColors.border }]} />
                   </View>
                 </View>
               </TouchableOpacity>
@@ -252,7 +253,8 @@ const styles = StyleSheet.create({
   },
   swatch: {
     flex: 1,
-    height: 14,
+    height: 16,
     borderRadius: 3,
+    borderWidth: StyleSheet.hairlineWidth,
   },
 });

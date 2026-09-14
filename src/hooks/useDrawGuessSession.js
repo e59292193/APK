@@ -350,8 +350,9 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
         round: current.round,
         r: current.round,
         s: sync.encodeStrokes(strokesRef.current, size, size),
-      },
-      { dbOnly: true }
+        count: strokesRef.current.length,
+        t: Date.now(),
+      }
     );
   }
 
@@ -369,16 +370,26 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
     const assembler = assemblerRef.current;
     switch (signal.type) {
       case 'stroke_begin':
-        assembler.begin(signal.si, { c: signal.c, w: signal.w, e: signal.e, p: signal.p });
+      case 'stroke_start':
+        assembler.begin(signal.si, { c: signal.c, w: signal.w, e: signal.e, p: signal.p, t: signal.t }, signal.t);
         break;
       case 'stroke_pts':
+      case 'stroke_move':
         assembler.points(signal.si, signal.p, signal.q);
         break;
       case 'stroke_end':
         assembler.end(signal.si, signal.q);
         break;
       case 'undo':
-        setStrokeList(strokesRef.current.slice(0, -1));
+        if (signal.s) {
+          const decoded = sync.decodeStrokes(signal.s, size, size);
+          setStrokeList(decoded);
+        } else {
+          setStrokeList(strokesRef.current.slice(0, -1));
+        }
+        assembler.reset();
+        remoteLiveRef.current = null;
+        if (mountedRef.current) setRemoteStroke(null);
         break;
       case 'clear':
         resetBoard();
@@ -400,7 +411,12 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
         if (isDrawerOf(current, userId)) break;
         if (signal.round && Number(signal.round) !== Number(current.round)) break;
         const decoded = sync.decodeStrokes(signal.s, size, size);
-        if (decoded.length >= strokesRef.current.length) setStrokeList(decoded);
+        if (decoded.length !== strokesRef.current.length) {
+          setStrokeList(decoded);
+          assembler.reset();
+          remoteLiveRef.current = null;
+          if (mountedRef.current) setRemoteStroke(null);
+        }
         break;
       }
       case 'save':
@@ -420,15 +436,22 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
 
   function beginStroke(nativeEvent) {
     if (!canDrawRef.current) return;
+    if (liveRef.current) {
+      endStroke();
+    }
     const selected = toolRef.current;
     const x = clamp(nativeEvent.locationX, 0, size);
     const y = clamp(nativeEvent.locationY, 0, size);
     const strokeId = sync.makeStrokeId(userId);
+    const now = Date.now();
     const stroke = {
+      strokeId,
+      si: strokeId,
       points: [{ x, y }],
       color: selected.color,
       width: selected.isEraser ? ERASER_WIDTH : selected.width,
       isEraser: selected.isEraser,
+      t: now,
     };
     strokeIdRef.current = strokeId;
     lastPointRef.current = { x, y };
@@ -443,6 +466,7 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
         w: stroke.width,
         e: stroke.isEraser ? 1 : 0,
         p: sync.encodePoints(stroke.points, size, size),
+        t: now,
       },
       { batch: true }
     );
@@ -473,11 +497,12 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
     const flat = buffer.flat;
     buffer.flat = [];
     const chunks = sync.chunkFlatPoints(flat, 120);
+    const now = Date.now();
     for (let index = 0; index < chunks.length; index += 1) {
       buffer.q += 1;
       sendSignal(
         'stroke_pts',
-        { si: buffer.si, q: buffer.q, p: chunks[index] },
+        { si: buffer.si, q: buffer.q, p: chunks[index], t: now },
         { batch: true }
       );
     }
@@ -492,28 +517,53 @@ export function useDrawGuessSession({ gameId, userId, partnerId, size }) {
     strokeIdRef.current = null;
     lastPointRef.current = null;
     setLiveStroke(null);
+    const current = gameRef.current;
     if (stroke && stroke.points.length > 0) {
-      setStrokeList(strokesRef.current.concat([sync.withPath(stroke)]));
+      const finalized = sync.withPath(stroke);
+      const nextStrokes = strokesRef.current.concat([finalized]);
+      setStrokeList(nextStrokes);
+
+      // 每完成 3 笔向对端同步关键帧快照，纠正弱网丢包
+      if (current && current.status === 'drawing' && nextStrokes.length % 3 === 0) {
+        sendSignal('snapshot', {
+          round: current.round,
+          r: current.round,
+          s: sync.encodeStrokes(nextStrokes, size, size),
+          count: nextStrokes.length,
+          t: Date.now(),
+        });
+      }
     }
     if (strokeId) {
-      sendSignal('stroke_end', { si: strokeId, q: lastSequence }, { batch: true });
+      sendSignal('stroke_end', { si: strokeId, q: lastSequence, t: Date.now() }, { batch: true });
     }
     ptsRef.current = { si: null, flat: [], q: 0 };
     flushOutbox();
   }
 
   function undo() {
-    if (!gameRef.current || !canDrawRef.current || strokesRef.current.length === 0) return;
+    const current = gameRef.current;
+    if (!current || !canDrawRef.current || strokesRef.current.length === 0) return;
     flushOutbox();
-    setStrokeList(strokesRef.current.slice(0, -1));
-    sendSignal('undo', {});
+    const nextStrokes = strokesRef.current.slice(0, -1);
+    setStrokeList(nextStrokes);
+    sendSignal('undo', {
+      s: sync.encodeStrokes(nextStrokes, size, size),
+      count: nextStrokes.length,
+      r: current.round,
+      t: Date.now(),
+    });
   }
 
   function clearBoard() {
-    if (!gameRef.current || !canDrawRef.current) return;
+    const current = gameRef.current;
+    if (!current || !canDrawRef.current) return;
     discardPendingSignals();
     resetBoard();
-    sendSignal('clear', {});
+    sendSignal('clear', {
+      r: current.round,
+      t: Date.now(),
+    });
   }
 
   function enterGame(id, row) {

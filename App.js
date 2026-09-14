@@ -6,6 +6,7 @@ import {
   Alert,
   InteractionManager,
   KeyboardAvoidingView,
+  Platform,
   ScrollView,
   StatusBar,
   StyleSheet,
@@ -40,11 +41,16 @@ const DrawGuessGameScreen = lazyScreen(() => require('./src/screens/DrawGuessGam
 const EphemeralNoteScreen = lazyScreen(() => require('./src/screens/EphemeralNoteScreen'));
 const VoiceMailboxScreen = lazyScreen(() => require('./src/screens/VoiceMailboxScreen'));
 const MomiKitchenScreen = lazyScreen(() => require('./src/screens/MomiKitchenScreen'));
+const MomiAssistantScreen = lazyScreen(() => require('./src/screens/MomiAssistantScreen'));
+const MomiAISettingsScreen = lazyScreen(() => require('./src/screens/MomiAISettingsScreen'));
+const SettingsScreen = lazyScreen(() => require('./src/screens/SettingsScreen'));
 const ThemeSelectorScreen = lazyScreen(() => require('./src/screens/ThemeSelectorScreen'));
 
 function LoginScreen({ onLogin }) {
   const insets = useSafeAreaInsets();
   const { theme, colors } = useTheme();
+  const keyboardHeight = useKeyboardHeight();
+  const isKeyboardVisible = keyboardHeight > 0;
   const [nickname, setNickname] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
@@ -67,26 +73,37 @@ function LoginScreen({ onLogin }) {
   return (
     <View style={[loginStyles.container, { backgroundColor: colors.backgroundLavender }]}>
       <StatusBar barStyle={theme.statusBar || 'dark-content'} backgroundColor={colors.backgroundLavender} />
-      {/* edge-to-edge 下 Android adjustResize 失效，必须显式 padding 才能避开键盘 */}
-      <KeyboardAvoidingView style={styles.flex} behavior="padding">
+      <KeyboardAvoidingView
+        style={styles.flex}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
+      >
         <ScrollView
           style={styles.flex}
           contentContainerStyle={[
             loginStyles.scroll,
-            { paddingTop: insets.top, paddingBottom: insets.bottom + spacing[6] },
+            {
+              paddingTop: insets.top + (isKeyboardVisible ? spacing[2] : spacing[6]),
+              paddingBottom: insets.bottom + spacing[8],
+              justifyContent: isKeyboardVisible ? 'flex-start' : 'center',
+            },
           ]}
           keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="on-drag"
+          showsVerticalScrollIndicator={false}
           bounces={false}
         >
           <View style={loginStyles.decor1} />
           <View style={loginStyles.decor2} />
           <View style={loginStyles.decor3} />
 
-          <View style={loginStyles.brandSection}>
-            <View style={loginStyles.logoWrap}>
-              <Ionicons name="heart" size={36} color={colors.primaryAction} />
-            </View>
-            <Text style={loginStyles.brandTitle}>MOMO Corn</Text>
+          <View style={[loginStyles.brandSection, isKeyboardVisible && { marginBottom: spacing[3] }]}>
+            {!isKeyboardVisible && (
+              <View style={loginStyles.logoWrap}>
+                <Ionicons name="heart" size={36} color={colors.primaryAction} />
+              </View>
+            )}
+            <Text style={[loginStyles.brandTitle, isKeyboardVisible && { fontSize: 24, lineHeight: 28 }]}>MOMO Corn</Text>
             <Text style={loginStyles.brandSubtitle}>momo和苞米的小世界</Text>
           </View>
 
@@ -154,8 +171,14 @@ const BottomTabBar = memo(function BottomTabBar({ currentTab, onTabChange, unrea
   const keyboardHeight = useKeyboardHeight();
   if (keyboardHeight > 0) return null;
 
+  const primary = colors.primary || colors.primaryAction || '#FF6B35';
+  const cardBg = colors.card || colors.surface || '#FFFFFF';
+  const border = colors.border || '#E5E5E5';
+  const textMuted = colors.textSecondary || colors.textMuted || '#888888';
+  const activeBg = colors.primarySoft || (primary + '20');
+
   return (
-    <View style={[tabStyles.container, { paddingBottom: insets.bottom + 4 }]}>
+    <View style={[tabStyles.container, { backgroundColor: cardBg, borderTopColor: border, paddingBottom: insets.bottom + 4 }]}>
       {TAB_CONFIG.map((tab) => {
         const active = currentTab === tab.key;
         const count = Math.min(99, Number(unreadCount) || 0);
@@ -169,19 +192,19 @@ const BottomTabBar = memo(function BottomTabBar({ currentTab, onTabChange, unrea
             accessibilityState={{ selected: active }}
             accessibilityLabel={tab.label}
           >
-            <View style={[tabStyles.iconWrap, active && tabStyles.iconWrapActive]}>
+            <View style={[tabStyles.iconWrap, active && { backgroundColor: activeBg }]}>
               <Ionicons
                 name={active ? tab.activeIcon : tab.icon}
                 size={22}
-                color={active ? colors.primaryAction : colors.textMuted}
+                color={active ? primary : textMuted}
               />
               {tab.key === 'Chat' && count > 0 && !active ? (
-                <View style={tabStyles.badge}>
+                <View style={[tabStyles.badge, { backgroundColor: colors.error || '#FF4D4F' }]}>
                   <Text style={tabStyles.badgeText}>{unreadCount > 99 ? '99+' : count}</Text>
                 </View>
               ) : null}
             </View>
-            <Text style={[tabStyles.label, active && tabStyles.labelActive]}>{tab.label}</Text>
+            <Text style={[tabStyles.label, { color: textMuted }, active && { color: primary, fontWeight: '700' }]}>{tab.label}</Text>
           </TouchableOpacity>
         );
       })}
@@ -357,8 +380,8 @@ function MainApp() {
     : 'none';
 
   return (
-    <View style={appStyles.container}>
-      <StatusBar barStyle={theme.statusBar || 'dark-content'} backgroundColor={colors.background} />
+    <View style={[appStyles.container, { backgroundColor: colors.background }]}>
+      <StatusBar barStyle={theme?.statusBarStyle || theme?.statusBar || 'dark-content'} backgroundColor={colors.background} />
 
       <View style={appStyles.screenContainer}>
         <TabPage name="Capsule" current={currentTab} mounted={mountedTabs.has('Capsule')}>
@@ -367,6 +390,7 @@ function MainApp() {
             onLogout={handleLogout}
             onNavigateMomiKitchen={() => openFullscreen('MomiKitchen')}
             onNavigateThemeSelector={() => openFullscreen('ThemeSelector')}
+            onNavigateSettings={() => openFullscreen('Settings')}
           />
         </TabPage>
         <TabPage name="Wishlist" current={currentTab} mounted={mountedTabs.has('Wishlist')}>
@@ -389,6 +413,7 @@ function MainApp() {
             onNavigateVoiceMailbox={() => openFullscreen('VoiceMailbox')}
             onNavigateMomiKitchen={() => openFullscreen('MomiKitchen')}
             onNavigateThemeSelector={() => openFullscreen('ThemeSelector')}
+            onNavigateSettings={() => openFullscreen('Settings')}
             onUnreadChange={setUnreadCount}
             refreshTrigger={chatRefreshTrigger}
           />
@@ -408,7 +433,7 @@ function MainApp() {
       {full ? (
         <View
           key={fullKey}
-          style={appStyles.fullscreenOverlay}
+          style={[appStyles.fullscreenOverlay, { backgroundColor: colors.background }]}
           pointerEvents="auto"
           collapsable={false}
         >
@@ -453,7 +478,38 @@ function MainApp() {
               <VoiceMailboxScreen userId={userId} onBack={closeFullscreen} />
             ) : null}
             {full.screen === 'MomiKitchen' ? (
-              <MomiKitchenScreen userId={userId} onBack={closeFullscreen} />
+              <MomiKitchenScreen
+                userId={userId}
+                onBack={closeFullscreen}
+                onNavigateMomiAssistant={() => openFullscreen('MomiAssistant')}
+              />
+            ) : null}
+            {full.screen === 'MomiAssistant' ? (
+              <MomiAssistantScreen
+                userId={userId}
+                onBack={closeFullscreen}
+                onOpenAISettings={() => openFullscreen('MomiAISettings', { from: 'MomiAssistant' })}
+              />
+            ) : null}
+            {full.screen === 'MomiAISettings' ? (
+              <MomiAISettingsScreen
+                onBack={() => {
+                  if (params?.from === 'MomiAssistant') {
+                    openFullscreen('MomiAssistant');
+                  } else {
+                    openFullscreen('Settings');
+                  }
+                }}
+              />
+            ) : null}
+            {full.screen === 'Settings' ? (
+              <SettingsScreen
+                userId={userId}
+                onBack={closeFullscreen}
+                onLogout={handleLogout}
+                onNavigateThemeSelector={() => openFullscreen('ThemeSelector')}
+                onNavigateAISettings={() => openFullscreen('MomiAISettings', { from: 'Settings' })}
+              />
             ) : null}
             {full.screen === 'ThemeSelector' ? (
               <ThemeSelectorScreen onBack={closeFullscreen} />

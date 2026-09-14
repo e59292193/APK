@@ -57,7 +57,7 @@ export function WeeklyPicksModal({
   // 分类归集
   const groupedPicks = {
     meat: picks.filter((p) => (p.dish?.category || 'meat') === 'meat'),
-    veg: picks.filter((p) => p.dish?.category === 'veg'),
+    veg: picks.filter((p) => p.dish?.category === 'veg' || p.dish?.category === 'vegetable'),
     snack: picks.filter((p) => p.dish?.category === 'snack'),
   };
 
@@ -83,21 +83,21 @@ export function WeeklyPicksModal({
           <View style={styles.headerTitleWrap}>
             <View style={styles.titleRow}>
               <Text style={styles.titleEmoji}>📋</Text>
-              <Text style={[styles.title, { color: colors.textPrimary }]}>本周想吃菜单</Text>
-              <View style={[styles.countBadge, { backgroundColor: colors.primary ? colors.primary[50] : colors.meSoft }]}>
-                <Text style={[styles.countBadgeText, { color: colors.primaryAction }]}>
+              <Text style={[styles.title, { color: colors.textPrimary || colors.text }]}>本周想吃菜单</Text>
+              <View style={[styles.countBadge, { backgroundColor: colors.primary ? (colors.primary + '20') : '#FFF0EB' }]}>
+                <Text style={[styles.countBadgeText, { color: colors.primary || '#FF6B35' }]}>
                   共 {picks.length} 道
                 </Text>
               </View>
             </View>
-            <Text style={[styles.weekRange, { color: colors.textMuted }]}>
+            <Text style={[styles.weekRange, { color: colors.textMuted || colors.textSecondary }]}>
               {formatWeekRangeDisplay(weekStart)}
             </Text>
           </View>
           <IconButton
             name="close"
             size={22}
-            color={colors.textSecondary}
+            color={colors.textSecondary || colors.text}
             onPress={onClose}
             accessibilityLabel="关闭本周菜单"
           />
@@ -187,33 +187,33 @@ export function WeeklyPicksModal({
                             </Text>
 
                             <View style={styles.itemMeta}>
-                              <View
-                                style={[
-                                  styles.pickerBadge,
-                                  {
-                                    backgroundColor: isPickedByBaomi
-                                      ? (colors.partnerSoft || colors.mint[50])
-                                      : (colors.meSoft || colors.primary[50]),
-                                  },
-                                ]}
-                              >
-                                <Text
+                                <View
                                   style={[
-                                    styles.pickerBadgeText,
+                                    styles.pickerBadge,
                                     {
-                                      color: isPickedByBaomi
-                                        ? (colors.partner || colors.mint[600])
-                                        : colors.primaryAction,
+                                      backgroundColor: isPickedByBaomi
+                                        ? (colors.accent ? colors.accent + '20' : '#E8F5E9')
+                                        : (colors.primary ? colors.primary + '20' : '#FFF0EB'),
                                     },
                                   ]}
                                 >
-                                  {item.picked_by === 'momo'
-                                    ? 'momo 想吃'
-                                    : item.picked_by === 'baomi'
-                                    ? '苞米 想吃'
-                                    : '想吃'}
-                                </Text>
-                              </View>
+                                  <Text
+                                    style={[
+                                      styles.pickerBadgeText,
+                                      {
+                                        color: isPickedByBaomi
+                                          ? (colors.accent || '#4CAF50')
+                                          : (colors.primary || '#FF6B35'),
+                                      },
+                                    ]}
+                                  >
+                                    {item.picked_by === 'momo'
+                                      ? 'momo 想吃'
+                                      : item.picked_by === 'baomi'
+                                      ? '苞米 想吃'
+                                      : '想吃'}
+                                  </Text>
+                                </View>
                               {dish.recipe_text ? (
                                 <Text style={[styles.hasRecipeText, { color: colors.textMuted }]}>
                                   配方已备好

@@ -1,22 +1,28 @@
-import { THEMES, THEME_IDS, DEFAULT_THEME } from '../../theme/themes';
+import { themes, THEMES, THEME_IDS, DEFAULT_THEME } from '../../theme/themes';
 import { colors } from '../../theme/colors';
 import { setActiveThemeSync, getActiveTheme } from '../../theme/ThemeContext';
 
 describe('Theme System', () => {
-  test('all 4 required themes exist with complete metadata', () => {
-    const themeIds = Object.keys(THEMES);
-    expect(themeIds).toContain('lavender');
-    expect(themeIds).toContain('mint');
-    expect(themeIds).toContain('peach');
-    expect(themeIds).toContain('sky');
+  test('all required themes exist with complete metadata', () => {
+    const requiredThemeIds = ['default', 'lavender', 'sakura', 'midnight', 'matcha', 'galaxy', 'minimal'];
+    const themeIds = Object.keys(themes);
 
-    themeIds.forEach((id) => {
-      const t = THEMES[id];
+    requiredThemeIds.forEach((id) => {
+      expect(themeIds).toContain(id);
+      const t = themes[id];
       expect(t.id).toBe(id);
       expect(t.name).toBeTruthy();
-      expect(t.previewPrimary).toBeTruthy();
-      expect(t.previewSecondary).toBeTruthy();
+      expect(t.emoji).toBeTruthy();
       expect(t.colors).toBeDefined();
+
+      // Check required 7 core tokens
+      expect(t.colors.primary).toBeTruthy();
+      expect(t.colors.background).toBeTruthy();
+      expect(t.colors.card).toBeTruthy();
+      expect(t.colors.text).toBeTruthy();
+      expect(t.colors.textSecondary).toBeTruthy();
+      expect(t.colors.accent).toBeTruthy();
+      expect(t.colors.border).toBeTruthy();
     });
   });
 
@@ -27,42 +33,46 @@ describe('Theme System', () => {
   });
 
   test('all themes have parity across core color token keys', () => {
-    const defaultColorKeys = Object.keys(DEFAULT_THEME.colors);
+    const coreKeys = ['primary', 'background', 'card', 'text', 'textSecondary', 'accent', 'border'];
 
-    Object.keys(THEMES).forEach((id) => {
-      const themeColors = THEMES[id].colors;
-      expect(themeColors.primaryAction).toBeDefined();
-      expect(themeColors.background).toBeDefined();
-      expect(themeColors.surface).toBeDefined();
-      expect(themeColors.textPrimary).toBeDefined();
-      expect(themeColors.textSecondary).toBeDefined();
-
-      // Ensure key scales exist
-      expect(themeColors.primary).toBeDefined();
-      expect(themeColors.primary[500]).toBeDefined();
-
-      // Ensure zero missing keys from default theme
-      defaultColorKeys.forEach((key) => {
+    Object.keys(themes).forEach((id) => {
+      const themeColors = themes[id].colors;
+      coreKeys.forEach((key) => {
         expect(themeColors[key]).toBeDefined();
       });
     });
   });
 
   test('colors proxy dynamically updates when active theme colors change', () => {
-    // Switch to mint
-    setActiveThemeSync(THEME_IDS.MINT);
-    expect(colors.primaryAction).toBe(THEMES.mint.colors.primaryAction);
-
-    // Switch to peach
-    setActiveThemeSync(THEME_IDS.PEACH);
-    expect(colors.primaryAction).toBe(THEMES.peach.colors.primaryAction);
-
-    // Switch to sky
-    setActiveThemeSync(THEME_IDS.SKY);
-    expect(colors.primaryAction).toBe(THEMES.sky.colors.primaryAction);
-
-    // Switch back to lavender
+    // Switch to lavender
     setActiveThemeSync(THEME_IDS.LAVENDER);
-    expect(colors.primaryAction).toBe(THEMES.lavender.colors.primaryAction);
+    expect(colors.primary).toBe(themes.lavender.colors.primary);
+    expect(colors.background).toBe(themes.lavender.colors.background);
+
+    // Switch to sakura
+    setActiveThemeSync(THEME_IDS.SAKURA);
+    expect(colors.primary).toBe(themes.sakura.colors.primary);
+    expect(colors.background).toBe(themes.sakura.colors.background);
+
+    // Switch to midnight
+    setActiveThemeSync(THEME_IDS.MIDNIGHT);
+    expect(colors.primary).toBe(themes.midnight.colors.primary);
+    expect(colors.background).toBe(themes.midnight.colors.background);
+
+    // Switch to matcha
+    setActiveThemeSync(THEME_IDS.MATCHA);
+    expect(colors.primary).toBe(themes.matcha.colors.primary);
+
+    // Switch to galaxy
+    setActiveThemeSync(THEME_IDS.GALAXY);
+    expect(colors.primary).toBe(themes.galaxy.colors.primary);
+
+    // Switch to minimal
+    setActiveThemeSync(THEME_IDS.MINIMAL);
+    expect(colors.primary).toBe(themes.minimal.colors.primary);
+
+    // Switch back to default
+    setActiveThemeSync(THEME_IDS.DEFAULT);
+    expect(colors.primary).toBe(themes.default.colors.primary);
   });
 });

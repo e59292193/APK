@@ -1,3 +1,8 @@
+// ═══════════════════════════════════════════════════════
+// DishCard —— 菜品网格卡片 (功能9 UI 全面优化 & 主题跟随)
+// 3:2 图片比例、白底阴影、深棕加粗菜名、主题胶囊标签、创建者微头像
+// ═══════════════════════════════════════════════════════
+
 import React, { useRef } from 'react';
 import {
   StyleSheet,
@@ -10,11 +15,11 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { typography, spacing, radius, shadows, useTheme } from '../../theme';
 import { CachedImage } from '../../lib/imageCache';
+import { CATEGORY_LABELS } from '../../lib/kitchenUtils';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
-// 两列网格卡片宽度（页面两边留 padding，中间留 gap）
-const CARD_WIDTH = Math.floor((SCREEN_WIDTH - spacing[4] * 2 - spacing[3]) / 2);
-const IMAGE_HEIGHT = Math.floor(CARD_WIDTH * 1.05);
+const CARD_WIDTH = Math.floor((SCREEN_WIDTH - spacing[4] * 2 - 12) / 2);
+const IMAGE_HEIGHT = Math.floor(CARD_WIDTH * (2 / 3)); // 3:2 比例
 
 export function DishCard({
   dish,
@@ -24,14 +29,21 @@ export function DishCard({
   onTogglePick,
 }) {
   const { colors } = useTheme();
+  const primary = colors.primary || '#FF6B35';
+  const cardBg = colors.card || '#FFFFFF';
+  const textMain = colors.text || '#2D1B00';
+  const textMuted = colors.textSecondary || '#8B7355';
+  const border = colors.border || '#F2ECE4';
+  const tagBg = colors.primarySoft || colors.background || '#FFF7F4';
+
   const scaleAnim = useRef(new Animated.Value(1)).current;
 
   const handlePressIn = () => {
     Animated.spring(scaleAnim, {
-      toValue: 0.97,
+      toValue: 0.96,
       useNativeDriver: true,
-      friction: 7,
-      tension: 100,
+      speed: 30,
+      bounciness: 4,
     }).start();
   };
 
@@ -39,29 +51,36 @@ export function DishCard({
     Animated.spring(scaleAnim, {
       toValue: 1,
       useNativeDriver: true,
-      friction: 7,
-      tension: 100,
+      speed: 30,
+      bounciness: 4,
     }).start();
   };
 
+  if (!dish) return null;
+
+  const categoryLabel = CATEGORY_LABELS[dish.category] || '菜品';
+  const creatorInitial = (dish.created_by || 'm').charAt(0).toUpperCase();
+
   return (
-    <Animated.View style={[{ transform: [{ scale: scaleAnim }] }, styles.wrapper]}>
+    <Animated.View
+      style={[
+        styles.cardContainer,
+        {
+          transform: [{ scale: scaleAnim }],
+        },
+      ]}
+    >
       <TouchableOpacity
-        style={[
-          styles.card,
-          {
-            backgroundColor: colors.surface,
-            borderColor: isPicked ? colors.primaryAction : colors.border,
-            borderWidth: isPicked ? 1.5 : StyleSheet.hairlineWidth,
-          },
-        ]}
-        activeOpacity={0.9}
-        onPressIn={handlePressIn}
-        onPressOut={handlePressOut}
+        style={[styles.card, { backgroundColor: cardBg, borderColor: border }]}
+        activeOpacity={0.92}
         onPress={() => onPress && onPress(dish)}
         onLongPress={() => onLongPress && onLongPress(dish)}
+        onPressIn={handlePressIn}
+        onPressOut={handlePressOut}
+        accessibilityRole="button"
+        accessibilityLabel={`${dish.title}, ${categoryLabel}`}
       >
-        {/* 菜品图片区（约占卡片高度 70%） */}
+        {/* 顶部头图 (3:2 比例，裁切圆角) */}
         <View style={styles.imageWrap}>
           {dish.image_path ? (
             <CachedImage
@@ -71,58 +90,58 @@ export function DishCard({
               previewable={false}
             />
           ) : (
-            <View style={[styles.placeholder, { backgroundColor: colors.surfaceSoft }]}>
-              <Ionicons name="restaurant-outline" size={36} color={colors.primary[300]} />
+            <View style={styles.placeholder}>
+              <Ionicons name="restaurant-outline" size={32} color="#D1C4B5" />
             </View>
           )}
 
-          {/* 本周想吃高亮标识 */}
+          {/* 本周想吃高光标签 */}
           {isPicked && (
-            <View style={[styles.pickedTag, { backgroundColor: colors.primaryAction }]}>
+            <View style={[styles.pickedBadge, { backgroundColor: primary }]}>
               <Ionicons name="checkmark-circle" size={12} color="#FFFFFF" />
-              <Text style={styles.pickedTagText}>想吃</Text>
+              <Text style={styles.pickedBadgeText}>想吃</Text>
             </View>
           )}
+
+          {/* 快捷点选本周想吃心形按钮 */}
+          <TouchableOpacity
+            style={[styles.heartBtn, isPicked && { backgroundColor: tagBg }]}
+            activeOpacity={0.8}
+            onPress={(e) => {
+              e.stopPropagation();
+              onTogglePick && onTogglePick(dish);
+            }}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Ionicons
+              name={isPicked ? 'heart' : 'heart-outline'}
+              size={16}
+              color={isPicked ? primary : textMuted}
+            />
+          </TouchableOpacity>
         </View>
 
-        {/* 标题与快捷操作区 */}
-        <View style={styles.content}>
-          <Text
-            style={[styles.title, { color: colors.textPrimary }]}
-            numberOfLines={1}
-            ellipsizeMode="tail"
-          >
+        {/* 信息区 */}
+        <View style={[styles.content, { backgroundColor: cardBg }]}>
+          <Text style={[styles.title, { color: textMain }]} numberOfLines={2}>
             {dish.title}
           </Text>
 
           <View style={styles.footerRow}>
-            {dish.recipe_text || (dish.recipe_images && dish.recipe_images.length > 0) ? (
-              <View style={styles.recipeBadge}>
-                <Ionicons name="book-outline" size={11} color={colors.textSecondary} />
-                <Text style={[styles.recipeBadgeText, { color: colors.textSecondary }]}>有食谱</Text>
-              </View>
-            ) : (
-              <View style={{ flex: 1 }} />
-            )}
+            {/* 分类标签小胶囊 */}
+            <View style={[styles.categoryTag, { borderColor: border, backgroundColor: tagBg }]}>
+              <Text style={[styles.categoryTagText, { color: primary }]}>{categoryLabel}</Text>
+            </View>
 
-            <TouchableOpacity
-              style={[
-                styles.quickPickBtn,
-                {
-                  backgroundColor: isPicked ? colors.primaryAction : colors.primary[50],
-                  borderColor: isPicked ? colors.primaryAction : colors.primary[200],
-                },
-              ]}
-              onPress={() => onTogglePick && onTogglePick(dish)}
-              hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-              activeOpacity={0.7}
-            >
-              <Ionicons
-                name={isPicked ? 'heart' : 'heart-outline'}
-                size={14}
-                color={isPicked ? '#FFFFFF' : colors.primaryAction}
-              />
-            </TouchableOpacity>
+            {/* 创建者微头像与昵称 */}
+            <View style={styles.creatorWrap}>
+              <View style={[styles.creatorAvatar, { backgroundColor: tagBg }]}>
+                <Text style={[styles.creatorAvatarText, { color: primary }]}>{creatorInitial}</Text>
+              </View>
+              <Text style={[styles.creatorName, { color: textMuted }]} numberOfLines={1}>
+                {dish.created_by || '我们'}
+              </Text>
+            </View>
           </View>
         </View>
       </TouchableOpacity>
@@ -131,18 +150,20 @@ export function DishCard({
 }
 
 const styles = StyleSheet.create({
-  wrapper: {
+  cardContainer: {
     width: CARD_WIDTH,
-    marginBottom: spacing[3],
+    marginBottom: 14,
   },
   card: {
-    borderRadius: radius.lg,
+    borderRadius: 16,
     overflow: 'hidden',
-    ...shadows.sm,
+    borderWidth: 1,
+    ...shadows.soft,
   },
   imageWrap: {
     width: '100%',
     height: IMAGE_HEIGHT,
+    backgroundColor: '#F5EFEB',
     position: 'relative',
     overflow: 'hidden',
   },
@@ -151,12 +172,12 @@ const styles = StyleSheet.create({
     height: '100%',
   },
   placeholder: {
-    width: '100%',
-    height: '100%',
-    justifyContent: 'center',
+    flex: 1,
     alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FAF5EE',
   },
-  pickedTag: {
+  pickedBadge: {
     position: 'absolute',
     top: 8,
     left: 8,
@@ -167,40 +188,66 @@ const styles = StyleSheet.create({
     borderRadius: radius.pill,
     gap: 3,
   },
-  pickedTagText: {
+  pickedBadgeText: {
     color: '#FFFFFF',
     fontSize: 10,
     fontWeight: '700',
   },
+  heartBtn: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255, 255, 255, 0.88)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   content: {
-    padding: spacing[2] + 2,
+    padding: 12,
   },
   title: {
-    ...typography.cardTitle,
     fontSize: 14,
+    fontWeight: '700',
     lineHeight: 19,
-    marginBottom: 4,
+    minHeight: 38,
   },
   footerRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 8,
   },
-  recipeBadge: {
+  categoryTag: {
+    borderWidth: 1,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  categoryTagText: {
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  creatorWrap: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 2,
+    gap: 4,
+    maxWidth: '55%',
   },
-  recipeBadgeText: {
-    fontSize: 10,
-  },
-  quickPickBtn: {
-    width: 26,
-    height: 26,
-    borderRadius: 13,
-    borderWidth: 1,
-    justifyContent: 'center',
+  creatorAvatar: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
     alignItems: 'center',
+    justifyContent: 'center',
+  },
+  creatorAvatarText: {
+    fontSize: 9,
+    fontWeight: '700',
+  },
+  creatorName: {
+    fontSize: 11,
   },
 });
 

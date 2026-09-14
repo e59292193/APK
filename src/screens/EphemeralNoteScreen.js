@@ -197,29 +197,32 @@ export default function EphemeralNoteScreen({ userId, onBack }) {
     }
   }, [content, sending, userId, partnerId, paperStyle, reduceMotion, sendAnim, refreshCount]);
 
+  // ─── 统一返回处理：任何状态下都不锁定 ───
+  const handleGoBack = useCallback(() => {
+    if (mode === 'write') {
+      setMode('draw');
+      return;
+    }
+    if (drawState === 'revealing') {
+      try {
+        if (claimedNote) {
+          consumeNote(claimedNote.id, claimedNote.claim_token).catch(() => {});
+        }
+        sceneRef.current?.flyAway?.();
+      } catch (e) {}
+    }
+    onBack && onBack();
+  }, [mode, drawState, claimedNote, onBack]);
+
   // ─── Android 返回键 ───
   useEffect(() => {
     const handler = () => {
-      if (sendAnimRunning) return true; // 动画中拦截
-      if (mode === 'write') {
-        if (content.trim() && !sending) {
-          // 写到一半返回，提示
-          // 简单处理：直接返回抽取页
-        }
-        setMode('draw');
-        return true;
-      }
-      if (drawState === 'revealing' && sceneRef.current) {
-        sceneRef.current.flyAway();
-        return true;
-      }
-      if (drawState === 'loading' || drawState === 'consuming') return true;
-      onBack && onBack();
+      handleGoBack();
       return true;
     };
     const sub = BackHandler.addEventListener('hardwareBackPress', handler);
     return () => sub.remove();
-  }, [mode, drawState, content, sending, sendAnimRunning, onBack]);
+  }, [handleGoBack]);
 
   // 发送动画插值
   const sendX = sendAnim.interpolate({ inputRange: [0, 1], outputRange: [0, SCREEN_W * 0.5] });
@@ -234,13 +237,8 @@ export default function EphemeralNoteScreen({ userId, onBack }) {
         title="小纸条"
         subtitle="阅后即逝的悄悄话"
         showBack
-        onBack={() => {
-          if (sendAnimRunning) return;
-          if (mode === 'write') { setMode('draw'); return; }
-          if (drawState === 'revealing' && sceneRef.current) { sceneRef.current.flyAway(); return; }
-          if (drawState === 'loading' || drawState === 'consuming') return;
-          onBack && onBack();
-        }}
+        style={styles.header}
+        onBack={handleGoBack}
         rightAction={
           <TouchableOpacity
             style={styles.modeToggle}
@@ -536,6 +534,10 @@ const writeStyles = StyleSheet.create({
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.backgroundLavender },
+  header: {
+    zIndex: 100,
+    elevation: 10,
+  },
   body: { flex: 1, position: 'relative' },
   modeToggle: { alignItems: 'center', justifyContent: 'center', paddingHorizontal: spacing[1] },
   modeToggleText: { ...typography.caption, color: colors.primaryAction, fontWeight: '600' },

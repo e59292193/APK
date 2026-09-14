@@ -1,3 +1,8 @@
+// ═══════════════════════════════════════════════════════
+// DishEditModal —— 菜品编辑与录入抽屉 (功能1 & 功能9 UI优化)
+// 底部抽屉式设计、虚线图片上传区、AI 智能识别食谱、全宽主题色主按钮
+// ═══════════════════════════════════════════════════════
+
 import React, { useState, useEffect } from 'react';
 import {
   StyleSheet,
@@ -7,16 +12,21 @@ import {
   ScrollView,
   TouchableOpacity,
   KeyboardAvoidingView,
+  Platform,
   Alert,
+  Dimensions,
   ActivityIndicator,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
-import { typography, spacing, radius, useTheme } from '../../theme';
-import { Button, AppInput, IconButton } from '../ui';
+import { typography, spacing, radius, shadows, useTheme } from '../../theme';
+import { AppInput, CenterToast } from '../ui';
 import { CachedImage } from '../../lib/imageCache';
 import { CATEGORIES, uploadKitchenImage, saveDish, deleteDish } from '../../lib/kitchenUtils';
+import { recognizeRecipeImage } from '../../lib/aiProvider';
+import { pickSingleImageUri } from '../../lib/imagePicker';
+
+const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 
 export function DishEditModal({
   visible,
@@ -28,6 +38,12 @@ export function DishEditModal({
 }) {
   const insets = useSafeAreaInsets();
   const { colors } = useTheme();
+  const primary = colors.primary || '#FF6B35';
+  const cardBg = colors.card || '#FFFFFF';
+  const textMain = colors.text || '#2D1B00';
+  const textSecondary = colors.textSecondary || '#706879';
+  const border = colors.border || '#F0EBE1';
+  const background = colors.background || '#FFF8F5';
 
   const isEdit = !!dish?.id;
   const [title, setTitle] = useState('');
@@ -38,11 +54,21 @@ export function DishEditModal({
   const [submitting, setSubmitting] = useState(false);
   const [uploadingImage, setUploadingImage] = useState(false);
   const [uploadingRecipeImage, setUploadingRecipeImage] = useState(false);
+  const [aiRecognizing, setAiRecognizing] = useState(false);
+
+  // Toast
+  const [toastVisible, setToastVisible] = useState(false);
+  const [toastMessage, setToastMessage] = useState('');
+
+  const showToast = (msg) => {
+    setToastMessage(msg);
+    setToastVisible(true);
+  };
 
   useEffect(() => {
     if (dish) {
       setTitle(dish.title || '');
-      setCategory(dish.category || 'meat');
+      setCategory(dish.category === 'vegetable' ? 'veg' : (dish.category || 'meat'));
       setImagePath(dish.image_path || '');
       setRecipeText(dish.recipe_text || '');
       setRecipeImages(Array.isArray(dish.recipe_images) ? dish.recipe_images : []);
@@ -55,26 +81,16 @@ export function DishEditModal({
     }
   }, [dish, visible]);
 
-  // 从相册选择菜品主图并上传
+  // 从相册选择菜品主图（自由比例裁剪）
   const handlePickMainImage = async () => {
     try {
-      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (status !== 'granted') {
-        Alert.alert('提示', '需要相册权限才能上传菜品图片');
-        return;
-      }
-
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ['images'],
-        allowsEditing: false,
-        quality: 0.9,
-      });
-
-      if (result.canceled || !result.assets?.[0]?.uri) return;
+      const uri = await pickSingleImageUri({ allowsEditing: true, quality: 0.9 });
+      if (!uri) return;
 
       setUploadingImage(true);
-      const uploadedPath = await uploadKitchenImage(result.assets[0].uri);
+      const uploadedPath = await uploadKitchenImage(uri);
       setImagePath(uploadedPath);
+      showToast('菜品封面图已就位 📸');
     } catch (error) {
       console.error('[DishEdit] 图片上传失败:', error);
       Alert.alert('上传失败', error.message || '请检查网络重试');
@@ -83,31 +99,51 @@ export function DishEditModal({
     }
   };
 
-  // 上传食谱手写步骤图
+  // 上传食谱手写或步骤图，并可触发 AI 识图
   const handleAddRecipeImage = async () => {
     try {
-      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (status !== 'granted') {
-        Alert.alert('提示', '需要相册权限才能上传食谱配图');
-        return;
-      }
-
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ['images'],
-        allowsEditing: false,
-        quality: 0.9,
-      });
-
-      if (result.canceled || !result.assets?.[0]?.uri) return;
+      const uri = await pickSingleImageUri({ allowsEditing: false, quality: 0.9 });
+      if (!uri) return;
 
       setUploadingRecipeImage(true);
-      const uploadedPath = await uploadKitchenImage(result.assets[0].uri);
+      const uploadedPath = await uploadKitchenImage(uri);
       setRecipeImages((prev) => [...prev, uploadedPath]);
+
+      // 提示或自动调用 AI 识别食谱
+      triggerRecipeOcr(uri);
     } catch (error) {
       console.error('[DishEdit] 食谱图片上传失败:', error);
       Alert.alert('上传失败', error.message || '请重试');
     } finally {
       setUploadingRecipeImage(false);
+    }
+  };
+
+  // AI OCR 识图提取菜谱步骤
+  const triggerRecipeOcr = async (imageUri) => {
+    const targetUri = imageUri || (recipeImages.length > 0 ? recipeImages[recipeImages.length - 1] : imagePath);
+    if (!targetUri) {
+      Alert.alert('提示', '请先上传菜品或食谱图片');
+      return;
+    }
+
+    setAiRecognizing(true);
+    try {
+      const res = await recognizeRecipeImage(targetUri);
+      if (res.success && res.text) {
+        if (res.text.includes('该图片不包含食谱内容')) {
+          showToast('该图片似乎不是菜谱哦');
+        } else {
+          setRecipeText((prev) => (prev ? `${prev}\n\n${res.text}` : res.text));
+          showToast('✨ AI 已成功提取食谱内容');
+        }
+      } else {
+        Alert.alert('AI 识别提示', res.error || '未识别到有效文字内容');
+      }
+    } catch (err) {
+      Alert.alert('识别失败', err.message || 'AI 识别遇到问题');
+    } finally {
+      setAiRecognizing(false);
     }
   };
 
@@ -135,24 +171,18 @@ export function DishEditModal({
     try {
       const dishData = {
         title: trimmedTitle,
-        category,
+        category: category === 'veg' ? 'vegetable' : category,
         image_path: imagePath,
         recipe_text: recipeText.trim(),
         recipe_images: recipeImages,
-        created_by: dish?.created_by || userId,
       };
-      if (dish?.id) {
-        dishData.id = dish.id;
-      }
 
-      const { data, error } = await saveDish(dishData);
-      if (error) throw error;
-
-      if (onSaved) onSaved(data?.[0] || dishData);
+      const saved = await saveDish(dishData, dish?.id, userId);
+      onSaved && onSaved(saved);
       onClose();
     } catch (error) {
       console.error('[DishEdit] 保存菜品失败:', error);
-      Alert.alert('保存失败', error.message || '请检查网络');
+      Alert.alert('保存失败', error.message || '请检查网络重试');
     } finally {
       setSubmitting(false);
     }
@@ -160,8 +190,7 @@ export function DishEditModal({
 
   // 删除菜品
   const handleDelete = () => {
-    if (!dish?.id) return;
-    Alert.alert('删除菜品', `确定要删除「${dish.title}」吗？此操作不可撤销。`, [
+    Alert.alert('确认删除', `确定要删除菜品「${dish.title}」吗？删除后不可恢复。`, [
       { text: '取消', style: 'cancel' },
       {
         text: '删除',
@@ -169,13 +198,12 @@ export function DishEditModal({
         onPress: async () => {
           setSubmitting(true);
           try {
-            const { error } = await deleteDish(dish.id);
-            if (error) throw error;
-            if (onDeleted) onDeleted(dish.id);
+            await deleteDish(dish.id);
+            onDeleted && onDeleted(dish.id);
             onClose();
-          } catch (e) {
-            console.error('[DishEdit] 删除失败:', e);
-            Alert.alert('删除失败', e.message || '请重试');
+          } catch (err) {
+            console.error('[DishEdit] 删除失败:', err);
+            Alert.alert('删除失败', '请稍后重试');
           } finally {
             setSubmitting(false);
           }
@@ -184,265 +212,332 @@ export function DishEditModal({
     ]);
   };
 
+  const drawerHeight = Math.min(Math.round(SCREEN_HEIGHT * 0.88), SCREEN_HEIGHT - 60);
+
   return (
     <Modal
       visible={visible}
       animationType="slide"
-      presentationStyle="pageSheet"
+      transparent={true}
+      statusBarTranslucent={true}
       onRequestClose={onClose}
     >
-      <View style={[styles.container, { backgroundColor: colors.background }]}>
-        {/* 顶部导航 */}
+      <View style={styles.modalOverlay}>
+        <TouchableOpacity
+          style={styles.backdrop}
+          activeOpacity={1}
+          onPress={onClose}
+        />
+
         <View
           style={[
-            styles.header,
+            styles.drawerContainer,
             {
-              backgroundColor: colors.backgroundLavender,
-              borderBottomColor: colors.border,
-              paddingTop: insets.top + spacing[2],
+              height: drawerHeight,
+              backgroundColor: cardBg,
+              paddingBottom: insets.bottom + spacing[3],
             },
           ]}
         >
-          <IconButton icon="close" size={24} onPress={onClose} accessibilityLabel="关闭" />
-          <Text style={[styles.headerTitle, { color: colors.textPrimary }]}>
-            {isEdit ? '编辑菜品' : '上传新菜品'}
-          </Text>
-          <TouchableOpacity
-            style={styles.saveHeaderBtn}
-            onPress={handleSubmit}
-            disabled={submitting || uploadingImage}
-          >
-            {submitting ? (
-              <ActivityIndicator size="small" color={colors.primaryAction} />
-            ) : (
-              <Text style={[styles.saveHeaderText, { color: colors.primaryAction }]}>保存</Text>
-            )}
-          </TouchableOpacity>
-        </View>
-
-        <KeyboardAvoidingView style={styles.flex} behavior="padding">
-          <ScrollView
-            style={styles.flex}
-            contentContainerStyle={[
-              styles.scrollContent,
-              { paddingBottom: insets.bottom + spacing[6] },
-            ]}
-            keyboardShouldPersistTaps="handled"
-          >
-            {/* 菜品主图 */}
-            <View style={styles.section}>
-              <Text style={[styles.sectionLabel, { color: colors.textPrimary }]}>
-                菜品图片 <Text style={{ color: colors.error }}>*</Text>
-              </Text>
+          {/* 抽屉顶部拉手与标题 */}
+          <View style={[styles.drawerHeader, { borderBottomColor: border }]}>
+            <View style={[styles.dragHandle, { backgroundColor: border }]} />
+            <View style={styles.headerRow}>
+              <TouchableOpacity onPress={onClose} style={styles.closeBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                <Ionicons name="close" size={24} color={textMain} />
+              </TouchableOpacity>
+              <Text style={[styles.headerTitle, { color: textMain }]}>{isEdit ? '编辑菜品' : '添加美味新菜'}</Text>
               <TouchableOpacity
-                style={[
-                  styles.imagePickerBox,
-                  {
-                    backgroundColor: colors.surface,
-                    borderColor: imagePath ? colors.border : colors.primary[200],
-                  },
-                ]}
-                onPress={handlePickMainImage}
-                activeOpacity={0.8}
-                disabled={uploadingImage}
+                onPress={handleSubmit}
+                disabled={submitting || uploadingImage}
+                style={styles.headerSaveBtn}
               >
-                {imagePath ? (
-                  <View style={styles.imagePreviewWrap}>
-                    <CachedImage
-                      source={imagePath}
-                      style={styles.imagePreview}
-                      contentFit="cover"
-                      previewable={false}
-                    />
-                    <View style={styles.imageChangeOverlay}>
-                      <Ionicons name="camera" size={16} color="#FFFFFF" />
-                      <Text style={styles.imageChangeText}>点击更换</Text>
-                    </View>
-                  </View>
-                ) : uploadingImage ? (
-                  <View style={styles.uploadingBox}>
-                    <ActivityIndicator size="large" color={colors.primaryAction} />
-                    <Text style={[styles.uploadingText, { color: colors.textSecondary }]}>
-                      正在压缩并上传...
-                    </Text>
-                  </View>
+                {submitting ? (
+                  <ActivityIndicator size="small" color={primary} />
                 ) : (
-                  <View style={styles.emptyImageBox}>
-                    <View style={[styles.cameraIconWrap, { backgroundColor: colors.primary[50] }]}>
-                      <Ionicons name="camera-outline" size={32} color={colors.primaryAction} />
-                    </View>
-                    <Text style={[styles.uploadHint, { color: colors.textSecondary }]}>
-                      点击选择或拍摄菜品图片
-                    </Text>
-                  </View>
+                  <Text style={[styles.headerSaveText, { color: primary }]}>完成</Text>
                 )}
               </TouchableOpacity>
             </View>
+          </View>
 
-            {/* 菜品名称 */}
-            <View style={styles.section}>
-              <AppInput
-                label="菜品名称 *"
-                placeholder="例如：可乐鸡翅（20字以内）"
-                value={title}
-                onChangeText={setTitle}
-                maxLength={20}
-              />
-            </View>
+          <CenterToast
+            visible={toastVisible}
+            message={toastMessage}
+            duration={2200}
+            onDismiss={() => setToastVisible(false)}
+          />
 
-            {/* 所属分类 */}
-            <View style={styles.section}>
-              <Text style={[styles.sectionLabel, { color: colors.textPrimary }]}>
-                所属分类 <Text style={{ color: colors.error }}>*</Text>
-              </Text>
-              <View style={styles.categoryRow}>
-                {CATEGORIES.map((cat) => {
-                  const isSelected = category === cat.key;
-                  return (
-                    <TouchableOpacity
-                      key={cat.key}
-                      style={[
-                        styles.categoryBtn,
-                        {
-                          backgroundColor: isSelected ? colors.primaryAction : colors.surface,
-                          borderColor: isSelected ? colors.primaryAction : colors.border,
-                        },
-                      ]}
-                      onPress={() => setCategory(cat.key)}
-                      activeOpacity={0.8}
-                    >
-                      <Text style={{ fontSize: 16, marginRight: 6 }}>{cat.icon}</Text>
-                      <Text
-                        style={[
-                          styles.categoryBtnText,
-                          { color: isSelected ? '#FFFFFF' : colors.textPrimary },
-                        ]}
-                      >
-                        {cat.label}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
-            </View>
-
-            {/* 文字食谱 */}
-            <View style={styles.section}>
-              <Text style={[styles.sectionLabel, { color: colors.textPrimary }]}>
-                文字食谱 (用料与步骤)
-              </Text>
-              <AppInput
-                placeholder="记录这道菜的做法、用料配比或独家秘方~"
-                value={recipeText}
-                onChangeText={setRecipeText}
-                multiline
-                numberOfLines={6}
-                style={styles.recipeInput}
-              />
-            </View>
-
-            {/* 图片食谱 */}
-            <View style={styles.section}>
-              <View style={styles.recipeImageHeader}>
-                <Text style={[styles.sectionLabel, { color: colors.textPrimary }]}>
-                  食谱图片 (手写/截图)
+          <KeyboardAvoidingView
+            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+            style={styles.keyboardAvoid}
+          >
+            <ScrollView
+              style={styles.scroll}
+              contentContainerStyle={[styles.scrollContent, { paddingBottom: insets.bottom + 40 }]}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+            >
+              {/* 菜品主图上传区 (虚线边框 + 全尺寸预览) */}
+              <View style={styles.section}>
+                <Text style={[styles.sectionLabel, { color: textMain }]}>
+                  菜品封面图 <Text style={{ color: '#FF4D4F' }}>*</Text>
                 </Text>
                 <TouchableOpacity
-                  style={[styles.addRecipeImgBtn, { borderColor: colors.primaryAction }]}
-                  onPress={handleAddRecipeImage}
-                  disabled={uploadingRecipeImage}
+                  style={[
+                    styles.imagePickerBox,
+                    imagePath
+                      ? [styles.imagePickerBoxFilled, { borderColor: border }]
+                      : [
+                          styles.imagePickerBoxEmpty,
+                          {
+                            backgroundColor: background,
+                            borderColor: primary + '60',
+                          },
+                        ],
+                  ]}
+                  onPress={handlePickMainImage}
+                  activeOpacity={0.85}
+                  disabled={uploadingImage}
                 >
-                  <Ionicons name="add" size={14} color={colors.primaryAction} />
-                  <Text style={[styles.addRecipeImgText, { color: colors.primaryAction }]}>
-                    {uploadingRecipeImage ? '上传中...' : '追加图片'}
-                  </Text>
+                  {imagePath ? (
+                    <View style={styles.imagePreviewWrap}>
+                      <CachedImage
+                        source={imagePath}
+                        style={styles.imagePreview}
+                        contentFit="cover"
+                        previewable={false}
+                      />
+                      <View style={styles.imageChangeOverlay}>
+                        <Ionicons name="camera" size={16} color="#FFFFFF" />
+                        <Text style={styles.imageChangeText}>点击更换图片</Text>
+                      </View>
+                    </View>
+                  ) : uploadingImage ? (
+                    <View style={styles.uploadingBox}>
+                      <ActivityIndicator size="large" color={primary} />
+                      <Text style={[styles.uploadingText, { color: textSecondary }]}>正在压缩上传图片...</Text>
+                    </View>
+                  ) : (
+                    <View style={styles.emptyImageBox}>
+                      <View style={[styles.cameraIconWrap, { backgroundColor: primary + '18' }]}>
+                        <Ionicons name="camera-outline" size={34} color={primary} />
+                      </View>
+                      <Text style={[styles.uploadHint, { color: primary }]}>点击上传或拍照封面图</Text>
+                      <Text style={[styles.uploadSubHint, { color: textSecondary }]}>支持自由比例裁剪，清晰呈现美食</Text>
+                    </View>
+                  )}
                 </TouchableOpacity>
               </View>
 
-              {recipeImages.length > 0 ? (
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.recipeImgScroll}>
-                  {recipeImages.map((imgPath, index) => (
-                    <View key={`${imgPath}-${index}`} style={styles.recipeThumbWrap}>
-                      <CachedImage
-                        source={imgPath}
-                        style={styles.recipeThumb}
-                        contentFit="cover"
-                        previewable={true}
-                      />
-                      <TouchableOpacity
-                        style={styles.removeRecipeImgBtn}
-                        onPress={() => handleRemoveRecipeImage(index)}
-                        hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-                      >
-                        <Ionicons name="close-circle" size={20} color="#FF4D4F" />
-                      </TouchableOpacity>
-                    </View>
-                  ))}
-                </ScrollView>
-              ) : (
-                <Text style={[styles.noRecipeImgText, { color: colors.textMuted }]}>
-                  暂未上传食谱配图（手写菜谱拍照也很温馨哦）
+              {/* 菜品名称 */}
+              <View style={styles.section}>
+                <AppInput
+                  label="菜品名称 *"
+                  placeholder="例如：蜜汁烤鸡翅、番茄牛腩..."
+                  value={title}
+                  onChangeText={setTitle}
+                  maxLength={20}
+                />
+              </View>
+
+              {/* 所属分类 */}
+              <View style={styles.section}>
+                <Text style={[styles.sectionLabel, { color: textMain }]}>
+                  所属分类 <Text style={{ color: '#FF4D4F' }}>*</Text>
                 </Text>
-              )}
-            </View>
+                <View style={styles.categoryRow}>
+                  {CATEGORIES.map((cat) => {
+                    const isSelected = category === cat.key || (cat.key === 'veg' && category === 'vegetable');
+                    return (
+                      <TouchableOpacity
+                        key={cat.key}
+                        style={[
+                          styles.categoryBtn,
+                          {
+                            borderColor: isSelected ? primary : border,
+                            backgroundColor: isSelected ? primary : cardBg,
+                          },
+                        ]}
+                        onPress={() => setCategory(cat.key)}
+                        activeOpacity={0.8}
+                      >
+                        <Text style={{ fontSize: 18, marginRight: 6 }}>{cat.icon}</Text>
+                        <Text
+                          style={[
+                            styles.categoryBtnText,
+                            { color: isSelected ? '#FFFFFF' : textMain },
+                          ]}
+                        >
+                          {cat.label}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </View>
 
-            {/* 提交按钮 */}
-            <Button
-              variant="primary"
-              size="large"
-              fullWidth
-              loading={submitting}
-              disabled={submitting || uploadingImage}
-              onPress={handleSubmit}
-              style={{ marginTop: spacing[4] }}
-            >
-              {isEdit ? '保存修改' : '确认上传'}
-            </Button>
+              {/* 文字食谱 + AI 识别按钮 */}
+              <View style={styles.section}>
+                <View style={styles.recipeHeaderRow}>
+                  <Text style={[styles.sectionLabel, { color: textMain }]}>秘籍步骤说明</Text>
+                  <TouchableOpacity
+                    style={[styles.aiOcrBtn, { backgroundColor: primary }]}
+                    onPress={() => triggerRecipeOcr()}
+                    disabled={aiRecognizing}
+                    activeOpacity={0.8}
+                  >
+                    {aiRecognizing ? (
+                      <ActivityIndicator size="small" color="#FFFFFF" />
+                    ) : (
+                      <>
+                        <Ionicons name="sparkles" size={14} color="#FFFFFF" />
+                        <Text style={styles.aiOcrBtnText}>AI 智能识图</Text>
+                      </>
+                    )}
+                  </TouchableOpacity>
+                </View>
+                <AppInput
+                  placeholder="记录烹饪步骤、调料配比与小秘诀（支持 AI 从食谱图中直接识别填充）..."
+                  value={recipeText}
+                  onChangeText={setRecipeText}
+                  multiline
+                  numberOfLines={6}
+                  style={styles.recipeInput}
+                />
+              </View>
 
-            {/* 删除按钮 */}
-            {isEdit && (
-              <Button
-                variant="danger"
-                size="large"
-                fullWidth
-                disabled={submitting}
-                onPress={handleDelete}
-                style={{ marginTop: spacing[3] }}
+              {/* 食谱多图 (手写/截图) */}
+              <View style={styles.section}>
+                <View style={styles.recipeHeaderRow}>
+                  <Text style={[styles.sectionLabel, { color: textMain }]}>食谱附图 (手写笔记/步骤截图)</Text>
+                  <TouchableOpacity
+                    style={styles.addStepImgBtn}
+                    onPress={handleAddRecipeImage}
+                    disabled={uploadingRecipeImage}
+                  >
+                    <Ionicons name="add" size={16} color={primary} />
+                    <Text style={[styles.addStepImgText, { color: primary }]}>
+                      {uploadingRecipeImage ? '上传中...' : '追加配图'}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+
+                {recipeImages.length > 0 ? (
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.stepImgScroll}>
+                    {recipeImages.map((imgPath, index) => (
+                      <View key={`${imgPath}-${index}`} style={styles.stepThumbWrap}>
+                        <CachedImage
+                          source={imgPath}
+                          style={styles.stepThumb}
+                          contentFit="cover"
+                          previewable={true}
+                        />
+                        <TouchableOpacity
+                          style={styles.removeStepBtn}
+                          onPress={() => handleRemoveRecipeImage(index)}
+                          hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                        >
+                          <Ionicons name="close-circle" size={20} color="#FF4D4F" />
+                        </TouchableOpacity>
+                      </View>
+                    ))}
+                  </ScrollView>
+                ) : (
+                  <Text style={[styles.noStepHint, { color: textSecondary }]}>
+                    还未上传食谱配图，添加手写菜谱或烹饪截图可自动触发 AI 识别步骤哦
+                  </Text>
+                )}
+              </View>
+
+              {/* 保存按钮 */}
+              <TouchableOpacity
+                style={[styles.saveMainBtn, { backgroundColor: primary }]}
+                onPress={handleSubmit}
+                disabled={submitting || uploadingImage}
+                activeOpacity={0.88}
               >
-                删除菜品
-              </Button>
-            )}
-          </ScrollView>
-        </KeyboardAvoidingView>
+                {submitting ? (
+                  <ActivityIndicator size="small" color="#FFFFFF" />
+                ) : (
+                  <Text style={styles.saveMainBtnText}>{isEdit ? '保存修改' : '确认收录进厨房'}</Text>
+                )}
+              </TouchableOpacity>
+
+              {/* 删除菜品 */}
+              {isEdit && (
+                <TouchableOpacity
+                  style={styles.deleteBtn}
+                  onPress={handleDelete}
+                  disabled={submitting}
+                >
+                  <Text style={styles.deleteBtnText}>删除这道菜</Text>
+                </TouchableOpacity>
+              )}
+            </ScrollView>
+          </KeyboardAvoidingView>
+        </View>
       </View>
     </Modal>
   );
 }
 
 const styles = StyleSheet.create({
-  flex: { flex: 1 },
-  container: { flex: 1 },
-  header: {
+  modalOverlay: {
+    flex: 1,
+    justifyContent: 'flex-end',
+    backgroundColor: 'rgba(0, 0, 0, 0.45)',
+  },
+  backdrop: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  drawerContainer: {
+    width: '100%',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    overflow: 'hidden',
+    ...shadows.soft,
+  },
+  drawerHeader: {
+    alignItems: 'center',
+    paddingTop: 8,
+    paddingBottom: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  dragHandle: {
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    marginBottom: 8,
+  },
+  headerRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: spacing[3],
-    paddingBottom: spacing[2],
-    borderBottomWidth: StyleSheet.hairlineWidth,
+    width: '100%',
+    paddingHorizontal: spacing[4],
+  },
+  closeBtn: {
+    padding: 4,
   },
   headerTitle: {
-    ...typography.pageTitle,
+    ...typography.cardTitle,
     fontSize: 17,
+    fontWeight: '700',
   },
-  saveHeaderBtn: {
-    minWidth: 44,
-    alignItems: 'flex-end',
-    justifyContent: 'center',
+  headerSaveBtn: {
     paddingHorizontal: 8,
+    paddingVertical: 4,
   },
-  saveHeaderText: {
+  headerSaveText: {
     fontSize: 16,
     fontWeight: '700',
+  },
+  keyboardAvoid: {
+    flex: 1,
+  },
+  scroll: {
+    flex: 1,
   },
   scrollContent: {
     padding: spacing[4],
@@ -451,40 +546,42 @@ const styles = StyleSheet.create({
     marginBottom: spacing[4],
   },
   sectionLabel: {
-    ...typography.sectionTitle,
-    fontSize: 14,
+    ...typography.label,
+    fontWeight: '700',
     marginBottom: spacing[2],
   },
   imagePickerBox: {
-    width: '100%',
-    height: 190,
     borderRadius: radius.lg,
+    overflow: 'hidden',
+    height: 180,
+  },
+  imagePickerBoxEmpty: {
     borderWidth: 1.5,
     borderStyle: 'dashed',
-    overflow: 'hidden',
-    justifyContent: 'center',
     alignItems: 'center',
+    justifyContent: 'center',
+  },
+  imagePickerBoxFilled: {
+    borderWidth: 1,
   },
   emptyImageBox: {
     alignItems: 'center',
   },
   cameraIconWrap: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    justifyContent: 'center',
+    width: 58,
+    height: 58,
+    borderRadius: 29,
     alignItems: 'center',
-    marginBottom: 8,
+    justifyContent: 'center',
+    marginBottom: spacing[2],
   },
   uploadHint: {
-    ...typography.caption,
+    ...typography.body,
+    fontWeight: '600',
   },
-  uploadingBox: {
-    alignItems: 'center',
-    gap: 8,
-  },
-  uploadingText: {
+  uploadSubHint: {
     ...typography.caption,
+    marginTop: 4,
   },
   imagePreviewWrap: {
     width: '100%',
@@ -497,20 +594,29 @@ const styles = StyleSheet.create({
   },
   imageChangeOverlay: {
     position: 'absolute',
-    bottom: 8,
-    right: 8,
-    backgroundColor: 'rgba(0, 0, 0, 0.65)',
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: radius.pill,
+    bottom: 0,
+    left: 0,
+    right: 0,
+    height: 36,
+    backgroundColor: 'rgba(0, 0, 0, 0.45)',
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
+    justifyContent: 'center',
+    gap: 6,
   },
   imageChangeText: {
     color: '#FFFFFF',
     fontSize: 12,
     fontWeight: '600',
+  },
+  uploadingBox: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  uploadingText: {
+    ...typography.caption,
+    marginTop: spacing[2],
   },
   categoryRow: {
     flexDirection: 'row',
@@ -523,61 +629,89 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingVertical: 10,
     borderRadius: radius.md,
-    borderWidth: 1,
   },
   categoryBtnText: {
-    ...typography.bodyMedium,
-    fontSize: 14,
+    ...typography.caption,
+    fontWeight: '600',
   },
-  recipeInput: {
-    height: 120,
-    textAlignVertical: 'top',
-  },
-  recipeImageHeader: {
+  recipeHeaderRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
+    justifyContent: 'space-between',
     marginBottom: spacing[2],
   },
-  addRecipeImgBtn: {
+  aiOcrBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    borderWidth: 1,
+    gap: 4,
     paddingHorizontal: 10,
     paddingVertical: 4,
     borderRadius: radius.pill,
-    gap: 3,
   },
-  addRecipeImgText: {
+  aiOcrBtnText: {
+    color: '#FFFFFF',
     fontSize: 12,
-    fontWeight: '600',
+    fontWeight: '700',
   },
-  recipeImgScroll: {
+  recipeInput: {
+    minHeight: 110,
+    textAlignVertical: 'top',
+  },
+  addStepImgBtn: {
     flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 2,
   },
-  recipeThumbWrap: {
-    width: 90,
-    height: 90,
-    borderRadius: radius.md,
-    overflow: 'hidden',
-    marginRight: 10,
+  addStepImgText: {
+    fontSize: 13,
+    fontWeight: '600',
+    marginLeft: 2,
+  },
+  stepImgScroll: {
+    marginTop: 4,
+  },
+  stepThumbWrap: {
     position: 'relative',
+    marginRight: 10,
   },
-  recipeThumb: {
-    width: '100%',
-    height: '100%',
+  stepThumb: {
+    width: 80,
+    height: 80,
+    borderRadius: radius.md,
   },
-  removeRecipeImgBtn: {
+  removeStepBtn: {
     position: 'absolute',
-    top: 4,
-    right: 4,
+    top: -6,
+    right: -6,
     backgroundColor: '#FFFFFF',
     borderRadius: 10,
   },
-  noRecipeImgText: {
+  noStepHint: {
     ...typography.caption,
-    fontStyle: 'italic',
+    lineHeight: 18,
+  },
+  saveMainBtn: {
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: spacing[3],
+    ...shadows.soft,
+  },
+  saveMainBtnText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  deleteBtn: {
+    paddingVertical: 12,
+    alignItems: 'center',
+    marginTop: spacing[2],
+  },
+  deleteBtnText: {
+    color: '#FF4D4F',
+    fontSize: 14,
+    fontWeight: '500',
   },
 });
-
-export default DishEditModal;

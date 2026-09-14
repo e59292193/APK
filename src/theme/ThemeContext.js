@@ -12,7 +12,11 @@ export function getActiveTheme() {
 }
 
 export function setActiveThemeSync(themeId) {
-  const target = THEMES[themeId] || DEFAULT_THEME;
+  let target = THEMES[themeId];
+  if (!target && THEME_IDS[themeId?.toUpperCase?.()]) {
+    target = THEMES[THEME_IDS[themeId.toUpperCase()]];
+  }
+  target = target || DEFAULT_THEME;
   currentActiveTheme = target;
   return target;
 }
@@ -23,28 +27,28 @@ export function setActiveThemeSync(themeId) {
 export async function prefetchThemeId() {
   try {
     const saved = await AsyncStorage.getItem(THEME_STORAGE_KEY);
-    if (saved && THEMES[saved]) {
-      setActiveThemeSync(saved);
-      return saved;
+    if (saved) {
+      const active = setActiveThemeSync(saved);
+      return active.id;
     }
   } catch (e) {
     console.warn('[Theme] 预取主题失败:', e.message);
   }
-  return THEME_IDS.LAVENDER;
+  return DEFAULT_THEME.id;
 }
 
 const ThemeContext = createContext({
   theme: DEFAULT_THEME,
-  themeId: THEME_IDS.LAVENDER,
+  themeId: DEFAULT_THEME.id,
   colors: DEFAULT_THEME.colors,
   setThemeId: async () => {},
 });
 
 export function ThemeProvider({ children, initialThemeId }) {
   const [themeId, setThemeIdState] = useState(() => {
-    if (initialThemeId && THEMES[initialThemeId]) {
-      setActiveThemeSync(initialThemeId);
-      return initialThemeId;
+    if (initialThemeId) {
+      const active = setActiveThemeSync(initialThemeId);
+      return active.id;
     }
     return currentActiveTheme.id;
   });
@@ -53,9 +57,11 @@ export function ThemeProvider({ children, initialThemeId }) {
     let alive = true;
     AsyncStorage.getItem(THEME_STORAGE_KEY)
       .then((saved) => {
-        if (alive && saved && THEMES[saved] && saved !== themeId) {
-          setActiveThemeSync(saved);
-          setThemeIdState(saved);
+        if (alive && saved) {
+          const resolved = setActiveThemeSync(saved);
+          if (resolved.id !== themeId) {
+            setThemeIdState(resolved.id);
+          }
         }
       })
       .catch(() => {});
@@ -65,11 +71,10 @@ export function ThemeProvider({ children, initialThemeId }) {
   }, [themeId]);
 
   const setThemeId = useCallback(async (newId) => {
-    if (!THEMES[newId]) return;
-    setActiveThemeSync(newId);
-    setThemeIdState(newId);
+    const target = setActiveThemeSync(newId);
+    setThemeIdState(target.id);
     try {
-      await AsyncStorage.setItem(THEME_STORAGE_KEY, newId);
+      await AsyncStorage.setItem(THEME_STORAGE_KEY, target.id);
     } catch (e) {
       console.warn('[Theme] 保存主题选择失败:', e.message);
     }

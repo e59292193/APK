@@ -1,21 +1,24 @@
 import React from 'react';
 import { Pressable, View, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { colors, layout } from '../../theme';
+import { colors, layout, useTheme } from '../../theme';
 
 export function IconButton({
   icon,
   name,
   size = 24,
-  color = colors.textPrimary,
+  color,
   onPress,
   disabled = false,
   accessibilityLabel,
   style,
   hitSlop,
 }) {
+  const { colors: currentColors = colors } = useTheme();
   const iconName = icon || name;
   const minTouch = Math.max(layout.touchTarget, size + 16);
+  const activeColor = color || currentColors.text || currentColors.textPrimary;
+
   return (
     <Pressable
       onPress={disabled ? undefined : onPress}
@@ -26,12 +29,12 @@ export function IconButton({
       style={({ pressed }) => [
         styles.base,
         { width: minTouch, height: minTouch, borderRadius: minTouch / 2 },
-        pressed && !disabled && styles.pressed,
+        pressed && !disabled && [styles.pressed, { backgroundColor: currentColors.primarySoft || currentColors.background }],
         disabled && styles.disabled,
         style,
       ]}
     >
-      <Ionicons name={iconName} size={size} color={disabled ? colors.textDisabled : color} />
+      <Ionicons name={iconName} size={size} color={disabled ? (currentColors.border || colors.textDisabled) : activeColor} />
     </Pressable>
   );
 }

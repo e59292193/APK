@@ -58,6 +58,9 @@ debug-*.md
 # Misc
 pic.jpg
 cleanup_data.sql
+emulator_screen*.png
+doc_dump.txt
+提示词*.docx
 
 # Supabase CLI local state
 supabase/.temp/

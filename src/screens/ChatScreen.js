@@ -26,7 +26,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { uploadImages } from '../lib/photoUtils';
 import { CachedImage } from '../lib/imageCache';
 import { Ionicons } from '@expo/vector-icons';
-import { colors, typography, spacing, radius } from '../theme';
+import { colors, typography, spacing, radius, useTheme } from '../theme';
 import { AppHeader, Button, Card, IconButton, Avatar } from '../components/ui';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
@@ -47,10 +47,46 @@ export default function ChatScreen({
   isActive = true,
   refreshTrigger = 0,
 }) {
+  const { theme } = useTheme();
+  const primary = colors.primary || '#FF6B35';
+  const bg = colors.background || '#FAF9FC';
+  const cardBg = colors.card || '#FFFFFF';
+  const textMain = colors.text || '#27222F';
+  const textMuted = colors.textSecondary || '#706879';
+  const border = colors.border || '#EAE5EF';
+  const accent = colors.accent || '#FF8FA3';
+  const isLightPrimary = theme?.id === 'sakura';
+  const meTextColor = isLightPrimary ? textMain : '#FFFFFF';
+  const meTimeColor = isLightPrimary ? textMuted : 'rgba(255, 255, 255, 0.75)';
+
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(true);
   const [inputText, setInputText] = useState('');
   const [sending, setSending] = useState(false);
+  const [showMomiMention, setShowMomiMention] = useState(false);
+
+  const handleInputChange = (text) => {
+    setInputText(text);
+    // 检测输入内容末尾是否包含待补全的 @ 标记
+    const match = text.match(/(?:^|\s)@([a-zA-Z0-9\u4e00-\u9fa5]*)$/);
+    if (match) {
+      const q = match[1].toLowerCase();
+      if (!q || 'momi'.startsWith(q)) {
+        setShowMomiMention(true);
+        return;
+      }
+    }
+    setShowMomiMention(false);
+  };
+
+  const handleSelectMomiMention = () => {
+    const replaced = inputText.replace(/(?:^|\s)@([a-zA-Z0-9\u4e00-\u9fa5]*)$/, (fullMatch) => {
+      const prefix = fullMatch.startsWith(' ') ? ' ' : '';
+      return `${prefix}@momi `;
+    });
+    setInputText(replaced);
+    setShowMomiMention(false);
+  };
   const flatListRef = useRef(null);
   const isInitialLoadRef = useRef(true);
   const prevMessagesLengthRef = useRef(0);
@@ -79,6 +115,20 @@ export default function ChatScreen({
   const keyboardHeight = useKeyboardHeight();
   const composerBottomOffset = keyboardHeight > 0 ? keyboardHeight : 0;
 
+  // ─── Avatars state (功能4) ───
+  const [avatars, setAvatars] = useState({ momo: '', '苞米': '', momi: '' });
+  const loadAvatars = useCallback(async () => {
+    try {
+      const { fetchAllAvatars } = require('../lib/avatarService');
+      const data = await fetchAllAvatars();
+      if (data) setAvatars(data);
+    } catch (e) {}
+  }, []);
+
+  useEffect(() => {
+    loadAvatars();
+  }, [loadAvatars, refreshTrigger]);
+
   // ─── Message quoting (引用) ───
   const [quotedMessage, setQuotedMessage] = useState(null);
 
@@ -99,8 +149,9 @@ export default function ChatScreen({
   // 长按消息弹出操作菜单（引用）
   const handleMessageLongPress = useCallback((item) => {
     const msgType = item.type || 'text';
-    // 仅允许引用文本/图片/打卡消息（会话类消息）
-    if (msgType !== 'text' && msgType !== 'image' && msgType !== 'checkin_post') return;
+    const isMomi = msgType === 'momi' || item.user_id === 'momi';
+    // 允许引用文本/图片/打卡/momi消息（会话类消息）
+    if (!isMomi && msgType !== 'text' && msgType !== 'image' && msgType !== 'checkin_post') return;
     Alert.alert(
       '消息操作',
       undefined,
@@ -110,9 +161,10 @@ export default function ChatScreen({
           onPress: () => {
             setQuotedMessage({
               id: item.id,
-              user_id: item.user_id,
+              user_id: isMomi ? 'momi' : item.user_id,
               content: getQuotePreviewText(item),
               type: msgType,
+              isMomi,
             });
           },
         },
@@ -281,13 +333,20 @@ export default function ChatScreen({
 
   // ─── Send Text Message ───
   const sendMessage = async () => {
-    if (!inputText.trim() || sending) return;
+    const rawText = inputText.trim();
+    if (!rawText || sending) return;
 
+    const isAtMomi = /(?:^|\s)@momi(?:\s|$)/i.test(rawText);
+    const atQuery = isAtMomi ? rawText.replace(/@momi\s*/gi, '').trim() : '';
+    const isQuoteMomi = Boolean(quotedMessage && (quotedMessage.user_id === 'momi' || quotedMessage.isMomi));
+    const quotedContent = quotedMessage?.content;
+
+    setShowMomiMention(false);
     setSending(true);
     try {
       const insertData = {
         user_id: userId,
-        content: inputText.trim(),
+        content: rawText,
         type: 'text',
       };
 
@@ -296,7 +355,7 @@ export default function ChatScreen({
         insertData.metadata = {
           quote: {
             message_id: quotedMessage.id,
-            user_id: quotedMessage.user_id,
+            user_id: quotedMessage.user_id === 'momi' ? 'momi' : quotedMessage.user_id,
             content: quotedMessage.content,
             type: quotedMessage.type,
           },
@@ -317,10 +376,66 @@ export default function ChatScreen({
           return [data[0], ...prev];
         });
         emitSignal('chat:message', data[0]).catch((e) => console.warn('[Chat] emitMessage failed:', e.message));
-        // 确保 FlatList 滚动到最新消息（inverted 列表的 offset 0 = 底部）
         setTimeout(() => {
           flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
         }, 100);
+      }
+
+      // ─── 触发 @momi 智能回复 或 引用回复 momi ───
+      if (isAtMomi || isQuoteMomi) {
+        (async () => {
+          try {
+            const { chatWithMomi } = require('../lib/momiAssistant');
+            const recent = messages.slice(0, 8).reverse();
+            let userPrompt = rawText;
+            if (isQuoteMomi) {
+              userPrompt = `[引用回复了你刚才说的: "${quotedContent}"]\n对你说: ${rawText}`;
+            } else if (isAtMomi) {
+              userPrompt = atQuery || '你好呀 momi！🐾';
+            }
+            const aiRes = await chatWithMomi({
+              userId,
+              message: userPrompt,
+              recentChatHistory: recent,
+            });
+            const replyText = aiRes.reply || '在呢在呢！🐾 收到你的回复啦~';
+
+            const { data: momiData, error: momiErr } = await supabase
+              .from('messages')
+              .insert([
+                {
+                  user_id: 'momi',
+                  content: replyText,
+                  type: 'momi',
+                  metadata: {
+                    is_ai: true,
+                    reply_to_quote: isQuoteMomi ? quotedContent : undefined,
+                  },
+                },
+              ])
+              .select();
+
+            if (!momiErr && momiData && momiData[0]) {
+              setMessages((prev) => {
+                if (prev.some((m) => m.id === momiData[0].id)) return prev;
+                return [momiData[0], ...prev];
+              });
+              emitSignal('chat:message', momiData[0]).catch(() => {});
+            }
+          } catch (momiErr) {
+            console.warn('[Chat] momi 回复异常:', momiErr.message);
+          }
+        })();
+      }
+
+      // 每 30 条消息自动触发一次记忆提取
+      if (messages.length > 0 && messages.length % 30 === 0) {
+        try {
+          const { extractAndSaveMemories } = require('../lib/momiAssistant');
+          extractAndSaveMemories(messages.slice(0, 20));
+        } catch (memErr) {
+          console.warn('[Chat] 记忆提炼失败:', memErr.message);
+        }
       }
     } catch (error) {
       console.error('Error sending message:', error);
@@ -665,6 +780,52 @@ export default function ChatScreen({
       );
     }
 
+    // ── momi AI 专属宠物消息 (功能3) ──
+    if (msgType === 'momi' || item.user_id === 'momi') {
+      return (
+        <View style={[styles.bubbleRow, styles.bubbleRowOther]}>
+          <Avatar
+            uri={avatars.momi}
+            fallback="🐾"
+            size={32}
+            style={[styles.bubbleAvatar, { backgroundColor: colors.primarySoft || bg }]}
+          />
+          <TouchableOpacity
+            style={[styles.momiChatBubble, { backgroundColor: cardBg, borderColor: accent }]}
+            onLongPress={() => handleMessageLongPress(item)}
+            activeOpacity={0.85}
+          >
+            <View style={styles.momiBadgeRow}>
+              <Text style={[styles.momiBadge, { color: accent }]}>momi 🐾</Text>
+              <Text style={[styles.momiTime, { color: textMuted }]}>{formatLocalDateTime(item.created_at)}</Text>
+            </View>
+            <Text style={[styles.momiMessageText, { color: textMain }]}>{item.content}</Text>
+          </TouchableOpacity>
+        </View>
+      );
+    }
+
+    const renderAvatar = (isCurrentUser) => {
+      if (isCurrentUser) {
+        return (
+          <Avatar
+            uri={avatars[userId]}
+            fallback="我"
+            size={32}
+            style={styles.bubbleAvatar}
+          />
+        );
+      }
+      return (
+        <Avatar
+          uri={avatars[item.user_id]}
+          fallback={item.user_id === 'momo' ? 'M' : '苞'}
+          size={32}
+          style={styles.bubbleAvatar}
+        />
+      );
+    };
+
     // ── Checkin Invite ──
     if (msgType === 'checkin_invite') {
       const metadata = item.metadata || {};
@@ -676,26 +837,20 @@ export default function ChatScreen({
 
       return (
         <View style={[styles.bubbleRow, isMe ? styles.bubbleRowMe : styles.bubbleRowOther]}>
-          {!isMe && (
-            <Avatar
-              fallback={item.user_id === 'momo' ? 'M' : '苞'}
-              size={30}
-              style={styles.bubbleAvatar}
-            />
-          )}
-          <Card style={[styles.inviteCard, isMe ? styles.inviteCardMe : styles.inviteCardOther]}>
+          {!isMe && renderAvatar(false)}
+          <Card style={[styles.inviteCard, isMe ? styles.inviteCardMe : styles.inviteCardOther, { backgroundColor: cardBg, borderColor: border }]}>
             <View style={styles.inviteHeader}>
-              <View style={[styles.cardIconBg, { backgroundColor: colors.primary[100] }]}>
-                <Ionicons name="checkmark-circle" size={20} color={colors.primaryAction} />
+              <View style={[styles.cardIconBg, { backgroundColor: colors.primarySoft || bg }]}>
+                <Ionicons name="checkmark-circle" size={20} color={primary} />
               </View>
               <View style={styles.inviteHeaderInfo}>
-                <Text style={styles.inviteTitle} numberOfLines={1}>{themeIcon} {themeTitle}</Text>
-                <Text style={styles.inviteSubtext} numberOfLines={1}>
+                <Text style={[styles.inviteTitle, { color: textMain }]} numberOfLines={1}>{themeIcon} {themeTitle}</Text>
+                <Text style={[styles.inviteSubtext, { color: textMuted }]} numberOfLines={1}>
                   {isCreator ? '我' : item.user_id} 发起了打卡邀请
                 </Text>
               </View>
             </View>
-            <View style={styles.inviteDivider} />
+            <View style={[styles.inviteDivider, { backgroundColor: border }]} />
 
             {isPending && !isCreator ? (
               <Button
@@ -720,9 +875,7 @@ export default function ChatScreen({
 
             <Text style={styles.inviteTime}>{formatLocalDateTime(item.created_at)}</Text>
           </Card>
-          {isMe && (
-            <Avatar fallback="我" size={30} style={styles.bubbleAvatar} />
-          )}
+          {isMe && renderAvatar(true)}
         </View>
       );
     }
@@ -735,13 +888,7 @@ export default function ChatScreen({
 
       return (
         <View style={[styles.bubbleRow, isMe ? styles.bubbleRowMe : styles.bubbleRowOther]}>
-          {!isMe && (
-            <Avatar
-              fallback={item.user_id === 'momo' ? 'M' : '苞'}
-              size={30}
-              style={styles.bubbleAvatar}
-            />
-          )}
+          {!isMe && renderAvatar(false)}
           <Card style={[styles.gameCard, isMe ? styles.gameCardMe : styles.gameCardOther]}>
             <View style={styles.inviteHeader}>
               <View style={[styles.cardIconBg, { backgroundColor: colors.neutral[200] }]}>
@@ -763,9 +910,7 @@ export default function ChatScreen({
             </Button>
             <Text style={styles.inviteTime}>{formatLocalDateTime(item.created_at)}</Text>
           </Card>
-          {isMe && (
-            <Avatar fallback="我" size={30} style={styles.bubbleAvatar} />
-          )}
+          {isMe && renderAvatar(true)}
         </View>
       );
     }
@@ -778,13 +923,7 @@ export default function ChatScreen({
 
       return (
         <View style={[styles.bubbleRow, isMe ? styles.bubbleRowMe : styles.bubbleRowOther]}>
-          {!isMe && (
-            <Avatar
-              fallback={item.user_id === 'momo' ? 'M' : '苞'}
-              size={30}
-              style={styles.bubbleAvatar}
-            />
-          )}
+          {!isMe && renderAvatar(false)}
           <Card style={[styles.gameCard, isMe ? styles.gameCardMe : styles.gameCardOther]}>
             <View style={styles.inviteHeader}>
               <View style={[styles.cardIconBg, { backgroundColor: colors.coral[100] }]}>
@@ -806,75 +945,59 @@ export default function ChatScreen({
             </Button>
             <Text style={styles.inviteTime}>{formatLocalDateTime(item.created_at)}</Text>
           </Card>
-          {isMe && (
-            <Avatar fallback="我" size={30} style={styles.bubbleAvatar} />
-          )}
+          {isMe && renderAvatar(true)}
         </View>
       );
     }
 
-    // ── Checkin Post (Phase 2) ──
+    // ── Checkin Post ──
     if (msgType === 'checkin_post') {
       const metadata = item.metadata || {};
       const themeIcon = metadata.theme_icon || '✨';
       const themeTitle = metadata.theme_title || '打卡';
       const mediaUrls = metadata.media_urls || [];
-      // Support both new (today_count) and legacy (record_count) metadata
       const todayCount = metadata.today_count || metadata.record_count || 0;
       const senderLabel = isMe ? '我' : item.user_id;
 
       return (
         <View style={[styles.bubbleRow, isMe ? styles.bubbleRowMe : styles.bubbleRowOther]}>
-          {!isMe && (
-            <Avatar
-              fallback={item.user_id === 'momo' ? 'M' : '苞'}
-              size={30}
-              style={styles.bubbleAvatar}
-            />
-          )}
-          <Card style={[styles.postCard, isMe ? styles.postCardMe : styles.postCardOther]}>
-            {/* Post header */}
+          {!isMe && renderAvatar(false)}
+          <Card style={[styles.postCard, isMe ? styles.postCardMe : styles.postCardOther, { backgroundColor: cardBg, borderColor: border }]}>
             <View style={styles.postHeader}>
-              <View style={[styles.cardIconBg, { backgroundColor: colors.primary[100] }]}>
-                <Ionicons name="ribbon-outline" size={18} color={colors.primaryAction} />
+              <View style={[styles.cardIconBg, { backgroundColor: colors.primarySoft || bg }]}>
+                <Ionicons name="ribbon-outline" size={18} color={primary} />
               </View>
-              <Text style={styles.postHeaderTitle} numberOfLines={1}>{themeIcon} {themeTitle}</Text>
+              <Text style={[styles.postHeaderTitle, { color: primary }]} numberOfLines={1}>{themeIcon} {themeTitle}</Text>
             </View>
 
-            {/* Post divider */}
-            <View style={styles.postDivider} />
+            <View style={[styles.postDivider, { backgroundColor: border }]} />
 
-            {/* Content */}
             {item.content ? (
-              <Text style={styles.postContent}>{item.content}</Text>
+              <Text style={[styles.postContent, { color: textMain }]}>{item.content}</Text>
             ) : null}
 
-            {/* Image grid */}
             {mediaUrls.length > 0 && (
               <View style={styles.postImageGrid}>
                 {mediaUrls.slice(0, 9).map((url, index) => (
-                    <CachedImage
-                      key={index}
-                      source={{ uri: url }}
-                      style={[
-                        styles.postImageThumb,
-                        mediaUrls.length === 1 && styles.postImageSingle,
-                      ]}
-                      contentFit="cover"
-                    />
+                  <CachedImage
+                    key={index}
+                    source={{ uri: url }}
+                    style={[
+                      styles.postImageThumb,
+                      mediaUrls.length === 1 && styles.postImageSingle,
+                    ]}
+                    contentFit="cover"
+                  />
                 ))}
               </View>
             )}
 
-            {/* Footer: personal count + time */}
             <View style={styles.postFooter}>
-              <Text style={styles.postCount}>{senderLabel}今日第 {todayCount} 次打卡</Text>
-              <Text style={styles.postTime}>{formatLocalDateTime(item.created_at)}</Text>
+              <Text style={[styles.postCount, { color: primary }]}>{senderLabel}今日第 {todayCount} 次打卡</Text>
+              <Text style={[styles.postTime, { color: textMuted }]}>{formatLocalDateTime(item.created_at)}</Text>
             </View>
           </Card>
-          {isMe && (
-            <Avatar fallback="我" size={30} style={styles.bubbleAvatar} />
-          )}
+          {isMe && renderAvatar(true)}
         </View>
       );
     }
@@ -886,13 +1009,7 @@ export default function ChatScreen({
       if (imageUrl) {
         return (
           <View style={[styles.bubbleRow, isMe ? styles.bubbleRowMe : styles.bubbleRowOther]}>
-            {!isMe && (
-              <Avatar
-                fallback={item.user_id === 'momo' ? 'M' : '苞'}
-                size={30}
-                style={styles.bubbleAvatar}
-              />
-            )}
+            {!isMe && renderAvatar(false)}
             <TouchableOpacity
               style={[styles.imageBubble, isMe ? styles.imageBubbleMe : styles.imageBubbleOther]}
               onLongPress={() => handleMessageLongPress(item)}
@@ -903,11 +1020,9 @@ export default function ChatScreen({
                 style={styles.chatImage}
                 contentFit="cover"
               />
-              <Text style={styles.imageTime}>{formatLocalDateTime(item.created_at)}</Text>
+              <Text style={[styles.imageTime, { color: textMuted }]}>{formatLocalDateTime(item.created_at)}</Text>
             </TouchableOpacity>
-            {isMe && (
-              <Avatar fallback="我" size={30} style={styles.bubbleAvatar} />
-            )}
+            {isMe && renderAvatar(true)}
           </View>
         );
       }
@@ -917,37 +1032,41 @@ export default function ChatScreen({
     const quoteData = item.metadata?.quote;
     return (
       <View style={[styles.bubbleRow, isMe ? styles.bubbleRowMe : styles.bubbleRowOther]}>
-        {!isMe && (
-          <Avatar
-            fallback={item.user_id === 'momo' ? 'M' : '苞'}
-            size={30}
-            style={styles.bubbleAvatar}
-          />
-        )}
+        {!isMe && renderAvatar(false)}
         <TouchableOpacity
-          style={[styles.textBubble, isMe ? styles.textBubbleMe : styles.textBubbleOther]}
+          style={[
+            styles.textBubble,
+            isMe
+              ? [styles.textBubbleMe, { backgroundColor: primary }]
+              : [styles.textBubbleOther, { backgroundColor: cardBg, borderColor: border, borderWidth: 1 }],
+          ]}
           onLongPress={() => handleMessageLongPress(item)}
           activeOpacity={0.8}
         >
           {quoteData && (
-            <View style={[styles.quoteBlock, isMe ? styles.quoteBlockMe : styles.quoteBlockOther]}>
-              <Text style={styles.quoteSender}>
-                {quoteData.user_id === userId ? '我' : quoteData.user_id}
+            <View
+              style={[
+                styles.quoteBlock,
+                isMe
+                  ? [styles.quoteBlockMe, { backgroundColor: 'rgba(255,255,255,0.15)', borderLeftColor: meTextColor }]
+                  : [styles.quoteBlockOther, { backgroundColor: bg, borderLeftColor: primary }],
+              ]}
+            >
+              <Text style={[styles.quoteSender, { color: isMe ? meTextColor : primary }]}>
+                {quoteData.user_id === 'momi' ? 'momi 🐾' : quoteData.user_id === userId ? '我' : quoteData.user_id}
               </Text>
-              <Text style={styles.quoteContent} numberOfLines={2}>
+              <Text style={[styles.quoteContent, { color: isMe ? meTimeColor : textMuted }]} numberOfLines={2}>
                 {quoteData.content}
               </Text>
             </View>
           )}
-          <Text style={styles.messageText}>{item.content}</Text>
-          <Text style={styles.messageTime}>{formatLocalDateTime(item.created_at)}</Text>
+          <Text style={[styles.messageText, { color: isMe ? meTextColor : textMain }]}>{item.content}</Text>
+          <Text style={[styles.messageTime, { color: isMe ? meTimeColor : textMuted }]}>{formatLocalDateTime(item.created_at)}</Text>
         </TouchableOpacity>
-        {isMe && (
-          <Avatar fallback="我" size={30} style={styles.bubbleAvatar} />
-        )}
+        {isMe && renderAvatar(true)}
       </View>
     );
-  }, [userId, handleMessageLongPress]);
+  }, [userId, handleMessageLongPress, avatars, primary, bg, cardBg, textMain, textMuted, border, accent, meTextColor, meTimeColor, theme]);
 
   // ─── Loading ───
   if (loading) {
@@ -961,8 +1080,8 @@ export default function ChatScreen({
   }
 
   const chatContent = (
-    <View style={styles.container}>
-      <StatusBar barStyle="dark-content" />
+    <View style={[styles.container, { backgroundColor: bg }]}>
+      <StatusBar barStyle={theme?.statusBarStyle || 'dark-content'} backgroundColor={bg} />
 
       {/* Header */}
       <AppHeader
@@ -980,7 +1099,7 @@ export default function ChatScreen({
             <IconButton
               icon="checkmark-circle-outline"
               size={24}
-              color={colors.primaryAction}
+              color={primary}
               onPress={onNavigateCheckinList}
               accessibilityLabel="全部打卡"
             />
@@ -990,12 +1109,12 @@ export default function ChatScreen({
 
       {/* Active Themes Bar */}
       {activeThemes.length > 0 && (
-        <View style={styles.themeBar}>
+        <View style={[styles.themeBar, { backgroundColor: cardBg, borderBottomColor: border }]}>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.themeBarContent}>
             {activeThemes.map((theme) => (
               <TouchableOpacity
                 key={theme.id}
-                style={styles.themeChip}
+                style={[styles.themeChip, { backgroundColor: cardBg, borderColor: border, borderWidth: 1 }]}
                 onPress={() => {
                   setSelectedTheme(theme);
                   setCheckinRecordVisible(true);
@@ -1003,7 +1122,7 @@ export default function ChatScreen({
                 activeOpacity={0.7}
               >
                 <Text style={styles.themeChipIcon}>{theme.icon}</Text>
-                <Text style={styles.themeChipText}>{theme.title}</Text>
+                <Text style={[styles.themeChipText, { color: primary }]}>{theme.title}</Text>
               </TouchableOpacity>
             ))}
           </ScrollView>
@@ -1017,7 +1136,7 @@ export default function ChatScreen({
         inverted={true}
         keyExtractor={(item) => item.id.toString()}
         renderItem={renderMessage}
-        extraData={messages.length}
+        extraData={`${theme?.id || 'default'}_${messages.length}`}
         contentContainerStyle={styles.messagesList}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
@@ -1030,50 +1149,29 @@ export default function ChatScreen({
         onContentSizeChange={handleContentSizeChange}
         ListEmptyComponent={
           <View style={styles.emptyContainer}>
-            <View style={styles.emptyIconWrap}>
-              <Ionicons name="chatbubble-ellipses-outline" size={36} color={colors.primary[300]} />
+            <View style={[styles.emptyIconWrap, { backgroundColor: colors.primarySoft || bg }]}>
+              <Ionicons name="chatbubble-ellipses-outline" size={36} color={primary} />
             </View>
-            <Text style={styles.emptyText}>从一句话开始</Text>
-            <Text style={styles.emptySubText}>记录我们的日常</Text>
+            <Text style={[styles.emptyText, { color: textMain }]}>从一句话开始</Text>
+            <Text style={[styles.emptySubText, { color: textMuted }]}>记录我们的日常</Text>
           </View>
         }
       />
 
-      <View style={[styles.composer, { marginBottom: composerBottomOffset }]}>
-      {/* Quote Preview Bar */}
-      {quotedMessage && (
-        <View style={styles.quotePreviewBar}>
-          <View style={styles.quotePreviewLeft} />
-          <View style={styles.quotePreviewContent}>
-            <Text style={styles.quotePreviewSender}>
-              {quotedMessage.user_id === userId ? '我' : quotedMessage.user_id}
-            </Text>
-            <Text style={styles.quotePreviewText} numberOfLines={1}>
-              {quotedMessage.content}
-            </Text>
-          </View>
-          <TouchableOpacity
-            style={styles.quotePreviewClose}
-            onPress={() => setQuotedMessage(null)}
-            activeOpacity={0.7}
-          >
-            <Ionicons name="close" size={14} color={colors.primaryAction} />
-          </TouchableOpacity>
-        </View>
-      )}
+      <View style={[styles.composer, { marginBottom: composerBottomOffset, backgroundColor: cardBg }]}>
 
       {/* Plus Panel (4 列换行网格) */}
       {plusPanelVisible && (
-        <View style={styles.plusPanel}>
+        <View style={[styles.plusPanel, { backgroundColor: cardBg, borderTopColor: border }]}>
           {[
-            { icon: 'checkmark-circle-outline', bg: colors.primary[100], color: colors.primaryAction, label: '二人打卡', onPress: () => { setPlusPanelVisible(false); setCheckinCreateVisible(true); } },
-            { icon: 'images-outline', bg: colors.mint[100], color: colors.mint[600], label: '发送照片', onPress: handleSendPhoto },
-            { icon: 'restaurant-outline', bg: colors.amber ? colors.amber[100] : colors.primary[100], color: colors.amber ? colors.amber[600] : colors.primaryAction, label: 'momi厨房', onPress: () => { setPlusPanelVisible(false); onNavigateMomiKitchen && onNavigateMomiKitchen(); } },
-            { icon: 'color-palette-outline', bg: colors.partnerSoft, color: colors.primaryAction, label: '主题换装', onPress: () => { setPlusPanelVisible(false); onNavigateThemeSelector && onNavigateThemeSelector(); } },
-            { icon: 'game-controller-outline', bg: colors.neutral[200], color: colors.neutral[600], label: '五子棋', onPress: handleOpenGomokuLobby },
-            { icon: 'brush-outline', bg: colors.coral[100], color: colors.coral[600], label: '你画我猜', onPress: handleOpenDrawGuessLobby },
-            { icon: 'paper-plane-outline', bg: colors.primary[100], color: colors.primaryAction, label: '小纸条', onPress: handleOpenEphemeralNote },
-            { icon: 'mic-outline', bg: colors.mint[100], color: colors.mint[600], label: '语音信箱', onPress: handleOpenVoiceMailbox },
+            { icon: 'checkmark-circle-outline', bg: colors.primarySoft || bg, color: primary, label: '二人打卡', onPress: () => { setPlusPanelVisible(false); setCheckinCreateVisible(true); } },
+            { icon: 'images-outline', bg: colors.primarySoft || bg, color: primary, label: '发送照片', onPress: handleSendPhoto },
+            { icon: 'restaurant-outline', bg: colors.primarySoft || bg, color: primary, label: 'momi厨房', onPress: () => { setPlusPanelVisible(false); onNavigateMomiKitchen && onNavigateMomiKitchen(); } },
+            { icon: 'color-palette-outline', bg: colors.primarySoft || bg, color: primary, label: '主题换装', onPress: () => { setPlusPanelVisible(false); onNavigateThemeSelector && onNavigateThemeSelector(); } },
+            { icon: 'game-controller-outline', bg: colors.primarySoft || bg, color: primary, label: '五子棋', onPress: handleOpenGomokuLobby },
+            { icon: 'brush-outline', bg: colors.primarySoft || bg, color: primary, label: '你画我猜', onPress: handleOpenDrawGuessLobby },
+            { icon: 'paper-plane-outline', bg: colors.primarySoft || bg, color: primary, label: '小纸条', onPress: handleOpenEphemeralNote },
+            { icon: 'mic-outline', bg: colors.primarySoft || bg, color: primary, label: '语音信箱', onPress: handleOpenVoiceMailbox },
           ].map((item, idx) => (
             <TouchableOpacity
               key={idx}
@@ -1086,44 +1184,97 @@ export default function ChatScreen({
               <View style={[styles.plusPanelIconBg, { backgroundColor: item.bg }]}>
                 <Ionicons name={item.icon} size={24} color={item.color} />
               </View>
-              <Text style={styles.plusPanelLabel}>{item.label}</Text>
+              <Text style={[styles.plusPanelLabel, { color: textMain }]}>{item.label}</Text>
             </TouchableOpacity>
           ))}
         </View>
       )}
 
+      {/* @momi 快速提及候选气泡 */}
+      {showMomiMention && (
+        <View style={styles.mentionPopupWrap}>
+          <TouchableOpacity
+            style={[styles.mentionPopupCard, { backgroundColor: cardBg, borderColor: border, shadowColor: primary }]}
+            onPress={handleSelectMomiMention}
+            activeOpacity={0.8}
+            accessibilityRole="button"
+            accessibilityLabel="提及 momi 小助手"
+          >
+            <View style={[styles.mentionAvatarWrap, { backgroundColor: colors.primarySoft || bg }]}>
+              <Text style={{ fontSize: 16 }}>🐾</Text>
+            </View>
+            <View style={styles.mentionInfoWrap}>
+              <View style={styles.mentionTitleRow}>
+                <Text style={[styles.mentionName, { color: primary }]}>momi</Text>
+                <View style={[styles.mentionBadge, { backgroundColor: colors.primarySoft || bg }]}>
+                  <Text style={[styles.mentionBadgeText, { color: primary }]}>专属小助手</Text>
+                </View>
+              </View>
+              <Text style={[styles.mentionDesc, { color: textMuted }]}>随时 @ 问我菜谱、甜蜜日常或聊天~</Text>
+            </View>
+            <View style={[styles.mentionActionChip, { backgroundColor: bg }]}>
+              <Text style={[styles.mentionActionText, { color: primary }]}>@momi</Text>
+              <Ionicons name="add" size={14} color={primary} />
+            </View>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {/* 引用消息条预览 */}
+      {quotedMessage && (
+        <View style={[styles.quotePreviewBar, { backgroundColor: cardBg, borderTopColor: border }]}>
+          <View style={[styles.quotePreviewLeft, { backgroundColor: primary }]} />
+          <View style={styles.quotePreviewContent}>
+            <Text style={[styles.quotePreviewSender, { color: primary }]}>
+              引用 {quotedMessage.user_id === 'momi' ? 'momi 🐾' : quotedMessage.user_id === userId ? '我' : quotedMessage.user_id}
+            </Text>
+            <Text style={[styles.quotePreviewText, { color: textMuted }]} numberOfLines={1}>
+              {quotedMessage.content}
+            </Text>
+          </View>
+          <TouchableOpacity
+            style={[styles.quotePreviewClose, { backgroundColor: colors.primarySoft || bg }]}
+            onPress={() => setQuotedMessage(null)}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            accessibilityLabel="取消引用"
+          >
+            <Ionicons name="close" size={14} color={primary} />
+          </TouchableOpacity>
+        </View>
+      )}
+
       {/* Input Bar */}
-      <View style={styles.inputBar}>
+      <View style={[styles.inputBar, { backgroundColor: cardBg, borderTopColor: border }]}>
         <TouchableOpacity
-          style={styles.plusButton}
+          style={[styles.plusButton, { backgroundColor: bg }]}
           onPress={() => setPlusPanelVisible(!plusPanelVisible)}
           activeOpacity={0.7}
         >
           <Ionicons
             name={plusPanelVisible ? 'close' : 'add'}
             size={24}
-            color={colors.primaryAction}
+            color={primary}
           />
         </TouchableOpacity>
         <TextInput
-          style={styles.textInput}
+          style={[styles.textInput, { backgroundColor: bg, color: textMain }]}
           value={inputText}
-          onChangeText={setInputText}
+          onChangeText={handleInputChange}
           placeholder="说点什么..."
-          placeholderTextColor={colors.textMuted}
+          placeholderTextColor={textMuted}
           multiline
           maxLength={500}
         />
         <TouchableOpacity
-          style={[styles.sendBtn, (!inputText.trim() || sending) && styles.sendBtnDisabled]}
+          style={[styles.sendBtn, { backgroundColor: primary }, (!inputText.trim() || sending) && [styles.sendBtnDisabled, { backgroundColor: border }]]}
           onPress={sendMessage}
           disabled={!inputText.trim() || sending}
           activeOpacity={0.7}
         >
           {sending ? (
-            <ActivityIndicator color="#FFFFFF" size="small" />
+            <ActivityIndicator color={meTextColor} size="small" />
           ) : (
-            <Ionicons name="send" size={18} color="#FFFFFF" />
+            <Ionicons name="send" size={18} color={meTextColor} />
           )}
         </TouchableOpacity>
       </View>
@@ -1247,6 +1398,39 @@ const styles = StyleSheet.create({
   },
   bubbleAvatar: {
     marginTop: 2,
+  },
+
+  // ── momi AI Chat Bubble (功能3) ──
+  momiChatBubble: {
+    backgroundColor: '#FFFFFF',
+    paddingHorizontal: spacing[3] + 2,
+    paddingVertical: spacing[2] + 2,
+    borderRadius: radius.lg,
+    borderTopLeftRadius: 4,
+    borderWidth: 1,
+    borderColor: '#FFD6C7',
+    maxWidth: '75%',
+    marginLeft: spacing[1] + 2,
+  },
+  momiBadgeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 4,
+    gap: 6,
+  },
+  momiBadge: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#FF6B35',
+  },
+  momiTime: {
+    fontSize: 10,
+    color: colors.textMuted,
+  },
+  momiMessageText: {
+    ...typography.body,
+    color: '#2D1B00',
+    lineHeight: 20,
   },
 
   // ── Text Bubble ──
@@ -1609,5 +1793,78 @@ const styles = StyleSheet.create({
     ...typography.label,
     color: colors.textSecondary,
     fontWeight: '600',
+  },
+
+  // ── @momi 提及候选弹窗 ──
+  mentionPopupWrap: {
+    paddingHorizontal: spacing[3],
+    paddingBottom: spacing[2],
+  },
+  mentionPopupCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: radius.lg,
+    paddingVertical: spacing[2] + 2,
+    paddingHorizontal: spacing[3],
+    borderWidth: 1.5,
+    borderColor: '#FFD6C7',
+    shadowColor: '#FF6B35',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.12,
+    shadowRadius: 6,
+    elevation: 4,
+  },
+  mentionAvatarWrap: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: '#FFF0EB',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: spacing[2],
+  },
+  mentionInfoWrap: {
+    flex: 1,
+  },
+  mentionTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  mentionName: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#FF6B35',
+  },
+  mentionBadge: {
+    backgroundColor: '#FFF0EB',
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: 8,
+  },
+  mentionBadgeText: {
+    fontSize: 10,
+    color: '#FF6B35',
+    fontWeight: '600',
+  },
+  mentionDesc: {
+    fontSize: 11,
+    color: colors.textSecondary,
+    marginTop: 1,
+  },
+  mentionActionChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    backgroundColor: colors.primary[50],
+    paddingHorizontal: spacing[2],
+    paddingVertical: 4,
+    borderRadius: radius.pill,
+  },
+  mentionActionText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: colors.primaryAction,
   },
 });
