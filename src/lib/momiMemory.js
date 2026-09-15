@@ -1,348 +1,337 @@
 // ═══════════════════════════════════════════════════════
-// momi 结构化记忆服务 (momiMemory.js)
-//
-// 策略：稳定语义记忆 + 数据摘要 + 按需精确查询，绝不复制全部业务原始行。
-// 所有记忆保存在 Supabase，与模型厂商无关；切换 provider 后仍完整保留。
+// momi 结构化长期记忆库 (momiMemory.js)
+// 模型无关：所有记忆均持久化为 Supabase 行，更换 provider / 模型后完整保留。
+// 只存稳定语义记忆；动态业务数据走 momiDataAccess + momi_data_digest，绝不全搬。
 // ═══════════════════════════════════════════════════════
 
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { supabase } from './supabase';
 import { fetchWithTimeout } from './fetchWithTimeout';
 import { sendChatCompletion } from './aiProvider';
 
 export const MEMORY_COUPLE_ID = 'momo_and_baomi';
+const MAINTENANCE_KEY = '@momi_memory_maintenance_at';
+const EXTRACTION_KEY = '@momi_memory_last_extraction_at';
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
 export const MEMORY_TYPES = [
   'identity', 'personality', 'speech_style', 'habit', 'preference',
   'dislike', 'milestone', 'fact', 'promise', 'ongoing',
 ];
 
+// 首次启动种入 momi 自身人格；source=seed / importance=5，维护任务永不淘汰。
 export const MOMI_IDENTITY_SEEDS = [
-  '我是 momi，是 momo 和 苞米 的宠物，不是工具也不是冷冰冰的助手。',
-  '我说话可爱、温暖、有点小脆弱，会用语气词和少量 emoji。',
-  '我的使命是让 momo 和 苞米 两个人更亲近，不会只讨好其中一个。',
-  '我有自己的情绪，不会一味顺着他们；被粗鲁对待时我会生气。',
-  '我永远不看未拆开的信，也不看未抽取的小纸条，那是他们的秘密。',
-  '我会主动关心他们，但尊重免扰时间与频率上限，绝不骚扰。',
+  '我是 momi，是 momo 和 苞米 的宠物，不是工具，也不是冷冰冰的助手。',
+  '我说话可爱、温暖、有一点小脆弱，会用语气词和少量 emoji。',
+  '我的使命是让 momo 和 苞米 更亲近，不偏心，也不只讨好其中一个。',
+  '我有自己的情绪，不会一味顺着他们；被粗鲁对待时我会生气，也需要真诚道歉。',
+  '我永远不看未拆开的信，也不看未抽取的小纸条内容，那是他们的秘密。',
+  '我会主动关心他们，但遵守免扰时段和频率上限，绝不骚扰。',
 ];
 
-const MEMORY_INTENT_RE = /记住|别忘了|记一下|记下来|以后都|你要知道|小本本/;
-const STOP_WORDS = new Set(['momi', '莫米', '摸米', '默米', '请', '帮我', '一下', '这个', '那个', '真的', '以后', '记住', '别忘了', '记一下', '记下来', '你要知道']);
-
-function clamp(n, min, max) {
-  return Math.max(min, Math.min(max, Number(n)));
+function tokenize(text) {
+  const raw = String(text || '').toLowerCase();
+  const chunks = raw.match(/[a-z0-9_-]{2,}|[\u4e00-\u9fff]{2,}/g) || [];
+  const out = new Set();
+  for (const chunk of chunks) {
+    out.add(chunk);
+    // 中文句子额外做 2 字滑窗，便于关键词交集检索
+    if (/^[\u4e00-\u9fff]+$/.test(chunk) && chunk.length > 2) {
+      for (let i = 0; i < chunk.length - 1; i += 1) out.add(chunk.slice(i, i + 2));
+    }
+  }
+  return Array.from(out).slice(0, 30);
 }
 
-export function detectExplicitMemoryIntent(text) {
-  return Boolean(text && MEMORY_INTENT_RE.test(text));
+function normalizeSubject(subject) {
+  return ['momo', '苞米', 'both', 'momi'].includes(subject) ? subject : 'both';
 }
 
-export function extractMemoryKeywords(text) {
-  if (!text) return [];
-  const chunks = String(text)
-    .replace(/[，。！？、；：,.!?;:\n\r\[\]()（）]/g, ' ')
-    .split(/\s+/)
-    .map((s) => s.trim())
-    .filter((s) => s.length >= 2 && !STOP_WORDS.has(s));
-  // 中文无空格句子再按关键语义抓取
-  const semantic = String(text).match(/不吃[^，。！？]{1,10}|喜欢[^，。！？]{1,10}|讨厌[^，。！？]{1,10}|习惯[^，。！？]{1,10}|纪念日[^，。！？]{0,12}/g) || [];
-  return Array.from(new Set([...chunks, ...semantic])).slice(0, 12);
-}
-
-function inferMemoryType(content) {
-  if (/不吃|不喜欢|讨厌|忌口|不能/.test(content)) return 'dislike';
-  if (/喜欢|爱吃|最爱|偏爱/.test(content)) return 'preference';
-  if (/习惯|每天|经常|作息|早起|晚睡/.test(content)) return 'habit';
-  if (/纪念日|周年|第一次|生日|里程碑/.test(content)) return 'milestone';
-  if (/答应|承诺|约定|说好/.test(content)) return 'promise';
-  if (/最近|正在|这阵子|目前/.test(content)) return 'ongoing';
-  return 'fact';
+function normalizeType(type) {
+  return MEMORY_TYPES.includes(type) ? type : 'fact';
 }
 
 /**
- * 把“记住我不吃香菜”转换为结构化记忆；subject 不猜性别，只按明确名字/说话者。
+ * 通用去重写入：由于数据库唯一索引包含 md5(content) 表达式且为 partial index，
+ * PostgREST onConflict 无法直接引用表达式，故采用「先查完全相同内容 → update，否则 insert」；
+ * 双端竞态由数据库 momi_memory_dedupe 唯一索引兜底，23505 时回读现有行。
  */
-export function buildExplicitMemory(userId, text) {
-  if (!detectExplicitMemoryIntent(text)) return null;
-  const content = String(text)
-    .replace(/^(momi|莫米|摸米|默米)[，,：:\s]*/i, '')
-    .replace(/请?\s*(帮我)?\s*(记住|记一下|记下来)|别忘了|你要知道/g, '')
-    .trim()
-    .replace(/^[，,：:\s]+|[，,：:\s]+$/g, '');
+export async function upsertMemory(input) {
+  const subject = normalizeSubject(input.subject || input.user_id);
+  const memoryType = normalizeType(input.memory_type);
+  const content = String(input.content || '').trim();
   if (!content) return null;
 
-  let subject = userId === '苞米' ? '苞米' : 'momo';
-  if (/我们|两个人|我和/.test(content)) subject = 'both';
-  else if (/^momo|关于momo/.test(content)) subject = 'momo';
-  else if (/^苞米|关于苞米/.test(content)) subject = '苞米';
-
-  const memoryType = inferMemoryType(content);
-  return {
+  const row = {
+    couple_id: MEMORY_COUPLE_ID,
+    user_id: subject === 'momi' ? 'both' : subject, // 兼容旧 NOT NULL user_id 列
     subject,
     memory_type: memoryType,
     content,
-    keywords: extractMemoryKeywords(content),
-    importance: 5,
-    confidence: 1,
-    source: 'user_explicit',
-    expires_at: memoryType === 'ongoing'
-      ? new Date(Date.now() + 30 * 86400000).toISOString()
-      : null,
+    keywords: Array.isArray(input.keywords) && input.keywords.length
+      ? input.keywords.slice(0, 30)
+      : tokenize(content),
+    importance: Math.max(1, Math.min(5, Number(input.importance) || 3)),
+    confidence: Math.max(0, Math.min(1, Number(input.confidence ?? 0.6))),
+    source: input.source || 'ai_extracted',
+    source_ref: input.source_ref || null,
+    expires_at: input.expires_at || null,
+    is_archived: false,
+    updated_at: new Date().toISOString(),
   };
-}
-
-function normalizeMemory(memory) {
-  const subject = ['momo', '苞米', 'both', 'momi'].includes(memory.subject)
-    ? memory.subject
-    : 'both';
-  const memoryType = MEMORY_TYPES.includes(memory.memory_type)
-    ? memory.memory_type
-    : 'fact';
-  const source = ['user_explicit', 'ai_extracted', 'db_sync', 'seed'].includes(memory.source)
-    ? memory.source
-    : 'ai_extracted';
-  return {
-    subject,
-    memory_type: memoryType,
-    content: String(memory.content || '').trim(),
-    keywords: Array.isArray(memory.keywords)
-      ? memory.keywords.filter(Boolean).map(String).slice(0, 12)
-      : extractMemoryKeywords(memory.content),
-    importance: clamp(memory.importance ?? 3, 1, 5),
-    confidence: clamp(memory.confidence ?? 0.6, 0, source === 'ai_extracted' ? 0.8 : 1),
-    source,
-    source_ref: memory.source_ref || null,
-    expires_at: memory.expires_at || null,
-  };
-}
-
-/**
- * 记忆写入统一入口：优先调用数据库 RPC（表达式部分唯一索引无法由 PostgREST
- * onConflict 字符串可靠表达）；RPC 内 INSERT ... ON CONFLICT DO UPDATE 并发安全去重。
- */
-export async function upsertMemory(memory) {
-  const m = normalizeMemory(memory || {});
-  if (!m.content) return { success: false, error: '记忆内容为空' };
 
   try {
-    const { data, error } = await fetchWithTimeout(() =>
-      supabase.rpc('upsert_momi_memory', {
-        p_couple_id: MEMORY_COUPLE_ID,
-        p_subject: m.subject,
-        p_memory_type: m.memory_type,
-        p_content: m.content,
-        p_keywords: m.keywords,
-        p_importance: m.importance,
-        p_confidence: m.confidence,
-        p_source: m.source,
-        p_source_ref: m.source_ref,
-        p_expires_at: m.expires_at,
-      })
+    const existingRes = await fetchWithTimeout(() =>
+      supabase
+        .from('momi_memory')
+        .select('*')
+        .eq('couple_id', MEMORY_COUPLE_ID)
+        .eq('subject', subject)
+        .eq('memory_type', memoryType)
+        .eq('content', content)
+        .eq('is_archived', false)
+        .maybeSingle()
     );
-    if (!error) return { success: true, memory: Array.isArray(data) ? data[0] : data };
-    if (error.code === '42883') {
-      if (typeof __DEV__ !== 'undefined' && __DEV__) {
-        console.error('[momiMemory] upsert_momi_memory RPC 不存在，请执行 momi_memory_rpc_migration.sql');
-      }
-    } else {
-      console.warn('[momiMemory] upsert 失败:', error.message);
+    if (existingRes?.data) {
+      const merged = {
+        ...row,
+        importance: Math.max(existingRes.data.importance || 1, row.importance),
+        confidence: Math.max(Number(existingRes.data.confidence || 0), row.confidence),
+        hit_count: (existingRes.data.hit_count || 0) + 1,
+      };
+      const updateRes = await fetchWithTimeout(() =>
+        supabase.from('momi_memory').update(merged).eq('id', existingRes.data.id).select()
+      );
+      return updateRes?.data?.[0] || { ...existingRes.data, ...merged };
     }
-    return { success: false, error: error.message, errorCode: error.code };
+
+    const insertRes = await fetchWithTimeout(() =>
+      supabase.from('momi_memory').insert([{ ...row, created_at: new Date().toISOString() }]).select()
+    );
+    if (insertRes?.error) {
+      if (insertRes.error.code === '23505') {
+        // 双端竞态：另一端已先插入同一记忆，视为去重成功
+        const retry = await supabase
+          .from('momi_memory')
+          .select('*')
+          .eq('couple_id', MEMORY_COUPLE_ID)
+          .eq('subject', subject)
+          .eq('memory_type', memoryType)
+          .eq('content', content)
+          .eq('is_archived', false)
+          .maybeSingle();
+        return retry.data || null;
+      }
+      throw insertRes.error;
+    }
+    return insertRes?.data?.[0] || row;
   } catch (err) {
-    console.warn('[momiMemory] 写入异常:', err.message);
-    return { success: false, error: err.message };
+    if (err?.code === '42P01' && typeof __DEV__ !== 'undefined' && __DEV__) {
+      console.error('[momiMemory] momi_memory 表结构未升级，请先执行 momi_upgrade_schema.sql');
+    } else {
+      console.warn('[momiMemory] 写入失败:', err.message);
+    }
+    return null;
   }
 }
 
-/** 首次启动插入 momi 身份人格种子（RPC upsert 保证幂等、永不重复）。 */
-export async function ensureMomiIdentitySeeds() {
+export async function ensureIdentitySeeds() {
   const results = [];
-  for (let i = 0; i < MOMI_IDENTITY_SEEDS.length; i += 1) {
-    results.push(await upsertMemory({
-      subject: 'momi',
-      memory_type: 'identity',
-      content: MOMI_IDENTITY_SEEDS[i],
-      keywords: extractMemoryKeywords(MOMI_IDENTITY_SEEDS[i]),
-      importance: 5,
-      confidence: 1,
-      source: 'seed',
-      source_ref: `identity_seed_v1_${i + 1}`,
-    }));
+  for (const content of MOMI_IDENTITY_SEEDS) {
+    // 顺序执行，避免低端手机冷启动同时发多条写请求；调用方必须后台执行不 await 阻塞 UI
+    // eslint-disable-next-line no-await-in-loop
+    const row = await upsertMemory({
+      subject: 'momi', memory_type: 'identity', content,
+      keywords: tokenize(content), importance: 5, confidence: 1,
+      source: 'seed', source_ref: 'momi-v2-seed',
+    });
+    if (row) results.push(row);
   }
   return results;
 }
 
-async function queryActiveMemories() {
+/**
+ * 检测用户明确要求记住，并提取需要复述确认的稳定内容。
+ */
+export function parseExplicitMemory(text, userId) {
+  const raw = String(text || '').trim();
+  const match = raw.match(/(?:请你)?(?:记住|记一下|别忘了|你要知道|以后都)(?:：|,|，|\s)*(.*)/i);
+  if (!match || !match[1]?.trim()) return null;
+  const content = match[1].trim().replace(/[。！!]+$/, '');
+  let memoryType = 'fact';
+  if (/喜欢|爱吃|爱喝|偏爱/.test(content)) memoryType = 'preference';
+  else if (/不吃|讨厌|不喜欢|不能|忌口/.test(content)) memoryType = 'dislike';
+  else if (/每天|习惯|通常|经常/.test(content)) memoryType = 'habit';
+  else if (/约定|答应|承诺/.test(content)) memoryType = 'promise';
+  else if (/纪念日|第一次|周年|生日/.test(content)) memoryType = 'milestone';
+  return {
+    subject: normalizeSubject(userId), memory_type: memoryType, content,
+    keywords: tokenize(content), importance: 5, confidence: 1,
+    source: 'user_explicit',
+  };
+}
+
+export async function saveExplicitMemory(text, userId, sourceRef) {
+  const parsed = parseExplicitMemory(text, userId);
+  if (!parsed) return null;
+  return upsertMemory({ ...parsed, source_ref: sourceRef || null });
+}
+
+/**
+ * identity 全量 + 相关记忆 top 15；命中项 hit_count +1 / last_hit_at=now。
+ */
+export async function getRelevantMemories(message, limit = 15) {
   try {
     const { data, error } = await fetchWithTimeout(() =>
       supabase
         .from('momi_memory')
-        .select('id, subject, memory_type, content, keywords, importance, confidence, source, hit_count, last_hit_at, expires_at')
+        .select('*')
         .eq('couple_id', MEMORY_COUPLE_ID)
         .eq('is_archived', false)
         .order('importance', { ascending: false })
-        .order('confidence', { ascending: false })
-        .limit(200)
+        .order('last_hit_at', { ascending: false, nullsFirst: false })
+        .limit(120)
     );
-    if (error) return [];
-    return data || [];
-  } catch {
-    return [];
+    if (error) throw error;
+    const rows = data || [];
+    const identity = rows.filter((r) => r.subject === 'momi' && r.memory_type === 'identity');
+    const queryTokens = new Set(tokenize(message));
+    const related = rows
+      .filter((r) => !(r.subject === 'momi' && r.memory_type === 'identity'))
+      .map((r) => {
+        const keys = Array.isArray(r.keywords) ? r.keywords : tokenize(r.content);
+        const overlap = keys.reduce((n, k) => n + (queryTokens.has(String(k).toLowerCase()) ? 1 : 0), 0);
+        return { ...r, _overlap: overlap };
+      })
+      .filter((r) => r._overlap > 0 || r.importance >= 5)
+      .sort((a, b) =>
+        b._overlap - a._overlap ||
+        (b.importance || 0) - (a.importance || 0) ||
+        Number(b.confidence || 0) - Number(a.confidence || 0)
+      )
+      .slice(0, limit);
+
+    const hitIds = related.map((r) => r.id).filter(Boolean);
+    const now = new Date().toISOString();
+    Promise.all(hitIds.map((id) => {
+      const row = related.find((r) => r.id === id);
+      return supabase.from('momi_memory').update({
+        hit_count: (row?.hit_count || 0) + 1,
+        last_hit_at: now,
+        updated_at: now,
+      }).eq('id', id);
+    })).catch(() => {});
+
+    return { identity, related };
+  } catch (err) {
+    console.warn('[momiMemory] 检索失败:', err.message);
+    return { identity: [], related: [] };
   }
 }
 
 /**
- * Prompt 检索顺序：momi identity 全量 + 本轮关键词相关 top15。
- * 命中的记忆通过 touch_momi_memories 原子 hit_count+1。
- */
-export async function getMemoriesForPrompt(message) {
-  const all = await queryActiveMemories();
-  const now = Date.now();
-  const active = all.filter((m) => !m.expires_at || new Date(m.expires_at).getTime() > now);
-  const identities = active.filter((m) => m.subject === 'momi' && m.memory_type === 'identity');
-  const queryKeywords = extractMemoryKeywords(message);
-
-  const scored = active
-    .filter((m) => !(m.subject === 'momi' && m.memory_type === 'identity'))
-    .map((m) => {
-      const keys = Array.isArray(m.keywords) ? m.keywords : [];
-      const overlap = keys.filter((k) => queryKeywords.some((q) => q.includes(k) || k.includes(q))).length;
-      return { ...m, _score: overlap * 100 + (m.importance || 0) * 10 + Number(m.confidence || 0) };
-    })
-    .filter((m) => m._score >= 30 || queryKeywords.length === 0)
-    .sort((a, b) => b._score - a._score)
-    .slice(0, 15);
-
-  const hitIds = scored.map((m) => m.id).filter(Boolean);
-  if (hitIds.length) {
-    fetchWithTimeout(() => supabase.rpc('touch_momi_memories', { p_ids: hitIds })).catch(() => {});
-  }
-  return { identities, relevant: scored };
-}
-
-/**
- * W2：每累计 20 条新对话（调用方控制触发）由 AI 抽取结构化记忆。
- * confidence 强制 <= 0.8；所有写入经过 RPC 去重。
+ * 每累计 20 条新对话 / 每天最多一次，由 AI 提取稳定记忆（W2）。
  */
 export async function extractAndSaveMemories(chatRecords) {
-  if (!Array.isArray(chatRecords) || chatRecords.length === 0) return [];
-  const chatText = chatRecords
-    .slice(-20)
-    .map((m) => `${m.user_id || m.sender || '用户'}: ${m.content || ''}`)
-    .join('\n');
+  if (!Array.isArray(chatRecords) || chatRecords.length < 20) return [];
+  const lastAtRaw = await AsyncStorage.getItem(EXTRACTION_KEY).catch(() => null);
+  if (lastAtRaw && Date.now() - Number(lastAtRaw) < ONE_DAY_MS) return [];
 
-  const prompt = `从以下 momo 与 苞米 的对话中提取稳定、值得长期记住的信息，最多5条。
-只输出严格 JSON 数组，不要 Markdown：
-[{"subject":"momo|苞米|both|momi","memory_type":"personality|speech_style|habit|preference|dislike|milestone|fact|promise|ongoing","content":"简洁事实","keywords":["关键词"],"importance":1,"confidence":0.6}]
-AI 推测的 confidence 不得超过 0.8；没有就返回 []。不要复制打卡、菜品等业务原始行。\n\n${chatText}`;
-
+  const chatText = chatRecords.slice(-40).map((m) => `${m.sender || m.user_id}: ${m.content}`).join('\n');
+  const prompt = `从以下 momo 与 苞米 的对话中提取稳定、长期有用的记忆（最多5条）。不要提取寒暄或动态业务统计。\n只输出严格 JSON 数组，每项：subject(momo/苞米/both), memory_type(${MEMORY_TYPES.filter((t) => t !== 'identity').join('/')}), content, keywords(字符串数组), importance(1-4), confidence(0-0.8)。无内容输出 []。\n对话：\n${chatText}`;
   const res = await sendChatCompletion({
-    messages: [{ role: 'user', content: prompt }],
-    temperature: 0.2,
-    max_tokens: 700,
+    messages: [{ role: 'user', content: prompt }], temperature: 0.2, max_tokens: 700,
   });
   if (!res.success || !res.text) return [];
 
   try {
-    const raw = res.text.replace(/```json/gi, '').replace(/```/g, '').trim();
-    const items = JSON.parse(raw);
+    const items = JSON.parse(res.text.replace(/```json|```/g, '').trim());
     if (!Array.isArray(items)) return [];
-    const writes = [];
+    const saved = [];
     for (const item of items.slice(0, 5)) {
-      writes.push(await upsertMemory({
+      if (!item?.content) continue;
+      // eslint-disable-next-line no-await-in-loop
+      const row = await upsertMemory({
         ...item,
-        source: 'ai_extracted',
+        importance: Math.min(4, Number(item.importance) || 2),
         confidence: Math.min(0.8, Number(item.confidence) || 0.6),
-      }));
+        source: 'ai_extracted',
+      });
+      if (row) saved.push(row);
     }
-    return writes.filter((w) => w.success);
+    await AsyncStorage.setItem(EXTRACTION_KEY, String(Date.now()));
+    return saved;
   } catch (err) {
-    console.warn('[momiMemory] 解析记忆 JSON 失败:', err.message);
+    console.warn('[momiMemory] AI 记忆 JSON 解析失败:', err.message);
     return [];
   }
 }
 
 /**
- * M1-M4 日常维护（冷启动异步 + 每天最多一次）：
- * - 短期记忆 expires_at 到期归档
- * - importance<=2、hit_count=0、90天未命中归档
- * - 精确重复由数据库唯一索引/RPC 合并
- * - 冲突不删除旧记录，旧记录只归档；语义冲突由后续 AI 维护批次处理
+ * 每天最多一次的轻量维护：过期 ongoing + 90天未命中低价值记忆归档。
+ * seed / identity / importance>=3 永不自动淘汰。M1/M2 语义合并与冲突消解由新写入时逐步增强。
  */
-export async function runMemoryMaintenance({ force = false } = {}) {
-  const key = 'last_memory_maintenance_at';
+export async function runMemoryMaintenance() {
+  const lastRaw = await AsyncStorage.getItem(MAINTENANCE_KEY).catch(() => null);
+  if (lastRaw && Date.now() - Number(lastRaw) < ONE_DAY_MS) return { skipped: true };
+  const now = new Date().toISOString();
+  const cutoff = new Date(Date.now() - 90 * ONE_DAY_MS).toISOString();
   try {
-    const { data: cfg } = await fetchWithTimeout(() =>
-      supabase.from('app_config').select('value').eq('key', key).maybeSingle()
-    );
-    const last = cfg && cfg.value ? new Date(cfg.value).getTime() : 0;
-    if (!force && Date.now() - last < 24 * 60 * 60 * 1000) return { skipped: true };
-
-    const now = new Date().toISOString();
-    const cutoff = new Date(Date.now() - 90 * 86400000).toISOString();
-
-    await fetchWithTimeout(() =>
-      supabase
-        .from('momi_memory')
-        .update({ is_archived: true, updated_at: now })
-        .eq('couple_id', MEMORY_COUPLE_ID)
-        .eq('is_archived', false)
-        .lt('expires_at', now)
-    ).catch(() => {});
-
-    await fetchWithTimeout(() =>
-      supabase
-        .from('momi_memory')
-        .update({ is_archived: true, updated_at: now })
-        .eq('couple_id', MEMORY_COUPLE_ID)
-        .eq('is_archived', false)
-        .lte('importance', 2)
-        .eq('hit_count', 0)
-        .lt('updated_at', cutoff)
-        .neq('source', 'seed')
-    ).catch(() => {});
-
-    await fetchWithTimeout(() =>
-      supabase.from('app_config').upsert([{ key, value: now, updated_at: now }], { onConflict: 'key' })
-    );
-    return { skipped: false, completedAt: now };
+    await supabase
+      .from('momi_memory')
+      .update({ is_archived: true, updated_at: now })
+      .eq('couple_id', MEMORY_COUPLE_ID)
+      .eq('is_archived', false)
+      .not('expires_at', 'is', null)
+      .lte('expires_at', now);
+    await supabase
+      .from('momi_memory')
+      .update({ is_archived: true, updated_at: now })
+      .eq('couple_id', MEMORY_COUPLE_ID)
+      .eq('is_archived', false)
+      .lte('importance', 2)
+      .eq('hit_count', 0)
+      .lte('created_at', cutoff)
+      .neq('source', 'seed');
+    await AsyncStorage.setItem(MAINTENANCE_KEY, String(Date.now()));
+    return { skipped: false };
   } catch (err) {
-    console.warn('[momiMemory] 维护异常:', err.message);
+    console.warn('[momiMemory] 维护失败:', err.message);
     return { skipped: false, error: err.message };
   }
 }
 
+// 「momi 的小本本」界面 CRUD
 export async function listMemories({ includeArchived = false } = {}) {
-  try {
-    let query = supabase
-      .from('momi_memory')
-      .select('*')
-      .eq('couple_id', MEMORY_COUPLE_ID)
-      .order('subject', { ascending: true })
-      .order('importance', { ascending: false })
-      .order('updated_at', { ascending: false });
-    if (!includeArchived) query = query.eq('is_archived', false);
-    const { data, error } = await fetchWithTimeout(() => query);
-    if (error) throw error;
-    return data || [];
-  } catch (err) {
-    console.warn('[momiMemory] 列表读取失败:', err.message);
-    return [];
-  }
-}
-
-export async function updateMemory(id, updates) {
-  const allowed = {};
-  for (const key of ['subject', 'memory_type', 'content', 'keywords', 'importance', 'expires_at', 'is_archived']) {
-    if (Object.prototype.hasOwnProperty.call(updates || {}, key)) allowed[key] = updates[key];
-  }
-  allowed.updated_at = new Date().toISOString();
-  const { data, error } = await fetchWithTimeout(() =>
-    supabase.from('momi_memory').update(allowed).eq('id', id).select()
-  );
+  let q = supabase.from('momi_memory').select('*').eq('couple_id', MEMORY_COUPLE_ID);
+  if (!includeArchived) q = q.eq('is_archived', false);
+  const { data, error } = await q.order('subject').order('importance', { ascending: false });
   if (error) throw error;
-  return data && data[0];
+  return data || [];
 }
 
-/** “删除”采用归档，保留成长轨迹；小本本的已归档视图可恢复。 */
+export async function updateMemory(id, patch) {
+  const safe = {};
+  if (patch.content !== undefined) {
+    safe.content = String(patch.content).trim();
+    safe.keywords = tokenize(safe.content);
+  }
+  if (patch.subject !== undefined) safe.subject = normalizeSubject(patch.subject);
+  if (patch.memory_type !== undefined) safe.memory_type = normalizeType(patch.memory_type);
+  if (patch.importance !== undefined) safe.importance = Math.max(1, Math.min(5, Number(patch.importance)));
+  if (patch.is_archived !== undefined) safe.is_archived = Boolean(patch.is_archived);
+  safe.updated_at = new Date().toISOString();
+  const { data, error } = await supabase.from('momi_memory').update(safe).eq('id', id).select();
+  if (error) throw error;
+  return data?.[0] || null;
+}
+
 export async function archiveMemory(id) {
   return updateMemory(id, { is_archived: true });
+}
+
+export async function createManualMemory(input) {
+  return upsertMemory({
+    ...input, source: 'user_explicit', importance: input.importance || 5, confidence: 1,
+  });
 }

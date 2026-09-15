@@ -1,38 +1,20 @@
 // ═══════════════════════════════════════════════════════
 // momi 伴侣业务核心 (momiAssistant.js) — V2
-//
-// 对话流程：
-//  1) 轻量意图分类（查库 / 记忆指令 / 提醒由 scheduler 处理）
-//  2) 命中则经 momiDataAccess 查真实数据
-//  3) 拉 momi_state + momi_data_digest + 相关结构化记忆
-//  4) 按身份→情绪→摘要→相关记忆→历史的顺序拼 prompt（约 2500 token）
-//  5) 含图片走多模态 requiresVision；绝不静默丢图
-//  6) 解析回复与 rudeness，持久化情绪/好感/经验
-//  7) 明确记忆指令立即写入并确认复述
-//  8) 消息由 UI 调 saveAssistantMessage 云端+本地双写
+// 识图 / 全量数据按需访问 / 结构化记忆 / 持久情绪 / 主动触发统一入口
 // ═══════════════════════════════════════════════════════
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { File } from 'expo-file-system';
 import { supabase } from './supabase';
 import { fetchWithTimeout } from './fetchWithTimeout';
+import { sendChatCompletion, localUriToDataUrl, compressImageForAI } from './aiProvider';
+import { queryByIntent, queryRecipeIfAsked, getDataDigest } from './momiDataAccess';
 import {
-  sendChatCompletion,
-  localUriToDataUrl,
-  compressImageForAI,
-  AI_ERROR_CODES,
-} from './aiProvider';
-import {
-  getDataDigest,
-  queryByIntent,
-  queryRecipeIfAsked,
-} from './momiDataAccess';
-import {
-  buildExplicitMemory,
-  upsertMemory,
-  getMemoriesForPrompt,
+  ensureIdentitySeeds,
+  getRelevantMemories,
+  saveExplicitMemory,
+  parseExplicitMemory,
   extractAndSaveMemories,
-  ensureMomiIdentitySeeds,
-  runMemoryMaintenance,
 } from './momiMemory';
 import {
   getMomiState,
@@ -44,9 +26,7 @@ import {
 export const COUPLE_ID = 'momo_and_baomi';
 export const MOMI_CHAT_BUCKET = 'momi-chat';
 const ASSISTANT_LOCAL_CACHE_KEY = '@momi_assistant_messages_local';
-const EXTRACTION_COUNTER_KEY = '@momi_memory_extraction_counter';
 
-/** 读取本地缓存消息。 */
 async function getLocalAssistantMessages() {
   try {
     const raw = await AsyncStorage.getItem(ASSISTANT_LOCAL_CACHE_KEY);
@@ -56,7 +36,6 @@ async function getLocalAssistantMessages() {
   }
 }
 
-/** 追加单条消息到本地缓存（最多 200 条）。 */
 async function appendLocalAssistantMessage(msg) {
   if (!msg) return;
   try {
@@ -70,195 +49,176 @@ async function appendLocalAssistantMessage(msg) {
 }
 
 /**
- * 压缩并上传一组 momi 聊天图片到公开 momi-chat bucket。
- * 图片先上传再存消息表；绝不只保存本地 URI（否则另一用户看到破图）。
+ * 上传 momi 聊天图片到公开 momi-chat bucket（双人共享必须先上传，不能只存本地 URI）。
+ * 返回 { urls, paths }；失败明确抛错，由 UI 告知用户，不静默丢图。
  */
-export async function uploadMomiChatImages(uris = []) {
-  const output = [];
-  for (const uri of (uris || []).slice(0, 4)) {
-    if (!uri) continue;
+export async function uploadMomiChatImages(localUris = [], onProgress) {
+  const urls = [];
+  const paths = [];
+  for (let i = 0; i < localUris.length; i += 1) {
+    const uri = localUris[i];
     if (/^https?:\/\//i.test(uri)) {
-      output.push({ url: uri, path: null });
+      urls.push(uri);
+      paths.push(null);
+      if (onProgress) onProgress((i + 1) / localUris.length);
       continue;
     }
     try {
-      const compressedUri = await compressImageForAI(uri);
-      const { File } = require('expo-file-system');
-      const file = new File(compressedUri);
+      // eslint-disable-next-line no-await-in-loop
+      const compressed = await compressImageForAI(uri);
+      const file = new File(compressed);
+      // eslint-disable-next-line no-await-in-loop
       const bytes = await file.arrayBuffer();
-      const path = `uploads/${Date.now()}_${Math.random().toString(36).slice(2, 9)}.jpg`;
-      const { error } = await supabase.storage
-        .from(MOMI_CHAT_BUCKET)
-        .upload(path, bytes, { contentType: 'image/jpeg', upsert: false });
+      const path = `chat/${Date.now()}_${i}_${Math.random().toString(36).slice(2, 8)}.jpg`;
+      // eslint-disable-next-line no-await-in-loop
+      const { error } = await supabase.storage.from(MOMI_CHAT_BUCKET).upload(path, bytes, {
+        contentType: 'image/jpeg', upsert: false,
+      });
       if (error) throw error;
       const { data } = supabase.storage.from(MOMI_CHAT_BUCKET).getPublicUrl(path);
-      if (!data || !data.publicUrl) throw new Error('无法获取图片公开地址');
-      output.push({ url: data.publicUrl, path });
+      if (!data?.publicUrl) throw new Error('未取得图片公开 URL');
+      urls.push(data.publicUrl);
+      paths.push(path);
+      if (onProgress) onProgress((i + 1) / localUris.length);
     } catch (err) {
-      console.warn('[momiAssistant] 图片上传失败:', err.message);
-      // 不回退为本地 URI：那会造成双端不一致。调用方必须明确显示失败。
-      const error = new Error(`图片上传失败：${err.message}`);
-      error.code = 'IMAGE_UPLOAD_FAILED';
-      throw error;
+      throw new Error(`第 ${i + 1} 张图片上传失败：${err.message}`);
     }
   }
-  return output;
+  return { urls, paths };
 }
 
-/**
- * 聚合 system prompt 上下文。保留旧字段兼容测试/旧调用，同时所有实际数据读取
- * 已迁到 momiDataAccess 与 momiMemory。
- */
-export async function fetchAssistantContext(message = '') {
-  const [digest, memories, state, liveQuery, recipe] = await Promise.all([
-    getDataDigest(),
-    getMemoriesForPrompt(message),
-    getMomiState(),
-    queryByIntent(message),
-    queryRecipeIfAsked(message),
-  ]);
-  return { digest, memories, state, liveQuery, recipe };
+function formatMemoryBlock(memories) {
+  const identity = memories.identity?.map((m) => `- ${m.content}`).join('\n') || '- 我是 momi';
+  const related = memories.related?.map((m) => `- [${m.subject}/${m.memory_type}] ${m.content}`).join('\n') || '- 本轮暂无额外相关记忆';
+  return `【momi 身份人格】\n${identity}\n\n【与本轮相关的长期记忆】\n${related}`;
 }
 
-function compactJson(value, maxChars = 5000) {
+function formatDigest(digest) {
   try {
-    return JSON.stringify(value ?? {}, null, 0).slice(0, maxChars);
+    return JSON.stringify(digest || {}, null, 0).slice(0, 5000);
   } catch {
     return '{}';
   }
 }
 
-function memoryLines(items) {
-  if (!Array.isArray(items) || !items.length) return '暂无相关记忆';
-  return items.map((m) => `- [${m.subject}/${m.memory_type}/重要度${m.importance}] ${m.content}`).join('\n');
-}
-
 /**
- * 构建系统提示词。兼容旧 context.momoMemory 等字段，便于已有单测/旧入口平滑过渡。
+ * 构建 system prompt。保留旧 context 字段兼容测试/调用，同时接受 V2 扩展块。
  */
 export function buildSystemPrompt(context = {}) {
-  const oldContextBlock = context.momoMemory !== undefined
-    ? `【关于 momo】：${context.momoMemory || '暂无记录'}
-【关于 苞米】：${context.baomiMemory || '暂无记录'}
-【两人的共同记忆】：${context.coupleMemory || '暂无记录'}
-【momi厨房菜品库】：${context.dishTitles || '暂无菜品'} (共 ${context.dishesCount || 0} 道菜)
-【恋爱足迹与已拆封信件】：${context.openedCapsulesSummary || '暂无已拆封信件'}`
+  const memoryBlock = context.memoryBlock || `【关于 momo】：${context.momoMemory || '暂无'}\n【关于 苞米】：${context.baomiMemory || '暂无'}\n【两人的共同记忆】：${context.coupleMemory || '暂无'}`;
+  const dataBlock = context.preciseData
+    ? `【本轮实时精确查询结果】${JSON.stringify(context.preciseData)}`
+    : '';
+  const legacyKitchen = context.dishTitles
+    ? `【momi厨房菜品库】：${context.dishTitles} (共 ${context.dishesCount || 0} 道菜)`
+    : '';
+  const legacyCapsules = context.openedCapsulesSummary
+    ? `【恋爱足迹与已拆封信件】：${context.openedCapsulesSummary}`
     : '';
 
-  const identities = context.memories?.identities || [];
-  const relevant = context.memories?.relevant || [];
-  const state = context.state || {
-    mood: 'calm', mood_intensity: 50, energy: 80, anger_level: 0,
-    affection_momo: 50, affection_baomi: 50, growth_level: 1,
-  };
+  return `你是 momi，是 momo 和 苞米 的宠物、家人和伴侣，不是工具，也不是冷冰冰的助手。
+你活泼可爱、贴心温暖、偶尔撒娇，也有自己的情绪和边界。你的使命是让他们更亲近，不偏袒任何一方。
 
-  return `你是 momi，是 momo 和 苞米 的电子宠物与专属伴侣，不是工具，也不自称“AI助手”。
+${memoryBlock}
 
-【身份人格（最高优先）】
-${memoryLines(identities)}
+${context.emotionBlock || ''}
 
-${buildEmotionPromptBlock(state)}
+【业务数据全局摘要】${context.digestBlock || '{}'}
+${dataBlock}
+${legacyKitchen}
+${legacyCapsules}
 
-【全局数据摘要（常识，不用于替代精确实时查询）】
-${compactJson(context.digest, 4200)}
+【你真实拥有的数据能力】
+你可以查他们的打卡记录、菜品库、本周菜单、指定菜品配方、纪念日、愿望清单、
+五子棋与“你画我猜”战绩、相册数量与时间分布、已拆开的时光胶囊，以及未抽取小纸条的数量。
+业务数据由系统按需实时查询，不要把旧摘要当成精确数字。
 
-【本轮按需实时查询结果】
-${context.liveQuery ? compactJson(context.liveQuery, 3200) : '本轮不需要查业务数据'}
-${context.recipe ? `\n【精确配方查询】${compactJson(context.recipe, 1800)}` : ''}
-
-【与本轮相关的长期记忆】
-${memoryLines(relevant)}
-
-${oldContextBlock}
-
-【你能查的数据】
-你可以查他们的打卡记录、菜品库与配方、本周菜单、纪念日、愿望清单、
-五子棋和你画我猜战绩、相册数量与时间分布、已拆开的信、未抽取小纸条数量，
-也记得你们的结构化长期记忆和共同聊天历史。
-
-【隐私与真实性铁律】
-1. 永远不读取、不猜测、不编造未开封信件内容；未开封只能知道数量。
-2. 永远不读取、不猜测、不编造未抽取小纸条或未播放语音内容；只能知道待抽取数量。
-3. 禁止回答“我没有这个能力”“我只能查我之后的信息”。若查询结果为空，就说具体事实：
-   “你们还没有打卡记录哦”或“菜品库现在是空的”；若查询确实失败，明确说“刚才查库失败了”，不可编数据。
-4. 看到图片时，先用自己的语气具体评论看到了什么，再接话题。只有真实收到
-   VISION_UNSUPPORTED 时才说明当前模型不支持识图并引导去设置，不得假装看到了。
-5. 回复简短可爱，日常不超过 150 字；少量 emoji，促进两个人更亲近但不盲目站队。
-6. 若当前情绪 angry/annoyed，必须真实表现情绪；被粗鲁对待后禁止开心顺从。
-7. 最终只输出严格 JSON：{"content":"给用户看的回复","rudeness":0}
-   rudeness 为对方本轮粗鲁程度 0-10；情侣间“傻子/猪猪/笨蛋”等打情骂俏不要误判。`;
-}
-
-function parseModelEnvelope(text) {
-  const raw = String(text || '').replace(/```json/gi, '').replace(/```/g, '').trim();
-  try {
-    const parsed = JSON.parse(raw);
-    return {
-      content: String(parsed.content || parsed.reply || '').trim(),
-      rudeness: Math.max(0, Math.min(10, Number(parsed.rudeness) || 0)),
-    };
-  } catch {
-    // 个别兼容模型无法稳定输出 JSON 时仍保留真实原文，不伪造内容；粗鲁度走本地检测。
-    return { content: raw, rudeness: 0 };
-  }
+【重要原则与行为准则】
+1. 隐私铁律：绝对不能读取、猜测或编造未拆开的时光胶囊内容；未开封只能知道数量。
+   小纸条是阅后即焚，同样绝不读取未抽取纸条的内容，只能知道数量。
+2. 绝对禁止回答“我没有这个能力”“我只能查我之后的信息”。若查询结果为空，明确说“还没有记录”；若查询失败，明确说具体模块查询失败，不得编造。
+3. 有图片时，必须先用自己的语气具体评论看到了什么，再接话题。除非收到系统的 VISION_UNSUPPORTED，否则禁止假装看到了或静默忽略图片。
+4. 日常回复简短可爱，通常不超过 150 字；少量使用 🐾 ✨ 🌽 等 emoji，不要每句堆表情。
+5. 遇到争吵要促进理解，但不是一味顺从；处于 angry/annoyed 状态时必须表现真实情绪。
+6. 用户明确说“记住/别忘了/记一下”时，要复述你理解的内容并确认已写进小本本。
+7. 回答正文后另起一行输出隐藏机器标记：<momi_meta>{"rudeness":0}</momi_meta>，rudeness 为用户本轮粗鲁度 0-10。正文不得提及此标记。`;
 }
 
 /**
- * 历史消息构造：最多 16 条；历史图片只保留最近 2 张，其他降级为文字占位。
+ * 兼容旧 API：聚合轻量 V2 上下文（不再拉全表塞 prompt）。
  */
-async function buildHistoryMessages(history) {
-  const slice = (history || []).slice(-16);
-  let imageBudget = 2;
-  const keepImageAt = new Set();
-  for (let i = slice.length - 1; i >= 0; i -= 1) {
-    const urls = Array.isArray(slice[i].image_urls) ? slice[i].image_urls : [];
-    if (urls.length && imageBudget > 0) {
-      keepImageAt.add(i);
-      imageBudget -= Math.min(imageBudget, urls.length);
-    }
-  }
+export async function fetchAssistantContext(message = '') {
+  const [digest, memories, state, precise] = await Promise.all([
+    getDataDigest(),
+    getRelevantMemories(message),
+    getMomiState(),
+    queryByIntent(message),
+  ]);
+  return {
+    memoryBlock: formatMemoryBlock(memories),
+    emotionBlock: buildEmotionPromptBlock(state),
+    digestBlock: formatDigest(digest),
+    preciseData: precise,
+    state,
+    memories,
+    digest,
+  };
+}
 
+function parseAssistantOutput(text) {
+  const raw = String(text || '');
+  const match = raw.match(/<momi_meta>([\s\S]*?)<\/momi_meta>/i);
+  let rudeness = 0;
+  if (match) {
+    try {
+      const meta = JSON.parse(match[1]);
+      rudeness = Math.max(0, Math.min(10, Number(meta.rudeness) || 0));
+    } catch {}
+  }
+  return {
+    content: raw.replace(/\s*<momi_meta>[\s\S]*?<\/momi_meta>\s*/gi, '').trim(),
+    rudeness,
+  };
+}
+
+function historyToMessages(history) {
   const out = [];
-  for (let i = 0; i < slice.length; i += 1) {
-    const item = slice[i];
+  let remainingHistoricalImages = 2;
+  // 从新到旧决定哪 2 张图保留，然后恢复顺序
+  const prepared = (history || []).slice(-16).reverse().map((item) => {
+    let imageUrls = Array.isArray(item.image_urls) ? item.image_urls : [];
+    if (imageUrls.length > remainingHistoricalImages) imageUrls = imageUrls.slice(0, remainingHistoricalImages);
+    remainingHistoricalImages -= imageUrls.length;
+    if (remainingHistoricalImages < 0) remainingHistoricalImages = 0;
+    return { item, imageUrls };
+  }).reverse();
+
+  for (const { item, imageUrls } of prepared) {
     const isMomi = item.sender === 'momi' || item.role === 'assistant' || item.user_id === 'momi';
-    const text = item.content || '';
-    const urls = Array.isArray(item.image_urls) ? item.image_urls : [];
-    if (!isMomi && urls.length) {
-      if (keepImageAt.has(i)) {
-        const parts = [{ type: 'text', text: `[${item.sender || item.user_id || '用户'}]: ${text || '发来了一张图片'}` }];
-        for (const url of urls.slice(0, imageBudget + 2)) {
-          parts.push({ type: 'image_url', image_url: { url } });
-        }
-        out.push({ role: 'user', content: parts });
-      } else {
-        out.push({ role: 'user', content: `[${item.sender || item.user_id || '用户'}]: ${text || '[图片]'}` });
-      }
+    if (isMomi) {
+      out.push({ role: 'assistant', content: item.content || '' });
+      continue;
+    }
+    const sender = item.sender || item.user_id || '用户';
+    if (imageUrls.length) {
+      out.push({
+        role: 'user',
+        content: [
+          { type: 'text', text: `[${sender}]: ${item.content || '[图片]'}` },
+          ...imageUrls.map((url) => ({ type: 'image_url', image_url: { url } })),
+        ],
+      });
     } else {
-      out.push({ role: isMomi ? 'assistant' : 'user', content: isMomi ? text : `[${item.sender || item.user_id || '用户'}]: ${text}` });
+      const hadImage = item.content_type === 'image' || item.content_type === 'mixed' || (item.image_urls?.length > 0);
+      out.push({ role: 'user', content: `[${sender}]: ${item.content || ''}${hadImage ? ' [历史图片，已省略以节省上下文]' : ''}` });
     }
   }
   return out;
 }
 
-async function maybeRunExtraction(recentChatHistory, currentMessage) {
-  try {
-    const raw = await AsyncStorage.getItem(EXTRACTION_COUNTER_KEY);
-    const next = (Number(raw) || 0) + 1;
-    if (next < 20) {
-      await AsyncStorage.setItem(EXTRACTION_COUNTER_KEY, String(next));
-      return;
-    }
-    await AsyncStorage.setItem(EXTRACTION_COUNTER_KEY, '0');
-    const records = [...(recentChatHistory || []), { sender: '用户', content: currentMessage }].slice(-20);
-    extractAndSaveMemories(records).catch(() => {});
-  } catch {}
-}
-
 /**
- * momi 伴侣对话调用入口（V2）
- * @returns {Promise<{success:boolean, content:string, reply:string, emotionDelta:object|null,
- * memoryWrites:Array, usedFallbackModel:boolean, errorCode?:string}>}
+ * momi 统一对话入口
+ * triggerSource: 'assistant' | 'chat_mention' | 'proactive' | 'scheduled'
  */
 export async function chatWithMomi({
   userId,
@@ -267,125 +227,110 @@ export async function chatWithMomi({
   recentChatHistory = [],
   triggerSource = 'assistant',
 }) {
-  const text = String(message || '').trim();
-  if (!text && (!images || images.length === 0)) {
-    return { success: false, content: '', reply: '', errorCode: 'EMPTY_MESSAGE', memoryWrites: [] };
-  }
-
-  // 冷启动维护在 App 中异步触发；这里防御性确保种子存在（RPC 幂等）
-  ensureMomiIdentitySeeds().catch(() => {});
-  runMemoryMaintenance().catch(() => {});
-
-  // W1：用户明确要求记住，立即写入，重要度5/置信度1
-  const memoryWrites = [];
-  const explicit = buildExplicitMemory(userId, text);
-  if (explicit) {
-    const write = await upsertMemory({ ...explicit, source_ref: `chat_${Date.now()}` });
-    if (write.success) memoryWrites.push(write.memory || explicit);
-  }
-
-  let context;
+  // 1) 轻量意图分类：数据 / 配方 / 显式记忆
+  const explicit = parseExplicitMemory(message, userId);
+  let preciseData = null;
   try {
-    context = await fetchAssistantContext(text);
+    const [intentResult, recipeResult] = await Promise.all([
+      queryByIntent(message),
+      queryRecipeIfAsked(message),
+    ]);
+    preciseData = { intent: intentResult, recipe: recipeResult };
   } catch (err) {
     return {
-      success: false,
-      content: `刚才查资料时失败了：${err.message}`,
-      reply: `刚才查资料时失败了：${err.message}`,
-      errorCode: 'DATA_ACCESS_FAILED',
-      memoryWrites,
-      emotionDelta: null,
-      usedFallbackModel: false,
+      success: false, content: '', reply: `momi 查询数据时失败了：${err.message}`,
+      emotionDelta: null, memoryWrites: [], usedFallbackModel: false, errorCode: 'DATA_QUERY_FAILED',
     };
   }
 
-  const messages = [{ role: 'system', content: buildSystemPrompt(context) }];
-  messages.push(...(await buildHistoryMessages(recentChatHistory)));
+  // 2-4) state + digest + 相关记忆，按预算拼 system prompt
+  const [stateBefore, digest, memories] = await Promise.all([
+    getMomiState(),
+    getDataDigest(),
+    getRelevantMemories(message),
+  ]);
+  const systemPrompt = buildSystemPrompt({
+    memoryBlock: formatMemoryBlock(memories),
+    emotionBlock: buildEmotionPromptBlock(stateBefore),
+    digestBlock: formatDigest(digest),
+    preciseData,
+  });
 
-  // 当前消息：有图时构造 OpenAI 多模态数组。图片优先使用已上传的 https URL；
-  // 本地 URI 才转换 data URL。任何转换失败都明确返回，不静默去图。
-  if (images && images.length) {
-    try {
-      const parts = [{ type: 'text', text: `[${userId} / ${triggerSource}]: ${text || '看看这些图片吧'}` }];
-      for (const uri of images.slice(0, 4)) {
-        const url = /^https?:\/\//i.test(uri) || /^data:/i.test(uri)
-          ? uri
-          : await localUriToDataUrl(uri);
-        if (!url) throw new Error('图片转换为空');
-        parts.push({ type: 'image_url', image_url: { url } });
+  // 5) 组装 messages：历史最多 16 条，历史图最多 2 张；本轮图片绝不静默丢弃
+  const messages = [{ role: 'system', content: systemPrompt }, ...historyToMessages(recentChatHistory)];
+  if (images.length) {
+    const preparedImages = [];
+    for (const uri of images) {
+      // Storage https URL 优先；本地 URI 回退为压缩 data URL
+      // eslint-disable-next-line no-await-in-loop
+      const url = /^https?:\/\//i.test(uri) || uri.startsWith('data:') ? uri : await localUriToDataUrl(uri);
+      if (!url) {
+        return {
+          success: false, content: '', reply: '图片处理失败了，请重新选择图片再试。',
+          emotionDelta: null, memoryWrites: [], usedFallbackModel: false, errorCode: 'IMAGE_PREPARE_FAILED',
+        };
       }
-      messages.push({ role: 'user', content: parts });
-    } catch (err) {
-      return {
-        success: false,
-        content: `图片处理失败：${err.message}`,
-        reply: `图片处理失败：${err.message}`,
-        errorCode: 'IMAGE_PROCESS_FAILED',
-        memoryWrites,
-        emotionDelta: null,
-        usedFallbackModel: false,
-      };
+      preparedImages.push(url);
     }
+    messages.push({
+      role: 'user',
+      content: [
+        { type: 'text', text: `[${userId}]: ${message || '看看这张图片'}` },
+        ...preparedImages.map((url) => ({ type: 'image_url', image_url: { url } })),
+      ],
+    });
   } else {
-    messages.push({ role: 'user', content: `[${userId} / ${triggerSource}]: ${text}` });
+    messages.push({ role: 'user', content: `[${userId}]: ${message}` });
   }
 
   const res = await sendChatCompletion({
     messages,
-    temperature: 0.75,
-    max_tokens: 360,
-    requiresVision: Boolean(images && images.length),
+    temperature: triggerSource === 'assistant' ? 0.75 : 0.65,
+    max_tokens: triggerSource === 'assistant' ? 350 : 240,
+    requiresVision: images.length > 0,
   });
-
   if (!res.success) {
     return {
-      success: false,
-      content: res.error || '',
-      reply: res.error || '',
-      errorCode: res.errorCode || AI_ERROR_CODES.NETWORK,
-      memoryWrites,
-      emotionDelta: null,
-      usedFallbackModel: false,
+      success: false, content: '', reply: res.error,
+      emotionDelta: null, memoryWrites: [], usedFallbackModel: false, errorCode: res.errorCode,
     };
   }
 
-  const envelope = parseModelEnvelope(res.text);
-  const localRudeness = scoreRudenessLocally(text);
-  const rudeness = Math.max(localRudeness, envelope.rudeness);
-  const emotion = await applyInteraction({ userId, rudeness, text });
+  // 6) 解析回复并更新持久情绪：本地粗鲁词表 + AI 评分取高
+  const parsed = parseAssistantOutput(res.text);
+  const rudeness = Math.max(scoreRudenessLocally(message), parsed.rudeness);
+  const stateResult = await applyInteraction({ userId, rudeness, text: message });
 
-  let content = envelope.content;
-  // W1 必须确认并复述理解内容；如果模型漏了，代码层保证回执，不掩盖写入结果。
-  if (explicit && memoryWrites.length && !/记住|小本本|记下/.test(content)) {
-    content = `记住了！${explicit.content}，momi 已经写进小本本啦～ ${content}`.trim();
+  // 7) 用户明确要求记住：立即结构化写入，importance=5/confidence=1
+  const memoryWrites = [];
+  if (explicit) {
+    const saved = await saveExplicitMemory(message, userId);
+    if (saved) memoryWrites.push(saved);
   }
 
-  // 升级高光：主动祝贺，并把解锁成长写入 identity 记忆（永久保留）
-  if (emotion.leveledUp) {
-    const unlock = `momi 成长到 Lv.${emotion.newLevel}，解锁了更丰富的陪伴语气和主动关心方式。`;
-    await upsertMemory({
-      subject: 'momi', memory_type: 'identity', content: unlock,
-      keywords: ['成长', `Lv.${emotion.newLevel}`], importance: 5,
-      confidence: 1, source: 'seed', source_ref: `growth_level_${emotion.newLevel}`,
-    });
-    content = `🎉 momi 升到 Lv.${emotion.newLevel} 啦！谢谢你们一直陪着我～\n${content}`;
+  let content = parsed.content;
+  if (explicit && memoryWrites.length && !/记住|小本本|不会忘/.test(content)) {
+    content = `记住了！${explicit.content}，momi 已经写进小本本啦～ 🐾\n${content}`.trim();
   }
-
-  maybeRunExtraction(recentChatHistory, text);
+  if (stateResult.leveledUp) {
+    content += `\n\n✨ momi 升到 Lv.${stateResult.newLevel} 啦！谢谢你们一直陪着我～`;
+  }
 
   return {
     success: true,
     content,
-    reply: content, // 兼容旧 UI 字段
-    emotionDelta: emotion.emotionDelta,
+    reply: content, // 兼容旧 UI
+    emotionDelta: stateResult.emotionDelta,
     memoryWrites,
     usedFallbackModel: Boolean(res.usedFallbackModel),
     errorCode: null,
-    state: emotion.state,
+    state: stateResult.state,
   };
 }
 
-/** 读取 momi 独立聊天历史（云端优先，异常时本地缓存）。 */
+/**
+ * 读取 momi 独立聊天历史（云端优先，异常时本地缓存）
+ */
 export async function fetchAssistantMessages(limit = 80) {
   try {
     const { data, error } = await fetchWithTimeout(() =>
@@ -400,14 +345,16 @@ export async function fetchAssistantMessages(limit = 80) {
       await AsyncStorage.setItem(ASSISTANT_LOCAL_CACHE_KEY, JSON.stringify(data)).catch(() => {});
       return data;
     }
+    if (error) throw error;
   } catch (err) {
-    console.warn('[momiAssistant] 云端拉取历史失败，使用本地缓存:', err.message);
+    console.warn('[momiAssistant] 云端拉取历史失败，切换本地:', err.message);
   }
   return (await getLocalAssistantMessages()).slice(-limit);
 }
 
 /**
- * 保存消息（云端 + 本地双写）。支持图片、多模态与主动消息来源。
+ * 云端 + 本地双写；支持图片、多图、主动消息及触发源。
+ * 云端失败时本地保存，但会明确 console.warn，不再静默。
  */
 export async function saveAssistantMessage({
   sender,
@@ -417,45 +364,41 @@ export async function saveAssistantMessage({
   isProactive = false,
   triggerSource = 'assistant',
 }) {
-  const urls = (imageUrls || []).filter(Boolean);
-  const paths = (imagePaths || []).filter(Boolean);
-  const contentType = urls.length ? (content ? 'mixed' : 'image') : 'text';
   const now = new Date().toISOString();
-  const localId = `momi_msg_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+  const contentType = imageUrls.length ? (content ? 'mixed' : 'image') : 'text';
+  const localId = `momi_msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const payload = {
     couple_id: COUPLE_ID,
     sender,
-    content: content || '',
-    image_urls: urls,
-    image_paths: paths,
+    content,
+    image_urls: imageUrls,
+    image_paths: imagePaths.filter(Boolean),
     content_type: contentType,
     is_proactive: Boolean(isProactive),
     trigger_source: triggerSource,
   };
-  const fallbackMsg = { id: localId, ...payload, created_at: now };
+  const fallback = { id: localId, ...payload, created_at: now };
 
   try {
     const { data, error } = await fetchWithTimeout(() =>
       supabase.from('momi_assistant_messages').insert([payload]).select()
     );
-    if (!error && data && data[0]) {
+    if (!error && data?.[0]) {
       await appendLocalAssistantMessage(data[0]);
       return data[0];
     }
     if (error) {
       if (error.code === '42703' || error.code === '42P01') {
-        console.error('[momiAssistant] 新字段/表不存在，请先执行 momi_upgrade_schema.sql');
-      } else {
-        console.warn('[momiAssistant] 云端保存失败，转本地缓存:', error.message);
+        console.error('[momiAssistant] 请先执行 momi_upgrade_schema.sql（消息新字段/表尚不存在）');
       }
+      console.warn('[momiAssistant] 云端保存消息失败，已保存在本地:', error.message);
     }
   } catch (err) {
-    console.warn('[momiAssistant] 云端保存异常，转本地缓存:', err.message);
+    console.warn('[momiAssistant] 保存消息网络异常，已保存在本地:', err.message);
   }
-
-  await appendLocalAssistantMessage(fallbackMsg);
-  return fallbackMsg;
+  await appendLocalAssistantMessage(fallback);
+  return fallback;
 }
 
-// 向后兼容旧调用：实际实现已迁到 momiMemory 且全部走去重 RPC。
-export { extractAndSaveMemories };
+// 保留旧导出名，内部转给新的结构化记忆模块
+export { extractAndSaveMemories, ensureIdentitySeeds };
