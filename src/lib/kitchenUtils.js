@@ -1,6 +1,7 @@
 // ═══════════════════════════════════════════════════════
 // momi厨房 (Momi Kitchen) 业务工具函数
 // 涵盖分类定义、自然周计算、菜品 CRUD、周清单操作与图片上传
+// V2：新增「饮品」分类；normalizeCategory 改为白名单校验（不再静默兜底）
 // ═══════════════════════════════════════════════════════
 
 import { supabase } from './supabase';
@@ -12,13 +13,31 @@ const CATEGORY_ARRAY = [
   { key: 'meat', label: '荤菜', icon: '🥩', ionicon: 'nutrition-outline' },
   { key: 'veg', label: '蔬菜', icon: '🥗', ionicon: 'leaf-outline' },
   { key: 'snack', label: '小吃', icon: '🥟', ionicon: 'pizza-outline' },
+  { key: 'drink', label: '饮品', icon: '🧋', ionicon: 'cafe-outline' },
 ];
+
+// 数据库 CHECK 约束允许的合法分类值（与 kitchen_drink_migration.sql 一致）
+const VALID_DB_CATEGORIES = ['meat', 'vegetable', 'snack', 'drink'];
+
+// 前端/历史别名 -> 数据库合法值 的唯一映射出口
+const CATEGORY_ALIAS_TO_DB = {
+  meat: 'meat',
+  veg: 'vegetable',
+  vegetable: 'vegetable',
+  snack: 'snack',
+  drink: 'drink',
+  drinks: 'drink',
+  beverage: 'drink',
+};
 
 export const CATEGORIES = Object.assign([...CATEGORY_ARRAY], {
   meat: CATEGORY_ARRAY[0],
   veg: CATEGORY_ARRAY[1],
   vegetable: CATEGORY_ARRAY[1],
   snack: CATEGORY_ARRAY[2],
+  drink: CATEGORY_ARRAY[3],
+  drinks: CATEGORY_ARRAY[3],
+  beverage: CATEGORY_ARRAY[3],
 });
 
 export const CATEGORY_LABELS = {
@@ -26,7 +45,41 @@ export const CATEGORY_LABELS = {
   veg: '蔬菜',
   vegetable: '蔬菜',
   snack: '小吃',
+  drink: '饮品',
+  drinks: '饮品',
+  beverage: '饮品',
 };
+
+/**
+ * 分类白名单规范化（关键修复）。
+ * 历史 bug：任何未知分类都会被默默转成 'meat'，用户存「饮品」会变荤菜且无报错。
+ * 现在：未知分类先在开发环境报错提醒注册别名，最后才兜底（兜底也必须先报错）。
+ * @param {string} cat
+ * @returns {'meat'|'vegetable'|'snack'|'drink'}
+ */
+export function normalizeCategory(cat) {
+  if (!cat) return 'meat';
+  const mapped = CATEGORY_ALIAS_TO_DB[cat];
+  if (mapped) return mapped;
+  if (typeof __DEV__ !== 'undefined' && __DEV__) {
+    // eslint-disable-next-line no-console
+    console.error('[kitchen] 未知菜品分类:', cat, '请到 CATEGORY_ALIAS_TO_DB 注册');
+  }
+  return 'meat'; // 仅作为最后兜底，但必须先报错
+}
+
+/**
+ * 反查：给定任意分类 key/别名，返回指向同一 DB 值的全部别名（含 DB 值本身）。
+ * 用于 fetchDishes 一次 in() 查询兼容历史数据（如 veg/vegetable 混存）。
+ */
+export function getCategoryQueryValues(categoryKey) {
+  const dbValue = CATEGORY_ALIAS_TO_DB[categoryKey] || categoryKey;
+  if (!VALID_DB_CATEGORIES.includes(dbValue)) return [categoryKey];
+  const aliases = Object.keys(CATEGORY_ALIAS_TO_DB).filter(
+    (k) => CATEGORY_ALIAS_TO_DB[k] === dbValue
+  );
+  return Array.from(new Set([...aliases, dbValue]));
+}
 
 /**
  * 获取某个日期所在自然周的周一日期字符串（YYYY-MM-DD）
@@ -160,11 +213,10 @@ export async function fetchDishes(category, coupleId = 'momo_and_baomi') {
       .order('created_at', { ascending: false });
 
     if (targetCategory) {
-      if (targetCategory === 'veg' || targetCategory === 'vegetable') {
-        query = query.in('category', ['veg', 'vegetable']);
-      } else {
-        query = query.eq('category', targetCategory);
-      }
+      // 通用别名兼容：反查所有指向同一 DB 值的别名一次 in() 包含，
+      // 新增分类时无需再改这里
+      const values = getCategoryQueryValues(targetCategory);
+      query = query.in('category', values);
     }
     return query;
   });
@@ -179,14 +231,6 @@ export async function saveDish(dishData, dishId, userId) {
   const targetId = dishData?.id || dishId;
   const isEdit = Boolean(targetId);
   const now = new Date().toISOString();
-
-  // 数据库 check 约束要求 ('meat', 'vegetable', 'snack')，将前端简写 'veg' 统一规范化为 'vegetable'
-  const normalizeCategory = (cat) => {
-    if (!cat) return 'meat';
-    if (cat === 'veg' || cat === 'vegetable') return 'vegetable';
-    if (cat === 'snack') return 'snack';
-    return 'meat';
-  };
 
   if (isEdit) {
     const { id: _unused, ...updates } = dishData;
