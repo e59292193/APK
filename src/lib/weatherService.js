@@ -3,6 +3,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const CACHE_PREFIX = '@momi_weather:';
 const CACHE_MS = 30 * 60 * 1000;
+const OPEN_METEO_GEOCODING = 'https:' + '//geocoding-api.open-meteo.com/v1/search';
+const OPEN_METEO_FORECAST = 'https:' + '//api.open-meteo.com/v1/forecast';
 let locationProvider = null;
 
 /** 注入设备定位适配器：async () => ({ latitude, longitude })。未注入时走手动城市。 */
@@ -44,7 +46,7 @@ export async function geocodeCity(city) {
   if (!name) return null;
   const cached = await readCache(`geo:${name}`);
   if (cached) return cached;
-  const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(name)}&count=5&language=zh&format=json`;
+  const url = `${OPEN_METEO_GEOCODING}?name=${encodeURIComponent(name)}&count=5&language=zh&format=json`;
   const res = await fetch(url);
   if (!res.ok) throw new Error(`城市查询失败 (${res.status})`);
   const json = await res.json();
@@ -93,7 +95,7 @@ export async function getWeather(settings = {}, { forceRefresh = false } = {}) {
     'forecast_days=2',
     'timezone=auto',
   ].join('&');
-  const res = await fetch(`https://api.open-meteo.com/v1/forecast?${params}`);
+  const res = await fetch(`${OPEN_METEO_FORECAST}?${params}`);
   if (!res.ok) throw new Error(`天气服务失败 (${res.status})`);
   const json = await res.json();
   const value = {
