@@ -63,5 +63,11 @@ module.exports = {
         'no-unused-vars': ['warn', { argsIgnorePattern: '^_', varsIgnorePattern: '^(_|memo|Platform|isInitialLoadRef|sendingPhoto)$' }],
       },
     },
+    {
+      files: ['src/screens/TravelDiaryScreen.js'],
+      rules: {
+        'no-unused-vars': ['warn', { argsIgnorePattern: '^(_|index)$', varsIgnorePattern: '^(_|AppInput|formatLocalTime|partnerId)$' }],
+      },
+    },
   ],
 };
