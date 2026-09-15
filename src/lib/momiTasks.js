@@ -24,10 +24,10 @@ export function parseReminderLocally(text, now = new Date()) {
   let timing = '';
   let title = '';
   for (const pattern of REMINDER_PATTERNS) {
-    const m = raw.match(pattern);
-    if (m) {
-      timing = (m[1] || '').trim();
-      title = (m[2] || '').trim();
+    const match = raw.match(pattern);
+    if (match) {
+      timing = (match[1] || '').trim();
+      title = (match[2] || '').trim();
       break;
     }
   }
@@ -37,9 +37,9 @@ export function parseReminderLocally(text, now = new Date()) {
   let due = new Date(now);
   const relative = timing.match(/(\d+)\s*(分钟|小时|天)后/);
   if (relative) {
-    const n = Number(relative[1]);
+    const amount = Number(relative[1]);
     const unitMs = relative[2] === '分钟' ? 60000 : relative[2] === '小时' ? 3600000 : 86400000;
-    due = new Date(now.getTime() + n * unitMs);
+    due = new Date(now.getTime() + amount * unitMs);
     return { title, dueAt: due.toISOString(), sourceText: raw };
   }
 
@@ -49,20 +49,26 @@ export function parseReminderLocally(text, now = new Date()) {
     const dateMatch = timing.match(/(?:(\d{4})年)?(\d{1,2})月(\d{1,2})日/);
     if (dateMatch) {
       const year = dateMatch[1] ? Number(dateMatch[1]) : now.getFullYear();
-      due = new Date(year, Number(dateMatch[2]) - 1, Number(dateMatch[3]), 9, 0, 0, 0);
+      const month = Number(dateMatch[2]);
+      const day = Number(dateMatch[3]);
+      due = new Date(year, month - 1, day, 9, 0, 0, 0);
+      if (due.getFullYear() !== year || due.getMonth() !== month - 1 || due.getDate() !== day) return null;
       if (!dateMatch[1] && due < now) due.setFullYear(year + 1);
     } else {
       return null;
     }
   }
 
-  const timeMatch = timing.match(/(上午|早上|中午|下午|晚上|今晚)?\s*(\d{1,2})(?:[:：点时](\d{1,2})?分?)?/);
+  // 必须包含“点/时/冒号”等明确时间分隔符，避免把“1月2日”中的 1 误当小时。
+  const timeMatch = timing.match(/(上午|早上|中午|下午|晚上|今晚)?\s*(\d{1,2})(?:[:：点时](\d{1,2})?分?)/);
   if (timeMatch) {
     let hour = Number(timeMatch[2]);
     const minute = Number(timeMatch[3] || 0);
     const period = timeMatch[1] || '';
+    if (hour > 23 || minute > 59) return null;
     if (/下午|晚上|今晚/.test(period) && hour < 12) hour += 12;
     if (period === '中午' && hour < 11) hour += 12;
+    if (hour > 23) return null;
     due = setTime(due, hour, minute);
   } else {
     due = setTime(due, /今晚/.test(timing) ? 20 : 9, 0);
@@ -96,22 +102,22 @@ export async function createTaskFromMessage({ userId, message, sourceMessageId, 
 }
 
 export async function listMomiTasks({ status = 'active', limit = 100 } = {}) {
-  let q = supabase
+  let query = supabase
     .from('momi_tasks')
     .select('*')
     .eq('couple_id', COUPLE_ID)
     .order('due_at', { ascending: true })
     .limit(limit);
-  if (status) q = q.eq('status', status);
-  const { data, error } = await fetchWithTimeout(() => q);
+  if (status) query = query.eq('status', status);
+  const { data, error } = await fetchWithTimeout(() => query);
   if (error) throw error;
   return data || [];
 }
 
 export async function updateMomiTask(id, patch) {
   const allowed = {};
-  for (const k of ['title', 'due_at', 'status', 'notified_at']) {
-    if (patch[k] !== undefined) allowed[k] = patch[k];
+  for (const key of ['title', 'due_at', 'status', 'notified_at']) {
+    if (patch[key] !== undefined) allowed[key] = patch[key];
   }
   const { data, error } = await fetchWithTimeout(() =>
     supabase.from('momi_tasks').update(allowed).eq('id', id).select(),
