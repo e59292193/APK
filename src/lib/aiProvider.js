@@ -1,30 +1,117 @@
 // ═══════════════════════════════════════════════════════
 // momi AI 统一调用层 (aiProvider.js)
-// 支持 MiniMax (小米)、DeepSeek、GLM (智谱 AI)
+// OpenAI 兼容封装 + 识图能力判定 + 分级超时 + 结构化错误码
 // ═══════════════════════════════════════════════════════
 
-import { getAIConfig, PROVIDER_ENDPOINTS, getDefaultModel } from './aiConfig';
+import { Image } from 'react-native';
 import { File } from 'expo-file-system';
+import {
+  getAIConfig,
+  PROVIDER_ENDPOINTS,
+  getDefaultModel,
+  modelSupportsVision,
+  getVisionFallbackModel,
+} from './aiConfig';
 
-const REQUEST_TIMEOUT_MS = 15000;
+// 分级超时：带 Base64 图片的请求体大、上传慢，15s 必定超时（历史 bug 根源之一）
+export const REQUEST_TIMEOUT_TEXT_MS = 20000;
+export const REQUEST_TIMEOUT_VISION_MS = 45000;
+
+// 结构化错误码，便于上层做差异化文案与重试策略
+export const AI_ERROR_CODES = {
+  NO_KEY: 'NO_KEY',
+  NETWORK: 'NETWORK',
+  TIMEOUT: 'TIMEOUT',
+  AUTH_OR_BALANCE: 'AUTH_OR_BALANCE',
+  VISION_UNSUPPORTED: 'VISION_UNSUPPORTED',
+  RATE_LIMIT: 'RATE_LIMIT',
+  SERVER_ERROR: 'SERVER_ERROR',
+};
 
 export const AI_ERRORS = {
   NO_KEY: '请先在设置中配置 momi AI',
   NETWORK: 'momi 睡着了，请稍后再试 zzz',
   AUTH_OR_BALANCE: 'momi 的能量耗尽了，请检查 API Key',
   TIMEOUT: 'momi 正在思考但超时了，请重试',
+  VISION_UNSUPPORTED: '当前模型看不见图片，请在设置中改用 DeepSeek V4.1 Flash',
+  RATE_LIMIT: 'momi 被问得太频繁啦，稍等一下再试~',
+  SERVER_ERROR: 'AI 服务暂时开小差了，请稍后再试',
 };
 
+function failure(errorCode, error) {
+  return {
+    success: false,
+    text: '',
+    errorCode,
+    error: error || AI_ERRORS[errorCode] || '未知错误',
+  };
+}
+
 /**
- * 将本地图片文件转换为 Base64 data URL
+ * 判断 messages 中是否携带图片（OpenAI 多模态结构）
  */
-async function localUriToDataUrl(uri) {
+export function messagesContainImage(messages) {
+  if (!Array.isArray(messages)) return false;
+  return messages.some((m) => {
+    const c = m && m.content;
+    return Array.isArray(c) && c.some((part) => part && part.type === 'image_url');
+  });
+}
+
+function getImageSize(uri) {
+  return new Promise((resolve) => {
+    try {
+      Image.getSize(
+        uri,
+        (width, height) => resolve({ width, height }),
+        () => resolve({ width: 0, height: 0 })
+      );
+    } catch {
+      resolve({ width: 0, height: 0 });
+    }
+  });
+}
+
+/**
+ * 图片压缩预处理：长边 <= 1280px、JPEG quality 0.7。
+ * 手机原图（5-12MB）直接转 Base64 会接近 10MB 文本，必定超时或被服务端 413 拒绝。
+ */
+export async function compressImageForAI(uri) {
+  if (!uri || uri.startsWith('data:') || uri.startsWith('http://') || uri.startsWith('https://')) {
+    return uri;
+  }
+  try {
+    const { ImageManipulator, SaveFormat } = require('expo-image-manipulator');
+    const { width, height } = await getImageSize(uri);
+    const context = ImageManipulator.manipulate(uri);
+    const longEdge = Math.max(width, height);
+    if (longEdge > 1280 && width > 0 && height > 0) {
+      if (width >= height) {
+        context.resize({ width: 1280 });
+      } else {
+        context.resize({ height: 1280 });
+      }
+    }
+    const ref = await context.renderAsync();
+    const saved = await ref.saveAsync({ compress: 0.7, format: SaveFormat.JPEG });
+    return saved.uri;
+  } catch (err) {
+    console.warn('[aiProvider] 图片压缩失败，回退原图:', err.message);
+    return uri;
+  }
+}
+
+/**
+ * 将本地图片文件转换为 Base64 data URL（先压缩再转换）
+ */
+export async function localUriToDataUrl(uri) {
   if (!uri) return '';
   if (uri.startsWith('data:') || uri.startsWith('http://') || uri.startsWith('https://')) {
     return uri;
   }
   try {
-    const file = new File(uri);
+    const compressed = await compressImageForAI(uri);
+    const file = new File(compressed);
     const base64 = await file.base64();
     return `data:image/jpeg;base64,${base64}`;
   } catch (err) {
@@ -38,32 +125,51 @@ async function localUriToDataUrl(uri) {
  * @param {object} params
  * @param {Array} params.messages - OpenAI 兼容 messages 数组
  * @param {number} [params.temperature=0.7]
- * @param {number} [params.max_tokens=800]
+ * @param {number} [params.max_tokens=1024]
  * @param {object} [params.overrideConfig] - 用于测试连接或临时覆盖配置
- * @returns {Promise<{ success: boolean, text: string, error?: string }>}
+ * @param {boolean} [params.requiresVision=false] - 本轮请求必须支持识图
+ * @returns {Promise<{ success: boolean, text: string, error?: string, errorCode?: string, usedFallbackModel?: boolean, modelUsed?: string }>}
+ *
+ * 【铁律】当 requiresVision/hasImages 为真而当前模型不支持识图时：
+ *   优先临时切换到 provider 配置的 visionFallbackModel（不持久化用户配置）；
+ *   无可用降级模型则返回 VISION_UNSUPPORTED 结构化失败。
+ *   绝对不得静默把图片从 messages 里丢弃再当纯文本发出。
  */
 export async function sendChatCompletion({
   messages,
   temperature = 0.7,
-  max_tokens = 800,
+  max_tokens = 1024,
   overrideConfig = null,
+  requiresVision = false,
 }) {
   const config = overrideConfig || (await getAIConfig());
-  const provider = config.provider || 'glm';
+  const provider = config.provider || 'deepseek';
   const apiKey = (config.apiKey || '').trim();
-  const modelName = (config.modelName || '').trim() || getDefaultModel(provider);
+  let modelName = (config.modelName || '').trim() || getDefaultModel(provider);
+  let usedFallbackModel = false;
 
   if (!apiKey) {
-    return {
-      success: false,
-      text: '',
-      error: AI_ERRORS.NO_KEY,
-    };
+    return failure(AI_ERROR_CODES.NO_KEY);
   }
 
-  const endpoint = PROVIDER_ENDPOINTS[provider] || PROVIDER_ENDPOINTS.glm;
+  const hasImages = messagesContainImage(messages);
+  const needsVision = requiresVision || hasImages;
+
+  // 识图能力判定：当前模型不支持时，先尝试临时降级模型
+  if (needsVision && !modelSupportsVision(provider, modelName)) {
+    const fallback = getVisionFallbackModel(provider, modelName);
+    if (fallback) {
+      modelName = fallback; // 仅本次请求生效，不持久化用户配置
+      usedFallbackModel = true;
+    } else {
+      return failure(AI_ERROR_CODES.VISION_UNSUPPORTED);
+    }
+  }
+
+  const endpoint = PROVIDER_ENDPOINTS[provider] || PROVIDER_ENDPOINTS.deepseek;
+  const timeoutMs = needsVision ? REQUEST_TIMEOUT_VISION_MS : REQUEST_TIMEOUT_TEXT_MS;
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const headers = {
@@ -91,18 +197,16 @@ export async function sendChatCompletion({
       const errText = await res.text().catch(() => '');
       console.warn(`[aiProvider] ${provider} 响应异常 [${res.status}]:`, errText);
 
-      if (res.status === 401 || res.status === 403 || res.status === 402 || res.status === 429) {
-        return {
-          success: false,
-          text: '',
-          error: AI_ERRORS.AUTH_OR_BALANCE,
-        };
+      if (res.status === 401 || res.status === 403 || res.status === 402) {
+        return failure(AI_ERROR_CODES.AUTH_OR_BALANCE);
       }
-      return {
-        success: false,
-        text: '',
-        error: `调用失败 (${res.status})，请稍后再试`,
-      };
+      if (res.status === 429) {
+        return failure(AI_ERROR_CODES.RATE_LIMIT);
+      }
+      if (res.status >= 500) {
+        return failure(AI_ERROR_CODES.SERVER_ERROR, `AI 服务异常 (${res.status})，请稍后再试`);
+      }
+      return failure(AI_ERROR_CODES.SERVER_ERROR, `调用失败 (${res.status})，请稍后再试`);
     }
 
     const data = await res.json();
@@ -116,14 +220,16 @@ export async function sendChatCompletion({
     return {
       success: true,
       text: text.trim(),
+      usedFallbackModel,
+      modelUsed: modelName,
     };
   } catch (err) {
     clearTimeout(timeoutId);
     if (err.name === 'AbortError') {
-      return { success: false, text: '', error: AI_ERRORS.TIMEOUT };
+      return failure(AI_ERROR_CODES.TIMEOUT);
     }
     console.warn('[aiProvider] 请求异常:', err.message);
-    return { success: false, text: '', error: AI_ERRORS.NETWORK };
+    return failure(AI_ERROR_CODES.NETWORK);
   }
 }
 
@@ -143,9 +249,33 @@ export async function testAIConnection(config) {
 }
 
 /**
+ * 测试当前模型的识图能力：发送内置小图（红色圆形），要求模型描述。
+ * 成功并返回有效描述 => 识图可用；返回 VISION_UNSUPPORTED/其他错误 => 不可用。
+ */
+export async function testVisionCapability(config) {
+  const { VISION_TEST_IMAGE_DATA_URL } = require('./visionTestImage');
+  const result = await sendChatCompletion({
+    messages: [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: '请用一句中文描述这张图片里的颜色和形状。' },
+          { type: 'image_url', image_url: { url: VISION_TEST_IMAGE_DATA_URL } },
+        ],
+      },
+    ],
+    temperature: 0.1,
+    max_tokens: 80,
+    overrideConfig: config,
+    requiresVision: true,
+  });
+  return result;
+}
+
+/**
  * 食谱/菜谱图片 OCR 识别提取
  * @param {string} imageUri - 本地或网络图片 URI
- * @returns {Promise<{ success: boolean, text: string, error?: string }>}
+ * @returns {Promise<{ success: boolean, text: string, error?: string, errorCode?: string }>}
  */
 export async function recognizeRecipeImage(imageUri) {
   if (!imageUri) {
@@ -175,5 +305,6 @@ export async function recognizeRecipeImage(imageUri) {
     messages,
     temperature: 0.2,
     max_tokens: 1200,
+    requiresVision: true,
   });
 }
