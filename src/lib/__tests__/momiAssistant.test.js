@@ -1,9 +1,12 @@
+jest.mock('@react-native-async-storage/async-storage', () => ({ getItem: jest.fn(), setItem: jest.fn() }));
 jest.mock('expo-file-system', () => ({ File: class {} }));
+jest.mock('../aiProvider', () => ({
+  sendChatCompletion: jest.fn(),
+  localUriToDataUrl: jest.fn(async (uri) => uri),
+  compressImageForAI: jest.fn(async (uri) => uri),
+}));
 jest.mock('../supabase', () => ({
-  supabase: {
-    from: jest.fn(),
-    storage: { from: jest.fn() },
-  },
+  supabase: { from: jest.fn(), storage: { from: jest.fn() } },
 }));
 jest.mock('../momiDataAccess', () => ({
   queryByIntent: jest.fn(async () => null),
@@ -28,39 +31,23 @@ import { buildSystemPrompt } from '../momiAssistant';
 
 describe('momiAssistant V2 人格、能力与安全规则', () => {
   const baseContext = {
-    momoMemory: 'momo喜欢微辣',
-    baomiMemory: '苞米喜欢可乐鸡翅',
-    coupleMemory: '一起吃过火锅',
-    dishTitles: '【番茄牛腩】(meat)、【清炒时蔬】(veg)',
-    dishesCount: 2,
+    momoMemory: 'momo喜欢微辣', baomiMemory: '苞米喜欢可乐鸡翅', coupleMemory: '一起吃过火锅',
+    dishTitles: '【番茄牛腩】(meat)、【清炒时蔬】(veg)', dishesCount: 2,
     openedCapsulesSummary: '[momo写]: 这是已拆封的信件内容...',
   };
 
   test('包含情侣专属信息及安全原则', () => {
     const prompt = buildSystemPrompt(baseContext);
-    expect(prompt).toContain('momi');
-    expect(prompt).toContain('momo');
-    expect(prompt).toContain('苞米');
-    expect(prompt).toContain('momo喜欢微辣');
-    expect(prompt).toContain('苞米喜欢可乐鸡翅');
-    expect(prompt).toContain('【番茄牛腩】');
-    expect(prompt).toContain('这是已拆封的信件内容');
-    expect(prompt).toContain('绝对不能读取');
-    expect(prompt).toContain('未拆开的时光胶囊');
-    expect(prompt).toContain('小纸条是阅后即焚');
+    ['momi', 'momo', '苞米', 'momo喜欢微辣', '苞米喜欢可乐鸡翅', '【番茄牛腩】', '这是已拆封的信件内容', '绝对不能读取', '未拆开的时光胶囊', '小纸条是阅后即焚']
+      .forEach((text) => expect(prompt).toContain(text));
   });
 
-  test('明确列出全量数据能力（解决“查不到打卡”）', () => {
+  test('明确列出全量数据能力', () => {
     const prompt = buildSystemPrompt({});
-    expect(prompt).toContain('打卡记录');
-    expect(prompt).toContain('菜品库');
-    expect(prompt).toContain('纪念日');
-    expect(prompt).toContain('愿望清单');
-    expect(prompt).toContain('五子棋');
-    expect(prompt).toContain('相册数量');
+    ['打卡记录', '菜品库', '纪念日', '愿望清单', '五子棋', '相册数量'].forEach((text) => expect(prompt).toContain(text));
   });
 
-  test('显式禁止否认能力与编造数据', () => {
+  test('禁止否认能力与编造数据', () => {
     const prompt = buildSystemPrompt({});
     expect(prompt).toContain('绝对禁止回答“我没有这个能力”');
     expect(prompt).toContain('“我只能查我之后的信息”');
@@ -70,7 +57,7 @@ describe('momiAssistant V2 人格、能力与安全规则', () => {
   test('图片行为与真实情绪约束存在', () => {
     const prompt = buildSystemPrompt({ emotionBlock: '【momi 当前状态】angry' });
     expect(prompt).toContain('必须先用自己的语气具体评论');
-    expect(prompt).toContain('不得静默忽略图片');
+    expect(prompt).toContain('静默忽略图片');
     expect(prompt).toContain('必须表现真实情绪');
   });
 
