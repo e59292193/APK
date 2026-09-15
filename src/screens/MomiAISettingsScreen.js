@@ -1,47 +1,60 @@
 // ═══════════════════════════════════════════════════════
-// MomiAISettingsScreen —— momi AI 配置界面 (功能10)
+// MomiAISettingsScreen —— momi AI 配置界面 V2
+// DeepSeek V4.1 Flash 默认 / 识图能力提示与实测 / Key 仅本地保存
 // ═══════════════════════════════════════════════════════
 
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
-  StyleSheet,
-  Text,
-  View,
-  TextInput,
-  ScrollView,
-  TouchableOpacity,
+  ActivityIndicator,
+  Alert,
+  Image,
   KeyboardAvoidingView,
   Platform,
-  Alert,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { colors, typography, spacing, radius } from '../theme';
+import { typography, spacing, radius, useTheme } from '../theme';
 import { AppHeader, AppInput, Button, CenterToast } from '../components/ui';
 import {
   getAIConfig,
   saveAIConfig,
   PROVIDER_OPTIONS,
+  DEFAULT_AI_CONFIG,
   getDefaultModel,
   getSuggestedModels,
+  getProviderOption,
+  modelSupportsVision,
 } from '../lib/aiConfig';
-import { testAIConnection } from '../lib/aiProvider';
+import { testAIConnection, testVisionCapability } from '../lib/aiProvider';
+import { VISION_TEST_IMAGE_DATA_URL } from '../lib/visionTestImage';
+
+function maskApiKey(key) {
+  const value = String(key || '');
+  if (!value) return '';
+  const last4 = value.slice(-4);
+  return `••••••••${last4}`;
+}
 
 export default function MomiAISettingsScreen({ onBack }) {
   const insets = useSafeAreaInsets();
-  const [provider, setProvider] = useState('glm');
-  const [apiKey, setApiKey] = useState('');
-  const [modelName, setModelName] = useState('GLM-5.3-Flash');
-  const [providersData, setProvidersData] = useState({
-    glm: { apiKey: '', modelName: 'GLM-5.3-Flash' },
-    deepseek: { apiKey: '', modelName: 'deepseek-flash' },
-    minimax: { apiKey: '', modelName: 'MiniMax M3' },
-  });
-  const [showKey, setShowKey] = useState(false);
-  const [testing, setTesting] = useState(false);
-  const [saving, setSaving] = useState(false);
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
 
-  // Toast
+  const [provider, setProvider] = useState(DEFAULT_AI_CONFIG.provider);
+  const [apiKey, setApiKey] = useState('');
+  const [modelName, setModelName] = useState(DEFAULT_AI_CONFIG.modelName);
+  const [providersData, setProvidersData] = useState(DEFAULT_AI_CONFIG.providers);
+  const [showKey, setShowKey] = useState(false);
+  const [testingConnection, setTestingConnection] = useState(false);
+  const [testingVision, setTestingVision] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [visionResult, setVisionResult] = useState('');
   const [toastVisible, setToastVisible] = useState(false);
   const [toastMessage, setToastMessage] = useState('');
 
@@ -51,107 +64,112 @@ export default function MomiAISettingsScreen({ onBack }) {
   };
 
   useEffect(() => {
-    (async () => {
-      const cfg = await getAIConfig();
-      const currentProvider = cfg.provider || 'glm';
-      setProvider(currentProvider);
-      setProvidersData(cfg.providers || {});
+    let alive = true;
+    getAIConfig().then((cfg) => {
+      if (!alive) return;
+      const current = cfg.provider || DEFAULT_AI_CONFIG.provider;
+      setProvider(current);
+      setProvidersData(cfg.providers || DEFAULT_AI_CONFIG.providers);
       setApiKey(cfg.apiKey || '');
-      setModelName(cfg.modelName || getDefaultModel(currentProvider));
-    })();
+      setModelName(cfg.modelName || getDefaultModel(current));
+    });
+    return () => { alive = false; };
   }, []);
 
+  const persistCurrentDraft = () => ({
+    ...providersData,
+    [provider]: {
+      apiKey: apiKey.trim(),
+      modelName: modelName.trim() || getDefaultModel(provider),
+    },
+  });
+
   const handleSelectProvider = (key) => {
-    // 1. 先保存当前正在编辑的 provider 内容
-    const updated = {
-      ...providersData,
-      [provider]: {
-        apiKey: apiKey.trim(),
-        modelName: modelName.trim() || getDefaultModel(provider),
-      },
-    };
+    const updated = persistCurrentDraft();
     setProvidersData(updated);
-
-    // 2. 切换到选中的 provider，加载其历史配置或默认推荐
     setProvider(key);
-    const targetConfig = updated[key] || {
-      apiKey: '',
-      modelName: getDefaultModel(key),
-    };
-    setApiKey(targetConfig.apiKey || '');
-    setModelName(targetConfig.modelName || getDefaultModel(key));
+    const target = updated[key] || { apiKey: '', modelName: getDefaultModel(key) };
+    setApiKey(target.apiKey || '');
+    setModelName(target.modelName || getDefaultModel(key));
+    setShowKey(false);
+    setVisionResult('');
   };
 
-  const handleKeyChange = (val) => {
-    setApiKey(val);
+  const handleKeyChange = (value) => {
+    setApiKey(value);
     setProvidersData((prev) => ({
       ...prev,
-      [provider]: {
-        apiKey: val,
-        modelName: modelName || getDefaultModel(provider),
-      },
+      [provider]: { apiKey: value, modelName: modelName || getDefaultModel(provider) },
     }));
   };
 
-  const handleModelChange = (val) => {
-    setModelName(val);
+  const handleModelChange = (value) => {
+    setModelName(value);
+    setVisionResult('');
     setProvidersData((prev) => ({
       ...prev,
-      [provider]: {
-        apiKey,
-        modelName: val,
-      },
+      [provider]: { apiKey, modelName: value },
     }));
   };
+
+  const activeConfig = () => ({
+    provider,
+    apiKey: apiKey.trim(),
+    modelName: modelName.trim() || getDefaultModel(provider),
+  });
 
   const handleTestConnection = async () => {
     if (!apiKey.trim()) {
       showToast('请先输入 API Key 才能测试连接哦');
       return;
     }
-    setTesting(true);
+    setTestingConnection(true);
     try {
-      const res = await testAIConnection({
-        provider,
-        apiKey: apiKey.trim(),
-        modelName: modelName.trim() || getDefaultModel(provider),
-      });
-      if (res.success) {
-        showToast('🎉 连接成功！momi 已准备就绪');
-      } else {
-        Alert.alert('连接测试失败', res.error || '无法连通该 API，请检查 Key 与模型名称');
-      }
+      const res = await testAIConnection(activeConfig());
+      if (res.success) showToast('🎉 连接成功！momi 已准备就绪');
+      else Alert.alert('连接测试失败', `${res.error || '无法连通该 API'}${res.errorCode ? `\n错误码：${res.errorCode}` : ''}`);
     } catch (err) {
       Alert.alert('连接测试失败', err.message || '网络异常');
     } finally {
-      setTesting(false);
+      setTestingConnection(false);
+    }
+  };
+
+  const handleTestVision = async () => {
+    if (!apiKey.trim()) {
+      showToast('请先输入 API Key 才能测试识图哦');
+      return;
+    }
+    setTestingVision(true);
+    setVisionResult('');
+    try {
+      const res = await testVisionCapability(activeConfig());
+      if (res.success && res.text.trim()) {
+        setVisionResult(res.text.trim());
+        showToast(`📷 识图成功${res.usedFallbackModel ? '（使用了临时视觉模型）' : ''}`);
+      } else {
+        Alert.alert('识图测试失败', `${res.error || '模型没有返回有效描述'}${res.errorCode ? `\n错误码：${res.errorCode}` : ''}`);
+      }
+    } catch (err) {
+      Alert.alert('识图测试失败', err.message || '网络异常');
+    } finally {
+      setTestingVision(false);
     }
   };
 
   const handleSave = async () => {
     setSaving(true);
     try {
-      const activeKey = apiKey.trim();
-      const activeModel = modelName.trim() || getDefaultModel(provider);
+      const active = activeConfig();
       const updated = {
         ...providersData,
-        [provider]: {
-          apiKey: activeKey,
-          modelName: activeModel,
-        },
+        [provider]: { apiKey: active.apiKey, modelName: active.modelName },
       };
-
-      await saveAIConfig({
-        provider,
-        apiKey: activeKey,
-        modelName: activeModel,
-        providers: updated,
-      });
-
-      showToast('配置已保存到本地 ✨');
-      setTimeout(() => {
-        if (onBack) onBack();
-      }, 700);
+      await saveAIConfig({ ...active, providers: updated });
+      setProvidersData(updated);
+      setShowKey(false);
+      showToast('配置已保存到本机 ✨');
+      setTimeout(() => onBack?.(), 700);
     } catch (err) {
       Alert.alert('保存失败', err.message || '请稍后重试');
     } finally {
@@ -160,69 +178,60 @@ export default function MomiAISettingsScreen({ onBack }) {
   };
 
   const suggestedModels = getSuggestedModels(provider);
+  const currentModel = modelName.trim() || getDefaultModel(provider);
+  const visionCapable = modelSupportsVision(provider, currentModel);
+  const providerMeta = getProviderOption(provider);
+  const anyBusy = testingConnection || testingVision || saving;
 
   return (
     <View style={styles.container}>
-      <AppHeader
-        title="momi AI 配置"
-        subtitle="由您自主提供大模型 API Key"
-        showBack
-        onBack={onBack}
-      />
-
+      <AppHeader title="momi AI 配置" subtitle="API Key 只保存在这台手机" showBack onBack={onBack} />
       <CenterToast
         visible={toastVisible}
         message={toastMessage}
-        duration={2200}
+        duration={2400}
         onDismiss={() => setToastVisible(false)}
       />
 
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        style={{ flex: 1 }}
-      >
+      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={staticStyles.flex}>
         <ScrollView
-          style={styles.scroll}
-          contentContainerStyle={[
-            styles.scrollContent,
-            { paddingBottom: insets.bottom + spacing[8] },
-          ]}
+          style={staticStyles.flex}
+          contentContainerStyle={[styles.scrollContent, { paddingBottom: insets.bottom + spacing[8] }]}
           keyboardShouldPersistTaps="handled"
         >
-          {/* 安全提示卡片 */}
           <View style={styles.tipCard}>
-            <Ionicons name="shield-checkmark-outline" size={20} color={colors.mint[700]} />
+            <Ionicons name="shield-checkmark-outline" size={20} color={colors.success} />
             <Text style={styles.tipText}>
-              隐私安全保护：API Key 仅安全存储在您的手机本地设备中，绝不上送云端服务器。
+              API Key 仅通过 AsyncStorage 保存在本机，绝不上传 Supabase 或其他服务端。
             </Text>
           </View>
 
-          {/* Provider 选择器 */}
           <Text style={styles.sectionTitle}>选择 AI 服务商</Text>
           <View style={styles.providerRow}>
             {PROVIDER_OPTIONS.map((item) => {
               const active = provider === item.key;
-              const hasKey = !!(providersData[item.key]?.apiKey);
+              const hasKey = Boolean(providersData[item.key]?.apiKey);
               return (
                 <TouchableOpacity
                   key={item.key}
                   style={[styles.providerTab, active && styles.providerTabActive]}
-                  activeOpacity={0.8}
+                  activeOpacity={0.75}
                   onPress={() => handleSelectProvider(item.key)}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: active }}
                 >
-                  <Text style={[styles.providerTabText, active && styles.providerTabTextActive]}>
+                  <Text style={[styles.providerTabText, active && styles.providerTabTextActive]} numberOfLines={1}>
                     {item.label}
                   </Text>
-                  {hasKey && (
-                    <Text style={styles.configuredBadge}>已配置</Text>
-                  )}
-                  {active && <View style={styles.activeDot} />}
+                  <View style={styles.badgeRow}>
+                    {item.recommended ? <Text style={styles.recommendedBadge}>推荐</Text> : null}
+                    {hasKey ? <Text style={styles.configuredBadge}>已配置</Text> : null}
+                  </View>
                 </TouchableOpacity>
               );
             })}
           </View>
 
-          {/* API Key 输入框 */}
           <View style={styles.fieldSection}>
             <Text style={styles.fieldLabel}>API Key</Text>
             <View style={styles.keyInputWrap}>
@@ -230,31 +239,35 @@ export default function MomiAISettingsScreen({ onBack }) {
                 style={styles.keyInput}
                 placeholder="sk-..."
                 placeholderTextColor={colors.textMuted}
-                value={apiKey}
+                value={showKey ? apiKey : maskApiKey(apiKey)}
                 onChangeText={handleKeyChange}
-                secureTextEntry={!showKey}
+                editable={showKey || !apiKey}
                 autoCapitalize="none"
                 autoCorrect={false}
+                accessibilityLabel="API Key"
               />
               <TouchableOpacity
                 style={styles.eyeBtn}
-                onPress={() => setShowKey(!showKey)}
-                accessibilityLabel="切换显示密码"
-                activeOpacity={0.7}
+                onPress={() => setShowKey((v) => !v)}
+                accessibilityLabel={showKey ? '隐藏 API Key' : '显示 API Key'}
               >
-                <Ionicons
-                  name={showKey ? 'eye-outline' : 'eye-off-outline'}
-                  size={20}
-                  color={colors.textSecondary}
-                />
+                <Ionicons name={showKey ? 'eye-outline' : 'eye-off-outline'} size={20} color={colors.textSecondary} />
               </TouchableOpacity>
             </View>
-            <Text style={styles.fieldHint}>可在对应 AI 服务商开发者控制台中获取 Key（每个厂商独立存储）</Text>
+            <Text style={styles.fieldHint}>
+              默认仅显示最后 4 位；点击眼睛后可临时查看与编辑明文。
+            </Text>
           </View>
 
-          {/* 模型名称输入框 */}
           <View style={styles.fieldSection}>
-            <Text style={styles.fieldLabel}>模型名称 (Model)</Text>
+            <View style={styles.fieldTitleRow}>
+              <Text style={styles.fieldLabel}>模型名称 (Model)</Text>
+              <View style={[styles.visionBadge, visionCapable ? styles.visionBadgeYes : styles.visionBadgeNo]}>
+                <Text style={[styles.visionBadgeText, { color: visionCapable ? colors.success : colors.warning }]}>
+                  {visionCapable ? '✓ 支持识图' : '! 不支持识图'}
+                </Text>
+              </View>
+            </View>
             <AppInput
               placeholder={getDefaultModel(provider)}
               value={modelName}
@@ -263,52 +276,68 @@ export default function MomiAISettingsScreen({ onBack }) {
               autoCorrect={false}
               style={{ marginBottom: spacing[2] }}
             />
-            {suggestedModels.length > 0 && (
+            {!visionCapable ? (
+              <View style={styles.warningCard}>
+                <Ionicons name="warning-outline" size={16} color={colors.warning} />
+                <Text style={styles.warningText}>
+                  此模型不支持识图，momi 将看不到图片。发图时会尝试临时使用 {providerMeta?.visionFallbackModel || '视觉模型'}；无可用模型则明确报错，绝不静默丢图。
+                </Text>
+              </View>
+            ) : null}
+            {suggestedModels.length ? (
               <View style={styles.suggestedModelsRow}>
-                <Text style={styles.suggestedLabel}>推荐模型：</Text>
                 {suggestedModels.map((m) => {
-                  const isSelected = modelName === m;
+                  const selected = modelName === m;
                   return (
                     <TouchableOpacity
                       key={m}
-                      style={[styles.modelChip, isSelected && styles.modelChipActive]}
+                      style={[styles.modelChip, selected && styles.modelChipActive]}
                       onPress={() => handleModelChange(m)}
                       activeOpacity={0.7}
                     >
-                      <Text style={[styles.modelChipText, isSelected && styles.modelChipTextActive]}>
-                        {m}
-                      </Text>
+                      <Text style={[styles.modelChipText, selected && styles.modelChipTextActive]}>{m}</Text>
                     </TouchableOpacity>
                   );
                 })}
               </View>
-            )}
-            <Text style={styles.fieldHint}>
-              点击上方快捷标签可一键选用，也可手动输入任意兼容模型名
-            </Text>
+            ) : null}
+            <Text style={styles.fieldHint}>可点快捷标签，也可自由输入服务商实际支持的任意模型名。</Text>
           </View>
 
-          {/* 操作按钮组 */}
-          <View style={styles.actions}>
-            <Button
-              variant="outline"
-              size="large"
-              fullWidth
-              loading={testing}
-              disabled={testing || saving}
-              onPress={handleTestConnection}
-              iconLeft="pulse-outline"
-              style={{ marginBottom: spacing[3] }}
-            >
-              测试连接
-            </Button>
+          <View style={styles.visionTestCard}>
+            <Image source={{ uri: VISION_TEST_IMAGE_DATA_URL }} style={styles.testImage} />
+            <View style={styles.visionTestInfo}>
+              <Text style={styles.visionTestTitle}>识图测试图</Text>
+              <Text style={styles.fieldHint}>模型应能描述为“白底上的红色圆形”。</Text>
+              {visionResult ? <Text style={styles.visionResult}>momi：{visionResult}</Text> : null}
+            </View>
+          </View>
 
+          <View style={styles.actions}>
+            <View style={styles.secondaryActions}>
+              <TouchableOpacity
+                style={[styles.actionButton, anyBusy && styles.actionDisabled]}
+                disabled={anyBusy}
+                onPress={handleTestConnection}
+              >
+                {testingConnection ? <ActivityIndicator color={colors.primary} /> : <Ionicons name="pulse-outline" size={19} color={colors.primary} />}
+                <Text style={styles.actionButtonText}>测试连接</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.actionButton, anyBusy && styles.actionDisabled]}
+                disabled={anyBusy}
+                onPress={handleTestVision}
+              >
+                {testingVision ? <ActivityIndicator color={colors.primary} /> : <Ionicons name="image-outline" size={19} color={colors.primary} />}
+                <Text style={styles.actionButtonText}>测试识图</Text>
+              </TouchableOpacity>
+            </View>
             <Button
               variant="primary"
               size="large"
               fullWidth
               loading={saving}
-              disabled={testing || saving}
+              disabled={anyBusy}
               onPress={handleSave}
               iconLeft="checkmark-circle-outline"
             >
@@ -321,151 +350,67 @@ export default function MomiAISettingsScreen({ onBack }) {
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.background,
-  },
-  scroll: {
-    flex: 1,
-  },
-  scrollContent: {
-    padding: spacing[4],
-  },
-  tipCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: colors.mint[50],
-    padding: spacing[3],
-    borderRadius: radius.md,
-    marginBottom: spacing[5],
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.mint[200],
-  },
-  tipText: {
-    ...typography.caption,
-    color: colors.mint[800],
-    marginLeft: spacing[2],
-    flex: 1,
-    lineHeight: 18,
-  },
-  sectionTitle: {
-    ...typography.label,
-    color: colors.textPrimary,
-    fontWeight: '600',
-    marginBottom: spacing[2],
-  },
-  providerRow: {
-    flexDirection: 'row',
-    gap: spacing[2],
-    marginBottom: spacing[5],
-  },
-  providerTab: {
-    flex: 1,
-    backgroundColor: colors.surface,
-    paddingVertical: spacing[3],
-    paddingHorizontal: spacing[2],
-    borderRadius: radius.md,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1.5,
-    borderColor: colors.border,
-  },
-  providerTabActive: {
-    borderColor: colors.primaryAction,
-    backgroundColor: colors.primary[50],
-  },
-  providerTabText: {
-    ...typography.caption,
-    color: colors.textSecondary,
-    fontWeight: '500',
-  },
-  providerTabTextActive: {
-    color: colors.primaryAction,
-    fontWeight: '700',
-  },
-  configuredBadge: {
-    fontSize: 9,
-    color: colors.mint[700],
-    backgroundColor: colors.mint[50],
-    paddingHorizontal: 4,
-    paddingVertical: 1,
-    borderRadius: 4,
-    marginTop: 3,
-  },
-  activeDot: {
-    width: 4,
-    height: 4,
-    borderRadius: 2,
-    backgroundColor: colors.primaryAction,
-    marginTop: 4,
-  },
-  fieldSection: {
-    marginBottom: spacing[4],
-  },
-  fieldLabel: {
-    ...typography.label,
-    color: colors.textPrimary,
-    marginBottom: spacing[1],
-    fontWeight: '600',
-  },
-  keyInputWrap: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: colors.primary[50],
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-    paddingHorizontal: spacing[3],
-  },
-  keyInput: {
-    flex: 1,
-    paddingVertical: spacing[3],
-    color: colors.textPrimary,
-    ...typography.body,
-  },
-  eyeBtn: {
-    padding: spacing[2],
-  },
-  suggestedModelsRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    alignItems: 'center',
-    gap: spacing[2],
-    marginBottom: spacing[2],
-  },
-  suggestedLabel: {
-    ...typography.caption,
-    color: colors.textSecondary,
-    marginRight: 2,
-  },
-  modelChip: {
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.border,
-    paddingHorizontal: spacing[2] + 2,
-    paddingVertical: 4,
-    borderRadius: radius.pill,
-  },
-  modelChipActive: {
-    backgroundColor: colors.primary[50],
-    borderColor: colors.primaryAction,
-  },
-  modelChipText: {
-    fontSize: 11,
-    color: colors.textSecondary,
-  },
-  modelChipTextActive: {
-    color: colors.primaryAction,
-    fontWeight: '600',
-  },
-  fieldHint: {
-    ...typography.caption,
-    color: colors.textMuted,
-    marginTop: 4,
-  },
-  actions: {
-    marginTop: spacing[4],
-  },
-});
+const staticStyles = StyleSheet.create({ flex: { flex: 1 } });
 
+const createStyles = (c) => StyleSheet.create({
+  container: { flex: 1, backgroundColor: c.background },
+  scrollContent: { padding: spacing[4] },
+  tipCard: {
+    flexDirection: 'row', alignItems: 'center', backgroundColor: c.successSoft,
+    padding: spacing[3], borderRadius: radius.md, marginBottom: spacing[5],
+    borderWidth: StyleSheet.hairlineWidth, borderColor: c.success,
+  },
+  tipText: { ...typography.caption, color: c.text, marginLeft: spacing[2], flex: 1, lineHeight: 19 },
+  sectionTitle: { ...typography.label, color: c.text, fontWeight: '700', marginBottom: spacing[2] },
+  providerRow: { flexDirection: 'row', gap: spacing[2], marginBottom: spacing[5] },
+  providerTab: {
+    flex: 1, minHeight: 64, backgroundColor: c.card, paddingVertical: spacing[2], paddingHorizontal: 4,
+    borderRadius: radius.md, alignItems: 'center', justifyContent: 'center', borderWidth: 1.5, borderColor: c.border,
+  },
+  providerTabActive: { borderColor: c.primary, backgroundColor: c.primarySoft },
+  providerTabText: { fontSize: 11, color: c.textSecondary, fontWeight: '500' },
+  providerTabTextActive: { color: c.primary, fontWeight: '700' },
+  badgeRow: { flexDirection: 'row', gap: 3, marginTop: 5, minHeight: 14 },
+  recommendedBadge: { fontSize: 9, color: c.textOnPrimary, backgroundColor: c.primary, paddingHorizontal: 5, paddingVertical: 1, borderRadius: 5 },
+  configuredBadge: { fontSize: 9, color: c.success, backgroundColor: c.successSoft, paddingHorizontal: 5, paddingVertical: 1, borderRadius: 5 },
+  fieldSection: { marginBottom: spacing[5] },
+  fieldTitleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: spacing[1] },
+  fieldLabel: { ...typography.label, color: c.text, fontWeight: '700', marginBottom: spacing[1] },
+  keyInputWrap: {
+    flexDirection: 'row', alignItems: 'center', backgroundColor: c.card, borderRadius: radius.md,
+    borderWidth: 1, borderColor: c.border, paddingHorizontal: spacing[3], minHeight: 48,
+  },
+  keyInput: { flex: 1, paddingVertical: spacing[3], color: c.text, ...typography.body },
+  eyeBtn: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
+  fieldHint: { ...typography.caption, color: c.textMuted, marginTop: 4, lineHeight: 18 },
+  visionBadge: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: radius.pill },
+  visionBadgeYes: { backgroundColor: c.successSoft },
+  visionBadgeNo: { backgroundColor: c.warningSoft },
+  visionBadgeText: { fontSize: 11, fontWeight: '700' },
+  warningCard: {
+    flexDirection: 'row', gap: 7, backgroundColor: c.warningSoft, borderRadius: radius.sm,
+    padding: spacing[2], marginBottom: spacing[2], borderWidth: StyleSheet.hairlineWidth, borderColor: c.warning,
+  },
+  warningText: { flex: 1, fontSize: 11, lineHeight: 17, color: c.text },
+  suggestedModelsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing[2], marginBottom: spacing[1] },
+  modelChip: { backgroundColor: c.card, borderWidth: 1, borderColor: c.border, paddingHorizontal: 10, paddingVertical: 6, borderRadius: radius.pill },
+  modelChipActive: { backgroundColor: c.primarySoft, borderColor: c.primary },
+  modelChipText: { fontSize: 11, color: c.textSecondary },
+  modelChipTextActive: { color: c.primary, fontWeight: '700' },
+  visionTestCard: {
+    flexDirection: 'row', alignItems: 'center', backgroundColor: c.card, borderRadius: radius.lg,
+    padding: spacing[3], borderWidth: 1, borderColor: c.border, marginBottom: spacing[4],
+  },
+  testImage: { width: 64, height: 64, borderRadius: radius.sm, backgroundColor: c.surfaceSoft },
+  visionTestInfo: { flex: 1, marginLeft: spacing[3] },
+  visionTestTitle: { ...typography.cardTitle, color: c.text },
+  visionResult: { ...typography.caption, color: c.success, marginTop: 6 },
+  actions: { marginTop: spacing[2] },
+  secondaryActions: { flexDirection: 'row', gap: spacing[2], marginBottom: spacing[3] },
+  actionButton: {
+    flex: 1, minHeight: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7,
+    backgroundColor: c.card, borderWidth: 1.5, borderColor: c.primary, borderRadius: radius.md,
+  },
+  actionButtonText: { ...typography.bodyMedium, color: c.primary },
+  actionDisabled: { opacity: 0.5 },
+});
