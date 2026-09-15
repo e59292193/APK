@@ -127,7 +127,8 @@ export function getWeatherAlert(weather, now = new Date()) {
   if (rain) return { key: `rain:${rain.time}`, message: `看天气，${weather.location}接下来可能下雨，出门记得带伞呀 ☔` };
   if (future.length >= 6) {
     const first = Number(future[0].temperature);
-    const min = Math.min(...future.map((h) => Number(h.temperature)).filter(Number.isFinite));
+    const temps = future.map((h) => Number(h.temperature)).filter(Number.isFinite);
+    const min = temps.length ? Math.min(...temps) : first;
     if (Number.isFinite(first) && Number.isFinite(min) && first - min >= 6) {
       return { key: `cooling:${future[0].time.slice(0, 10)}`, message: `今天会明显降温，大约降 ${Math.round(first - min)}℃，记得多穿一点哦 🧥` };
     }

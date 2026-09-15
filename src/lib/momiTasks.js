@@ -1,7 +1,8 @@
 // momi 自然语言提醒解析与任务 CRUD
 import { supabase } from './supabase';
 import { fetchWithTimeout } from './fetchWithTimeout';
-import { COUPLE_ID } from './momiAssistant';
+
+const COUPLE_ID = 'momo_and_baomi';
 
 const REMINDER_PATTERNS = [
   /(?:momi[，,\s]*)?(?:请)?(?:在)?(.+?)(?:提醒我|提醒一下|叫我|记得提醒)(.+)/i,
@@ -82,8 +83,8 @@ export async function createMomiTask({ userId, title, dueAt, sourceMessageId = n
   };
   if (!payload.title || !payload.due_at) throw new Error('提醒标题和时间不能为空');
   const { data, error } = await fetchWithTimeout(() =>
-    supabase.from('momi_tasks').insert([payload]).select()
-  );
+    supabase.from('momi_tasks').insert([payload]).select(),
+  { kind: 'write' });
   if (error) throw error;
   return data?.[0] || payload;
 }
@@ -113,8 +114,8 @@ export async function updateMomiTask(id, patch) {
     if (patch[k] !== undefined) allowed[k] = patch[k];
   }
   const { data, error } = await fetchWithTimeout(() =>
-    supabase.from('momi_tasks').update(allowed).eq('id', id).select()
-  );
+    supabase.from('momi_tasks').update(allowed).eq('id', id).select(),
+  { kind: 'write' });
   if (error) throw error;
   return data?.[0] || null;
 }
