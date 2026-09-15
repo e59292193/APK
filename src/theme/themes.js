@@ -224,7 +224,7 @@ export const themes = {
       textOnPrimary: '#FFFFFF',
       border: '#2D4472',
       borderSoft: '#232F4D',
-      borderStrong: '#3D5avatar799',
+      borderStrong: '#3D5579',
       divider: '#232F4D',
       me: '#E94560',
       meSoft: '#40202E',

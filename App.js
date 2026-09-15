@@ -1,6 +1,6 @@
 import 'react-native-url-polyfill/auto';
 import 'react-native-get-random-values';
-import React, { memo, useCallback, useEffect, useState } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -19,7 +19,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useKeyboardHeight } from './src/hooks/useKeyboardHeight';
 import { ErrorBoundary } from './src/components/ErrorBoundary';
 import { Button, AppInput } from './src/components/ui';
-import { colors, typography, spacing, radius, ThemeProvider, useTheme, prefetchThemeId } from './src/theme';
+import { typography, spacing, radius, ThemeProvider, useTheme, prefetchThemeId } from './src/theme';
 import { lazyScreen } from './src/lib/lazyScreen';
 import {
   signIn,
@@ -46,9 +46,24 @@ const MomiAISettingsScreen = lazyScreen(() => require('./src/screens/MomiAISetti
 const SettingsScreen = lazyScreen(() => require('./src/screens/SettingsScreen'));
 const ThemeSelectorScreen = lazyScreen(() => require('./src/screens/ThemeSelectorScreen'));
 
+/**
+ * 全局唯一 StatusBar —— 跟随主题 statusBarStyle，Android 同步背景色。
+ * 各屏幕不得再各自渲染 StatusBar，否则会互相覆盖。
+ */
+function ThemedStatusBar() {
+  const { theme, colors } = useTheme();
+  return (
+    <StatusBar
+      barStyle={theme.statusBarStyle || 'dark-content'}
+      backgroundColor={colors.background}
+    />
+  );
+}
+
 function LoginScreen({ onLogin }) {
   const insets = useSafeAreaInsets();
-  const { theme, colors } = useTheme();
+  const { colors } = useTheme();
+  const styles = useMemo(() => createLoginStyles(colors), [colors]);
   const keyboardHeight = useKeyboardHeight();
   const isKeyboardVisible = keyboardHeight > 0;
   const [nickname, setNickname] = useState('');
@@ -71,17 +86,16 @@ function LoginScreen({ onLogin }) {
   };
 
   return (
-    <View style={[loginStyles.container, { backgroundColor: colors.backgroundLavender }]}>
-      <StatusBar barStyle={theme.statusBar || 'dark-content'} backgroundColor={colors.backgroundLavender} />
+    <View style={styles.container}>
       <KeyboardAvoidingView
-        style={styles.flex}
+        style={staticStyles.flex}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
       >
         <ScrollView
-          style={styles.flex}
+          style={staticStyles.flex}
           contentContainerStyle={[
-            loginStyles.scroll,
+            styles.scroll,
             {
               paddingTop: insets.top + (isKeyboardVisible ? spacing[2] : spacing[6]),
               paddingBottom: insets.bottom + spacing[8],
@@ -93,22 +107,22 @@ function LoginScreen({ onLogin }) {
           showsVerticalScrollIndicator={false}
           bounces={false}
         >
-          <View style={loginStyles.decor1} />
-          <View style={loginStyles.decor2} />
-          <View style={loginStyles.decor3} />
+          <View style={styles.decor1} />
+          <View style={styles.decor2} />
+          <View style={styles.decor3} />
 
-          <View style={[loginStyles.brandSection, isKeyboardVisible && { marginBottom: spacing[3] }]}>
+          <View style={[styles.brandSection, isKeyboardVisible && { marginBottom: spacing[3] }]}>
             {!isKeyboardVisible && (
-              <View style={loginStyles.logoWrap}>
-                <Ionicons name="heart" size={36} color={colors.primaryAction} />
+              <View style={styles.logoWrap}>
+                <Ionicons name="heart" size={36} color={colors.primary} />
               </View>
             )}
-            <Text style={[loginStyles.brandTitle, isKeyboardVisible && { fontSize: 24, lineHeight: 28 }]}>MOMO Corn</Text>
-            <Text style={loginStyles.brandSubtitle}>momo和苞米的小世界</Text>
+            <Text style={[styles.brandTitle, isKeyboardVisible && { fontSize: 24, lineHeight: 28 }]}>MOMO Corn</Text>
+            <Text style={styles.brandSubtitle}>momo和苞米的小世界</Text>
           </View>
 
-          <View style={loginStyles.formCard}>
-            <Text style={loginStyles.formTitle}>欢迎回来</Text>
+          <View style={styles.formCard}>
+            <Text style={styles.formTitle}>欢迎回来</Text>
             <AppInput
               label="昵称"
               placeholder="输入你的昵称"
@@ -133,9 +147,9 @@ function LoginScreen({ onLogin }) {
               onSubmitEditing={handleLogin}
             />
             {errorMsg ? (
-              <View style={loginStyles.errorRow}>
+              <View style={styles.errorRow}>
                 <Ionicons name="alert-circle-outline" size={16} color={colors.error} />
-                <Text style={loginStyles.errorText}>{errorMsg}</Text>
+                <Text style={styles.errorText}>{errorMsg}</Text>
               </View>
             ) : null}
             <Button
@@ -149,7 +163,7 @@ function LoginScreen({ onLogin }) {
             >
               登录
             </Button>
-            <Text style={loginStyles.hintText}>专属账号，仅限两人使用</Text>
+            <Text style={styles.hintText}>专属账号，仅限两人使用</Text>
           </View>
         </ScrollView>
       </KeyboardAvoidingView>
@@ -168,43 +182,38 @@ const TAB_CONFIG = [
 const BottomTabBar = memo(function BottomTabBar({ currentTab, onTabChange, unreadCount }) {
   const insets = useSafeAreaInsets();
   const { colors } = useTheme();
+  const styles = useMemo(() => createTabStyles(colors), [colors]);
   const keyboardHeight = useKeyboardHeight();
   if (keyboardHeight > 0) return null;
 
-  const primary = colors.primary || colors.primaryAction || '#FF6B35';
-  const cardBg = colors.card || colors.surface || '#FFFFFF';
-  const border = colors.border || '#E5E5E5';
-  const textMuted = colors.textSecondary || colors.textMuted || '#888888';
-  const activeBg = colors.primarySoft || (primary + '20');
-
   return (
-    <View style={[tabStyles.container, { backgroundColor: cardBg, borderTopColor: border, paddingBottom: insets.bottom + 4 }]}>
+    <View style={[styles.container, { paddingBottom: insets.bottom + 4 }]}>
       {TAB_CONFIG.map((tab) => {
         const active = currentTab === tab.key;
         const count = Math.min(99, Number(unreadCount) || 0);
         return (
           <TouchableOpacity
             key={tab.key}
-            style={tabStyles.item}
+            style={styles.item}
             onPress={() => onTabChange(tab.key)}
             activeOpacity={0.7}
             accessibilityRole="button"
             accessibilityState={{ selected: active }}
             accessibilityLabel={tab.label}
           >
-            <View style={[tabStyles.iconWrap, active && { backgroundColor: activeBg }]}>
+            <View style={[styles.iconWrap, active && { backgroundColor: colors.primarySoft }]}>
               <Ionicons
                 name={active ? tab.activeIcon : tab.icon}
                 size={22}
-                color={active ? primary : textMuted}
+                color={active ? colors.primary : colors.textMuted}
               />
               {tab.key === 'Chat' && count > 0 && !active ? (
-                <View style={[tabStyles.badge, { backgroundColor: colors.error || '#FF4D4F' }]}>
-                  <Text style={tabStyles.badgeText}>{unreadCount > 99 ? '99+' : count}</Text>
+                <View style={styles.badge}>
+                  <Text style={styles.badgeText}>{unreadCount > 99 ? '99+' : count}</Text>
                 </View>
               ) : null}
             </View>
-            <Text style={[tabStyles.label, { color: textMuted }, active && { color: primary, fontWeight: '700' }]}>{tab.label}</Text>
+            <Text style={[styles.label, active && styles.labelActive]}>{tab.label}</Text>
           </TouchableOpacity>
         );
       })}
@@ -216,7 +225,7 @@ function TabPage({ name, current, mounted, children }) {
   const visible = current === name;
   return (
     <View
-      style={[appStyles.screenPage, visible ? appStyles.screenVisible : appStyles.screenHidden]}
+      style={[appStaticStyles.screenPage, visible ? appStaticStyles.screenVisible : appStaticStyles.screenHidden]}
       pointerEvents={visible ? 'auto' : 'none'}
       accessibilityElementsHidden={!visible}
       importantForAccessibility={visible ? 'auto' : 'no-hide-descendants'}
@@ -227,7 +236,8 @@ function TabPage({ name, current, mounted, children }) {
 }
 
 function MainApp() {
-  const { theme, colors } = useTheme();
+  const { colors } = useTheme();
+  const styles = useMemo(() => createAppStyles(colors), [colors]);
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [userId, setUserId] = useState('');
   const [currentTab, setCurrentTab] = useState('Capsule');
@@ -364,9 +374,8 @@ function MainApp() {
 
   if (initializing) {
     return (
-      <View style={appStyles.initContainer}>
-        <StatusBar barStyle="dark-content" backgroundColor={colors.background} />
-        <ActivityIndicator size="large" color={colors.primaryAction} />
+      <View style={styles.initContainer}>
+        <ActivityIndicator size="large" color={colors.primary} />
       </View>
     );
   }
@@ -380,10 +389,8 @@ function MainApp() {
     : 'none';
 
   return (
-    <View style={[appStyles.container, { backgroundColor: colors.background }]}>
-      <StatusBar barStyle={theme?.statusBarStyle || theme?.statusBar || 'dark-content'} backgroundColor={colors.background} />
-
-      <View style={appStyles.screenContainer}>
+    <View style={styles.container}>
+      <View style={appStaticStyles.screenContainer}>
         <TabPage name="Capsule" current={currentTab} mounted={mountedTabs.has('Capsule')}>
           <TimeCapsuleScreen
             userId={userId}
@@ -433,7 +440,7 @@ function MainApp() {
       {full ? (
         <View
           key={fullKey}
-          style={[appStyles.fullscreenOverlay, { backgroundColor: colors.background }]}
+          style={styles.fullscreenOverlay}
           pointerEvents="auto"
           collapsable={false}
         >
@@ -489,7 +496,11 @@ function MainApp() {
                 userId={userId}
                 onBack={closeFullscreen}
                 onOpenAISettings={() => openFullscreen('MomiAISettings', { from: 'MomiAssistant' })}
+                onOpenNotebook={() => openFullscreen('MomiNotebook')}
               />
+            ) : null}
+            {full.screen === 'MomiNotebook' ? (
+              <MomiNotebookScreen userId={userId} onBack={closeFullscreen} />
             ) : null}
             {full.screen === 'MomiAISettings' ? (
               <MomiAISettingsScreen
@@ -525,143 +536,20 @@ export default function App() {
   return (
     <SafeAreaProvider>
       <ThemeProvider>
+        <ThemedStatusBar />
         <MainApp />
       </ThemeProvider>
     </SafeAreaProvider>
   );
 }
 
-const styles = StyleSheet.create({ flex: { flex: 1 } });
+// ═══════════════════════════════════════════════════════
+// 运行时取色样式工厂（切勿回到模块顶层 StyleSheet.create 快照写法）
+// ═══════════════════════════════════════════════════════
 
-const loginStyles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: colors.backgroundLavender, overflow: 'hidden' },
-  scroll: { flexGrow: 1, justifyContent: 'center', paddingHorizontal: spacing[5] },
-  decor1: {
-    position: 'absolute',
-    top: -60,
-    right: -40,
-    width: 200,
-    height: 200,
-    borderRadius: 100,
-    backgroundColor: colors.primary[200],
-    opacity: 0.25,
-  },
-  decor2: {
-    position: 'absolute',
-    top: 120,
-    left: -50,
-    width: 140,
-    height: 140,
-    borderRadius: 70,
-    backgroundColor: colors.mint[200],
-    opacity: 0.2,
-  },
-  decor3: {
-    position: 'absolute',
-    bottom: -30,
-    right: -20,
-    width: 120,
-    height: 120,
-    borderRadius: 60,
-    backgroundColor: colors.primary[100],
-    opacity: 0.4,
-  },
-  brandSection: { alignItems: 'center', marginBottom: spacing[8] },
-  logoWrap: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
-    backgroundColor: colors.surface,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: spacing[4],
-    shadowColor: colors.shadow,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.08,
-    shadowRadius: 12,
-    elevation: 3,
-  },
-  brandTitle: { ...typography.display, color: colors.textPrimary },
-  brandSubtitle: { ...typography.body, color: colors.textSecondary, marginTop: spacing[1] },
-  formCard: {
-    backgroundColor: colors.surface,
-    borderRadius: radius.xl,
-    padding: spacing[5],
-    shadowColor: colors.shadow,
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.08,
-    shadowRadius: 16,
-    elevation: 4,
-  },
-  formTitle: {
-    ...typography.sectionTitle,
-    color: colors.textPrimary,
-    textAlign: 'center',
-    marginBottom: spacing[4],
-  },
-  errorRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: colors.errorSoft,
-    borderRadius: radius.sm,
-    paddingHorizontal: spacing[3],
-    paddingVertical: spacing[2],
-    marginBottom: spacing[2],
-  },
-  errorText: { ...typography.caption, color: colors.error, marginLeft: spacing[2] },
-  hintText: {
-    ...typography.caption,
-    textAlign: 'center',
-    marginTop: spacing[4],
-    color: colors.textMuted,
-  },
-});
+const staticStyles = StyleSheet.create({ flex: { flex: 1 } });
 
-const tabStyles = StyleSheet.create({
-  container: {
-    flexDirection: 'row',
-    backgroundColor: colors.surface,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: colors.border,
-    paddingTop: 6,
-  },
-  item: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 4 },
-  iconWrap: {
-    width: 44,
-    height: 32,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: radius.pill,
-    position: 'relative',
-  },
-  iconWrapActive: { backgroundColor: colors.primary[100] },
-  badge: {
-    position: 'absolute',
-    top: -2,
-    right: 2,
-    minWidth: 18,
-    height: 18,
-    borderRadius: 9,
-    backgroundColor: colors.error,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 4,
-    borderWidth: 1.5,
-    borderColor: colors.surface,
-  },
-  badgeText: { color: '#FFFFFF', fontSize: 10, fontWeight: '700' },
-  label: { ...typography.tabLabel, color: colors.textMuted, marginTop: 3 },
-  labelActive: { color: colors.primaryAction, fontWeight: '600' },
-});
-
-const appStyles = StyleSheet.create({
-  initContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: colors.background,
-  },
-  container: { flex: 1, backgroundColor: colors.background, position: 'relative' },
+const appStaticStyles = StyleSheet.create({
   screenContainer: { flex: 1, position: 'relative' },
   screenPage: { flex: 1 },
   screenVisible: { opacity: 1 },
@@ -673,6 +561,136 @@ const appStyles = StyleSheet.create({
     height: '100%',
     opacity: 0,
   },
+});
+
+const createLoginStyles = (c) => StyleSheet.create({
+  container: { flex: 1, backgroundColor: c.background, overflow: 'hidden' },
+  scroll: { flexGrow: 1, justifyContent: 'center', paddingHorizontal: spacing[5] },
+  decor1: {
+    position: 'absolute',
+    top: -60,
+    right: -40,
+    width: 200,
+    height: 200,
+    borderRadius: 100,
+    backgroundColor: c.primarySoft,
+    opacity: 0.6,
+  },
+  decor2: {
+    position: 'absolute',
+    top: 120,
+    left: -50,
+    width: 140,
+    height: 140,
+    borderRadius: 70,
+    backgroundColor: c.accentSoft,
+    opacity: 0.5,
+  },
+  decor3: {
+    position: 'absolute',
+    bottom: -30,
+    right: -20,
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    backgroundColor: c.primarySoft,
+    opacity: 0.7,
+  },
+  brandSection: { alignItems: 'center', marginBottom: spacing[8] },
+  logoWrap: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: c.card,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: spacing[4],
+    shadowColor: c.shadow,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 12,
+    elevation: 3,
+  },
+  brandTitle: { ...typography.display, color: c.text },
+  brandSubtitle: { ...typography.body, color: c.textSecondary, marginTop: spacing[1] },
+  formCard: {
+    backgroundColor: c.card,
+    borderRadius: radius.xl,
+    padding: spacing[5],
+    shadowColor: c.shadow,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.08,
+    shadowRadius: 16,
+    elevation: 4,
+  },
+  formTitle: {
+    ...typography.sectionTitle,
+    color: c.text,
+    textAlign: 'center',
+    marginBottom: spacing[4],
+  },
+  errorRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: c.errorSoft,
+    borderRadius: radius.sm,
+    paddingHorizontal: spacing[3],
+    paddingVertical: spacing[2],
+    marginBottom: spacing[2],
+  },
+  errorText: { ...typography.caption, color: c.error, marginLeft: spacing[2] },
+  hintText: {
+    ...typography.caption,
+    textAlign: 'center',
+    marginTop: spacing[4],
+    color: c.textMuted,
+  },
+});
+
+const createTabStyles = (c) => StyleSheet.create({
+  container: {
+    flexDirection: 'row',
+    backgroundColor: c.card,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: c.border,
+    paddingTop: 6,
+  },
+  item: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 4 },
+  iconWrap: {
+    width: 44,
+    height: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: radius.pill,
+    position: 'relative',
+  },
+  badge: {
+    position: 'absolute',
+    top: -2,
+    right: 2,
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: c.error,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 4,
+    borderWidth: 1.5,
+    borderColor: c.card,
+  },
+  badgeText: { color: c.textOnPrimary, fontSize: 10, fontWeight: '700' },
+  label: { ...typography.tabLabel, color: c.textMuted, marginTop: 3 },
+  labelActive: { color: c.primary, fontWeight: '600' },
+});
+
+const createAppStyles = (c) => StyleSheet.create({
+  initContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: c.background,
+  },
+  container: { flex: 1, backgroundColor: c.background, position: 'relative' },
   fullscreenOverlay: {
     position: 'absolute',
     top: 0,
@@ -681,7 +699,7 @@ const appStyles = StyleSheet.create({
     bottom: 0,
     width: '100%',
     height: '100%',
-    backgroundColor: colors.background,
+    backgroundColor: c.background,
     overflow: 'hidden',
     zIndex: 1000,
     elevation: 1000,
