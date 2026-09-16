@@ -44,6 +44,7 @@ export default function ChatScreen({
   onNavigateEphemeralNote,
   onNavigateVoiceMailbox,
   onNavigateMomiKitchen,
+  onNavigateMomiAssistant,
   onNavigateThemeSelector,
   onUnreadChange,
   isActive = true,
@@ -111,6 +112,19 @@ export default function ChatScreen({
   const [checkinRecordVisible, setCheckinRecordVisible] = useState(false);
   const [activeThemes, setActiveThemes] = useState([]);
   const [selectedTheme, setSelectedTheme] = useState(null);
+
+  // ─── momi 主动消息未读计数 (功能6) ───
+  const [momiUnread, setMomiUnread] = useState(0);
+  const refreshMomiUnread = useCallback(async () => {
+    try {
+      const { getProactiveUnreadCount } = require('../lib/momiUnread');
+      const count = await getProactiveUnreadCount();
+      setMomiUnread(count);
+    } catch {}
+  }, []);
+  useEffect(() => {
+    refreshMomiUnread();
+  }, [refreshMomiUnread, isActive, refreshTrigger]);
 
   // Partner
   const partnerId = Object.keys(VALID_USERS).find((u) => u !== userId) || '';
@@ -1276,6 +1290,22 @@ export default function ChatScreen({
             { icon: 'brush-outline', bg: colors.primarySoft || bg, color: primary, label: '你画我猜', onPress: handleOpenDrawGuessLobby },
             { icon: 'paper-plane-outline', bg: colors.primarySoft || bg, color: primary, label: '小纸条', onPress: handleOpenEphemeralNote },
             { icon: 'mic-outline', bg: colors.primarySoft || bg, color: primary, label: '语音信箱', onPress: handleOpenVoiceMailbox },
+            {
+              icon: 'paw-outline',
+              bg: colors.primarySoft || bg,
+              color: primary,
+              label: 'momi 助手',
+              badge: momiUnread,
+              onPress: async () => {
+                setPlusPanelVisible(false);
+                try {
+                  const { markProactiveSeen } = require('../lib/momiUnread');
+                  await markProactiveSeen();
+                  setMomiUnread(0);
+                } catch {}
+                onNavigateMomiAssistant && onNavigateMomiAssistant();
+              },
+            },
           ].map((item, idx) => (
             <TouchableOpacity
               key={idx}
@@ -1287,6 +1317,13 @@ export default function ChatScreen({
             >
               <View style={[styles.plusPanelIconBg, { backgroundColor: item.bg }]}>
                 <Ionicons name={item.icon} size={24} color={item.color} />
+                {Boolean(item.badge && item.badge > 0) && (
+                  <View style={styles.plusPanelBadge}>
+                    <Text style={styles.plusPanelBadgeText}>
+                      {item.badge > 99 ? '99+' : item.badge}
+                    </Text>
+                  </View>
+                )}
               </View>
               <Text style={[styles.plusPanelLabel, { color: textMain }]}>{item.label}</Text>
             </TouchableOpacity>
@@ -1901,6 +1938,26 @@ const styles = StyleSheet.create({
     ...typography.label,
     color: colors.textSecondary,
     fontWeight: '600',
+  },
+  plusPanelBadge: {
+    position: 'absolute',
+    top: -4,
+    right: -4,
+    backgroundColor: colors.primaryAction || '#FF6B35',
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 4,
+    borderWidth: 1.5,
+    borderColor: '#FFFFFF',
+  },
+  plusPanelBadgeText: {
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: '700',
+    lineHeight: 12,
   },
 
   // ── @momi 提及候选弹窗 ──
