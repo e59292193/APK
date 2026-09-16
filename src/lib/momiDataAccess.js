@@ -607,16 +607,134 @@ export const INTENT_RULES = [
       return getWeatherForMomi({ userId: context?.userId });
     },
   },
+  {
+    intent: 'chat_history',
+    pattern: /(记不记得|记得吗|我们聊过|我说过|你说过|聊过|说过|那天的事|之前的记录)|((昨天|前天|今天|上周|上个月|之前|那天).*(聊|说|发|提|问|记录|事|讨论))/,
+    run: async (context = {}) => {
+      const { parseTimeRange } = require('./timeIntent');
+      const timeRange = parseTimeRange(context.message || '');
+      const since = timeRange ? timeRange.start : new Date(Date.now() - 48 * 3600 * 1000);
+      const until = timeRange ? timeRange.end : new Date();
+      const label = timeRange ? timeRange.label : '最近48小时';
+
+      const [coupleHistory, digest] = await Promise.all([
+        getCoupleChatHistory({ since, until, limit: 60 }),
+        getChatHistoryDigest({ since, until }),
+      ]);
+
+      return {
+        timeRange: { since: since.toISOString(), until: until.toISOString(), label },
+        digest,
+        messages: coupleHistory.slice(-40),
+      };
+    },
+  },
 ];
+
+/**
+ * 查主聊天 messages 表（统一走 safeQuery 与表缺失保护）
+ */
+export async function getCoupleChatHistory({ since, until, limit = 120, keyword } = {}) {
+  const result = await safeQuery('messages', async () => {
+    let query = supabase
+      .from('messages')
+      .select('id, user_id, content, type, created_at')
+      .order('created_at', { ascending: true })
+      .limit(limit);
+
+    if (since && typeof query.gte === 'function') {
+      const sinceIso = since instanceof Date ? since.toISOString() : since;
+      query = query.gte('created_at', sinceIso);
+    }
+    if (until && typeof query.lte === 'function') {
+      const untilIso = until instanceof Date ? until.toISOString() : until;
+      query = query.lte('created_at', untilIso);
+    }
+    if (keyword && typeof query.ilike === 'function') {
+      query = query.ilike('content', `%${keyword}%`);
+    }
+
+    return query;
+  }, { data: [], error: null });
+
+  const raw = result?.data || [];
+  return raw.map((m) => {
+    const isImg = m.type === 'image';
+    let content = (m.content || '').trim();
+    if (!content && isImg) {
+      content = '[图片]';
+    }
+    return {
+      id: m.id,
+      sender: m.user_id,
+      content,
+      content_type: m.type || 'text',
+      created_at: m.created_at,
+    };
+  });
+}
+
+/**
+ * 统计指定时间范围内主聊天摘要信息
+ */
+export async function getChatHistoryDigest({ since, until } = {}) {
+  const history = await getCoupleChatHistory({ since, until, limit: 300 });
+  const messageCount = history.length;
+  if (!messageCount) {
+    return {
+      messageCount: 0,
+      activeDays: 0,
+      senders: {},
+      firstAt: null,
+      lastAt: null,
+      topKeywords: [],
+    };
+  }
+
+  const daysSet = new Set();
+  const senders = {};
+  const wordFreq = {};
+  const stopWords = new Set(['的', '了', '在', '是', '我', '有', '和', '就', '不', '人', '都', '一', '一个', '上', '也', '很', '到', '说', '要', '去', '你', '会', '着', '没有', '看', '好', '自己', '这', '图片']);
+
+  for (const msg of history) {
+    if (msg.created_at) {
+      daysSet.add(msg.created_at.slice(0, 10));
+    }
+    const sender = msg.sender || 'unknown';
+    senders[sender] = (senders[sender] || 0) + 1;
+
+    const words = (msg.content || '').replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, ' ').split(/\s+/);
+    for (const w of words) {
+      if (w.length >= 2 && !stopWords.has(w) && !w.startsWith('[')) {
+        wordFreq[w] = (wordFreq[w] || 0) + 1;
+      }
+    }
+  }
+
+  const topKeywords = Object.entries(wordFreq)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 6)
+    .map(([word]) => word);
+
+  return {
+    messageCount,
+    activeDays: daysSet.size,
+    senders,
+    firstAt: history[0]?.created_at || null,
+    lastAt: history[history.length - 1]?.created_at || null,
+    topKeywords,
+  };
+}
 
 /**
  * 命中意图则先查库。返回 { intent, data } 或 null。
  */
 export async function queryByIntent(message, context = {}) {
   if (!message) return null;
+  const mergedContext = { ...context, message };
   for (const rule of INTENT_RULES) {
     if (rule.pattern.test(message)) {
-      const data = await rule.run(context);
+      const data = await rule.run(mergedContext);
       return { intent: rule.intent, data };
     }
   }

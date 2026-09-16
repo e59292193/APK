@@ -9,6 +9,7 @@ import { supabase } from './supabase';
 import { fetchWithTimeout } from './fetchWithTimeout';
 import { sendChatCompletion, localUriToDataUrl, compressImageForAI } from './aiProvider';
 import { queryByIntent, queryRecipeIfAsked, getDataDigest } from './momiDataAccess';
+import { buildConversationContext } from './conversationContext';
 import {
   ensureIdentitySeeds,
   getRelevantMemories,
@@ -140,6 +141,7 @@ export function buildSystemPrompt(context = {}) {
     ? `【恋爱足迹与已拆封信件】：${context.openedCapsulesSummary}`
     : '';
   const weatherBlock = context.weatherBlock || (context.weatherData ? formatWeatherBlock(context.weatherData) : '');
+  const historyBlock = context.historyBlock ? `\n${context.historyBlock}` : '';
 
   return `你是 momi，是 momo 和 苞米 的宠物、家人和伴侣，不是工具，也不是冷冰冰的助手。
 你活泼可爱、贴心温暖、偶尔撒娇，也有自己的情绪和边界。你的使命是让他们更亲近，不偏袒任何一方。
@@ -153,6 +155,7 @@ ${dataBlock}
 ${legacyKitchen}
 ${legacyCapsules}
 ${weatherBlock}
+${historyBlock}
 
 【你真实拥有的数据能力】
 你可以查他们的打卡记录、菜品库、本周菜单、指定菜品配方、纪念日、愿望清单、
@@ -168,7 +171,11 @@ ${weatherBlock}
 4. 日常回复简短可爱，通常不超过 150 字；少量使用 🐾 ✨ 🌽 等 emoji，不要每句堆表情。
 5. 遇到争吵要促进理解，但不是一味顺从；处于 angry/annoyed 状态时必须表现真实情绪。
 6. 用户明确说“记住/别忘了/记一下”时，要复述你理解的内容并确认已写进小本本。
-7. 回答正文后另起一行输出隐藏机器标记：<momi_meta>{"rudeness":0}</momi_meta>，rudeness 为用户本轮粗鲁度 0-10。正文不得提及此标记。`;
+7. 回答正文后另起一行输出隐藏机器标记：<momi_meta>{"rudeness":0}</momi_meta>，rudeness 为用户本轮粗鲁度 0-10。正文不得提及此标记。
+8. 回忆与历史表达约束：
+   - 引用历史时优先给出具体时间与内容要点（例如“昨天晚上你说…”），严禁编造不存在的细节；
+   - “不记得了”只能在数据库确实没有记录时说，并要说清查的是哪一段时间；
+   - 查询失败时必须说明“哪段时间的记录读取失败”，不得伪装没有记忆。`;
 }
 
 /**
@@ -208,11 +215,11 @@ function parseAssistantOutput(text) {
   };
 }
 
-function historyToMessages(history) {
+export function historyToMessages(history, { maxMessages = 16, maxImages = 2 } = {}) {
   const out = [];
-  let remainingHistoricalImages = 2;
+  let remainingHistoricalImages = maxImages;
   // 从新到旧决定哪 2 张图保留，然后恢复顺序
-  const prepared = (history || []).slice(-16).reverse().map((item) => {
+  const prepared = (history || []).slice(-maxMessages).reverse().map((item) => {
     let imageUrls = Array.isArray(item.image_urls) ? item.image_urls : [];
     if (imageUrls.length > remainingHistoricalImages) imageUrls = imageUrls.slice(0, remainingHistoricalImages);
     remainingHistoricalImages -= imageUrls.length;
@@ -227,17 +234,19 @@ function historyToMessages(history) {
       continue;
     }
     const sender = item.sender || item.user_id || '用户';
+    const sourceTag = item.source === 'main_chat' ? '[主聊天]' : (item.source === 'assistant' ? '[momi助手]' : '');
+    const prefix = sourceTag ? `${sourceTag}[${sender}]` : `[${sender}]`;
     if (imageUrls.length) {
       out.push({
         role: 'user',
         content: [
-          { type: 'text', text: `[${sender}]: ${item.content || '[图片]'}` },
+          { type: 'text', text: `${prefix}: ${item.content || '[图片]'}` },
           ...imageUrls.map((url) => ({ type: 'image_url', image_url: { url } })),
         ],
       });
     } else {
       const hadImage = item.content_type === 'image' || item.content_type === 'mixed' || (item.image_urls?.length > 0);
-      out.push({ role: 'user', content: `[${sender}]: ${item.content || ''}${hadImage ? ' [历史图片，已省略以节省上下文]' : ''}` });
+      out.push({ role: 'user', content: `${prefix}: ${item.content || ''}${hadImage ? ' [历史图片，已省略以节省上下文]' : ''}` });
     }
   }
   return out;
@@ -254,7 +263,7 @@ export async function chatWithMomi({
   recentChatHistory = [],
   triggerSource = 'assistant',
 }) {
-  // 1) 轻量意图分类：数据 / 配方 / 显式记忆 / 天气
+  // 1) 轻量意图分类：数据 / 配方 / 显式记忆 / 天气 / 聊天历史
   const explicit = parseExplicitMemory(message, userId);
   let preciseData = null;
   let weatherData = null;
@@ -274,11 +283,22 @@ export async function chatWithMomi({
     };
   }
 
+  // 跨场景多层级上下文构建（近端40条打通主聊天与助手 + 7天滚动摘要）
+  const convContext = await buildConversationContext({
+    scene: triggerSource,
+    userId,
+    message,
+    localMessages: recentChatHistory,
+  }).catch((err) => {
+    console.warn('[momiAssistant] 构建跨场景上下文异常:', err.message);
+    return null;
+  });
+
   // 2-4) state + digest + 相关记忆，按预算拼 system prompt
   const [stateBefore, digest, memories] = await Promise.all([
     getMomiState(),
     getDataDigest(),
-    getRelevantMemories(message),
+    convContext?.memories || getRelevantMemories(message),
   ]);
   const systemPrompt = buildSystemPrompt({
     memoryBlock: formatMemoryBlock(memories),
@@ -286,10 +306,12 @@ export async function chatWithMomi({
     digestBlock: formatDigest(digest),
     preciseData,
     weatherData,
+    historyBlock: convContext?.historyBlock || '',
   });
 
-  // 5) 组装 messages：历史最多 16 条，历史图最多 2 张；本轮图片绝不静默丢弃
-  const messages = [{ role: 'system', content: systemPrompt }, ...historyToMessages(recentChatHistory)];
+  // 5) 组装 messages：合并跨场景近端历史（最多40条），本轮图片绝不静默丢弃
+  const effectiveHistory = convContext?.nearMessages?.length ? convContext.nearMessages : recentChatHistory;
+  const messages = [{ role: 'system', content: systemPrompt }, ...historyToMessages(effectiveHistory, { maxMessages: 40 })];
   if (images.length) {
     const preparedImages = [];
     for (const uri of images) {
