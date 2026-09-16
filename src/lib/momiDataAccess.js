@@ -599,16 +599,24 @@ export const INTENT_RULES = [
       unopenedCount: await getUnopenedCapsuleCount(),
     }),
   },
+  {
+    intent: 'weather',
+    pattern: /天气|下雨|下雪|降温|升温|气温|几度|冷|热|带伞|穿什么|紫外线|风大|台风|雾霾/,
+    run: async (context = {}) => {
+      const { getWeatherForMomi } = require('./weatherService');
+      return getWeatherForMomi({ userId: context?.userId });
+    },
+  },
 ];
 
 /**
  * 命中意图则先查库。返回 { intent, data } 或 null。
  */
-export async function queryByIntent(message) {
+export async function queryByIntent(message, context = {}) {
   if (!message) return null;
   for (const rule of INTENT_RULES) {
     if (rule.pattern.test(message)) {
-      const data = await rule.run();
+      const data = await rule.run(context);
       return { intent: rule.intent, data };
     }
   }

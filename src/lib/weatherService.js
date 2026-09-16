@@ -92,6 +92,7 @@ export async function getWeather(settings = {}, { forceRefresh = false } = {}) {
     `longitude=${coords.longitude}`,
     'current=temperature_2m,apparent_temperature,weather_code,precipitation',
     'hourly=temperature_2m,precipitation_probability,weather_code',
+    'daily=temperature_2m_max,temperature_2m_min,weather_code,precipitation_probability_max',
     'forecast_days=2',
     'timezone=auto',
   ].join('&');
@@ -108,6 +109,12 @@ export async function getWeather(settings = {}, { forceRefresh = false } = {}) {
       code: json.current?.weather_code,
       description: weatherCodeToChinese(json.current?.weather_code),
     },
+    daily: {
+      temperatureMax: json.daily?.temperature_2m_max || [],
+      temperatureMin: json.daily?.temperature_2m_min || [],
+      code: json.daily?.weather_code || [],
+      precipitationProbabilityMax: json.daily?.precipitation_probability_max || [],
+    },
     hourly: (json.hourly?.time || []).map((time, i) => ({
       time,
       temperature: json.hourly.temperature_2m?.[i],
@@ -119,6 +126,118 @@ export async function getWeather(settings = {}, { forceRefresh = false } = {}) {
   };
   await writeCache(cacheKey, value);
   return value;
+}
+
+/**
+ * momi 专用天气数据聚合接口
+ * 超时上限 8 秒，失败时明确区分 reason: no_city | no_permission | network | api_error
+ */
+export async function getWeatherForMomi({ userId } = {}) {
+  try {
+    const { getEffectiveProactiveSettings } = require('./momiProactiveSettings');
+    const settings = await getEffectiveProactiveSettings(userId);
+
+    const hasCoords = Number.isFinite(settings?.latitude) && Number.isFinite(settings?.longitude);
+    const hasCity = Boolean(settings?.city && settings.city !== '当前位置');
+
+    if (!hasCoords && !hasCity && !locationProvider) {
+      return { error: 'WEATHER_UNAVAILABLE', reason: 'no_city' };
+    }
+
+    // 8 秒超时保护
+    let timeoutId;
+    const timeoutPromise = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => reject(new Error('TIMEOUT')), 8000);
+    });
+
+    const weatherPromise = getWeather(settings).finally(() => {
+      clearTimeout(timeoutId);
+    });
+
+    const data = await Promise.race([weatherPromise, timeoutPromise]);
+
+    const currentTemp = data.current?.temperature != null ? Math.round(data.current.temperature) : '--';
+    const feelsLike = data.current?.apparentTemperature != null ? Math.round(data.current.apparentTemperature) : currentTemp;
+    const currentDesc = data.current?.description || '晴';
+
+    let todayMin = data.daily?.temperatureMin?.[0];
+    let todayMax = data.daily?.temperatureMax?.[0];
+    let todayDesc = weatherCodeToChinese(data.daily?.code?.[0]) || currentDesc;
+    let todayRainProb = data.daily?.precipitationProbabilityMax?.[0] || 0;
+
+    let tomorrowMin = data.daily?.temperatureMin?.[1];
+    let tomorrowMax = data.daily?.temperatureMax?.[1];
+    let tomorrowDesc = weatherCodeToChinese(data.daily?.code?.[1]) || '多云';
+    let tomorrowRainProb = data.daily?.precipitationProbabilityMax?.[1] || 0;
+
+    // 兜底：若 daily 缺失，从 hourly 聚合
+    if (todayMin == null && data.hourly?.length) {
+      const todayHourly = data.hourly.slice(0, 24);
+      const temps = todayHourly.map((h) => h.temperature).filter(Number.isFinite);
+      if (temps.length) {
+        todayMin = Math.min(...temps);
+        todayMax = Math.max(...temps);
+      }
+      const rains = todayHourly.map((h) => h.precipitationProbability).filter(Number.isFinite);
+      if (rains.length) todayRainProb = Math.max(...rains);
+    }
+    if (tomorrowMin == null && data.hourly?.length > 24) {
+      const tomorrowHourly = data.hourly.slice(24, 48);
+      const temps = tomorrowHourly.map((h) => h.temperature).filter(Number.isFinite);
+      if (temps.length) {
+        tomorrowMin = Math.min(...temps);
+        tomorrowMax = Math.max(...temps);
+      }
+      const rains = tomorrowHourly.map((h) => h.precipitationProbability).filter(Number.isFinite);
+      if (rains.length) tomorrowRainProb = Math.max(...rains);
+    }
+
+    let advice = '体感舒适，适合出门走走或在窗边喝杯热茶 🐾';
+    if (todayRainProb >= 60 || /雨|雷/.test(currentDesc) || /雨|雷/.test(todayDesc)) {
+      advice = '今天有降雨可能，出门请带好雨伞，注意路滑 ☔';
+    } else if (Number.isFinite(Number(currentTemp)) && Number(currentTemp) <= 8) {
+      advice = '气温较低，出门记得穿厚外套，注意防寒保暖 🧣';
+    } else if (Number.isFinite(Number(currentTemp)) && Number(currentTemp) >= 30) {
+      advice = '天气比较炎热，外出请做好防晒，多补充水分 🥤';
+    } else if (todayMax != null && todayMin != null && todayMax - todayMin >= 8) {
+      advice = '早晚温差较大，建议随身备一件薄外套，避免着凉 🧥';
+    }
+
+    return {
+      location: data.location || '当前位置',
+      updatedAt: data.fetchedAt || new Date().toISOString(),
+      current: {
+        temp: currentTemp,
+        feelsLike,
+        desc: currentDesc,
+      },
+      today: {
+        min: todayMin != null ? Math.round(todayMin) : '--',
+        max: todayMax != null ? Math.round(todayMax) : '--',
+        desc: todayDesc,
+        rainProb: todayRainProb,
+      },
+      tomorrow: {
+        min: tomorrowMin != null ? Math.round(tomorrowMin) : '--',
+        max: tomorrowMax != null ? Math.round(tomorrowMax) : '--',
+        desc: tomorrowDesc,
+        rainProb: tomorrowRainProb,
+      },
+      advice,
+    };
+  } catch (err) {
+    console.warn('[weatherService] getWeatherForMomi 失败:', err.message);
+    const msg = String(err.message || '').toLowerCase();
+    let reason = 'api_error';
+    if (msg.includes('city') || msg.includes('城市')) {
+      reason = 'no_city';
+    } else if (msg.includes('permission') || msg.includes('授权') || msg.includes('定位')) {
+      reason = 'no_permission';
+    } else if (msg.includes('timeout') || msg.includes('network') || msg.includes('fetch') || msg.includes('超时')) {
+      reason = 'network';
+    }
+    return { error: 'WEATHER_UNAVAILABLE', reason };
+  }
 }
 
 /** 未来 3 小时降雨概率>=60%，或 12 小时降温>=6℃时提醒。 */

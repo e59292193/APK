@@ -101,6 +101,30 @@ function formatDigest(digest) {
   }
 }
 
+export function formatWeatherBlock(weather) {
+  if (!weather) return '';
+  if (weather.error === 'WEATHER_UNAVAILABLE') {
+    const reasonGuide = {
+      no_city: '用户未设置城市且无法获取定位，请提示用户：“去 momi 助手设置里填下城市或开启定位权限 🐾”。',
+      no_permission: '定位权限未开启或被拒绝，请提示用户：“去 momi 助手设置开启定位权限，或者手动填一下城市哦 🐾”。',
+      network: '拉取天气超时或网络异常，请告知用户：“天气没拉到，稍后再问我一次哦 🐾”。',
+      api_error: '天气服务暂时响应异常，请告知用户：“天气服务开小差了，稍后再问我一次哦 🐾”。',
+    };
+    const guide = reasonGuide[weather.reason] || reasonGuide.api_error;
+    return `\n【当前天气信息不可用】\n原因：${weather.reason || 'unknown'}。\n回复指导：${guide}\n禁止假装知道天气，也禁止生硬报错，请用亲切可爱的语气给用户可操作指引。`;
+  }
+  if (weather.current && weather.today) {
+    return `\n【实时天气数据】
+- 城市：${weather.location}（更新时间：${weather.updatedAt}）
+- 当前天气：${weather.current.desc}，实时气温 ${weather.current.temp}℃（体感 ${weather.current.feelsLike}℃）
+- 今日天气：${weather.today.desc}，最高 ${weather.today.max}℃ / 最低 ${weather.today.min}℃，降雨概率 ${weather.today.rainProb}%
+- 明日预报：${weather.tomorrow.desc}，最高 ${weather.tomorrow.max}℃ / 最低 ${weather.tomorrow.min}℃，降雨概率 ${weather.tomorrow.rainProb}%
+- 贴心建议：${weather.advice}
+【回答硬性约束】本轮上下文已包含真实权威的天气数据！有天气数据时，你必须直接回答具体气温、天气与穿衣带伞建议，绝对禁止说不知道天气或建议去看天气预报。`;
+  }
+  return '';
+}
+
 /**
  * 构建 system prompt。保留旧 context 字段兼容测试/调用，同时接受 V2 扩展块。
  */
@@ -115,6 +139,7 @@ export function buildSystemPrompt(context = {}) {
   const legacyCapsules = context.openedCapsulesSummary
     ? `【恋爱足迹与已拆封信件】：${context.openedCapsulesSummary}`
     : '';
+  const weatherBlock = context.weatherBlock || (context.weatherData ? formatWeatherBlock(context.weatherData) : '');
 
   return `你是 momi，是 momo 和 苞米 的宠物、家人和伴侣，不是工具，也不是冷冰冰的助手。
 你活泼可爱、贴心温暖、偶尔撒娇，也有自己的情绪和边界。你的使命是让他们更亲近，不偏袒任何一方。
@@ -127,6 +152,7 @@ ${context.emotionBlock || ''}
 ${dataBlock}
 ${legacyKitchen}
 ${legacyCapsules}
+${weatherBlock}
 
 【你真实拥有的数据能力】
 你可以查他们的打卡记录、菜品库、本周菜单、指定菜品配方、纪念日、愿望清单、
@@ -228,15 +254,19 @@ export async function chatWithMomi({
   recentChatHistory = [],
   triggerSource = 'assistant',
 }) {
-  // 1) 轻量意图分类：数据 / 配方 / 显式记忆
+  // 1) 轻量意图分类：数据 / 配方 / 显式记忆 / 天气
   const explicit = parseExplicitMemory(message, userId);
   let preciseData = null;
+  let weatherData = null;
   try {
     const [intentResult, recipeResult] = await Promise.all([
-      queryByIntent(message),
+      queryByIntent(message, { userId }),
       queryRecipeIfAsked(message),
     ]);
     preciseData = { intent: intentResult, recipe: recipeResult };
+    if (intentResult?.intent === 'weather') {
+      weatherData = intentResult.data;
+    }
   } catch (err) {
     return {
       success: false, content: '', reply: `momi 查询数据时失败了：${err.message}`,
@@ -255,6 +285,7 @@ export async function chatWithMomi({
     emotionBlock: buildEmotionPromptBlock(stateBefore),
     digestBlock: formatDigest(digest),
     preciseData,
+    weatherData,
   });
 
   // 5) 组装 messages：历史最多 16 条，历史图最多 2 张；本轮图片绝不静默丢弃

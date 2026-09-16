@@ -59,6 +59,24 @@ export function createWeatherLocationProvider() {
         // 逆地理编码失败不影响经纬度使用
       }
 
+      // 反查城市名回写到设置（带 resolvedAt，24 小时刷新一次）
+      try {
+        const { getEffectiveProactiveSettings, saveProactiveSettings } = require('./momiProactiveSettings');
+        const effective = await getEffectiveProactiveSettings('momo').catch(() => null);
+        const lastResolved = effective?.resolvedAt ? new Date(effective.resolvedAt).getTime() : 0;
+        const now = Date.now();
+        if (now - lastResolved >= 24 * 3600 * 1000 || !effective?.city || effective?.city === '当前位置') {
+          saveProactiveSettings('momo', {
+            latitude: position.coords.latitude,
+            longitude: position.coords.longitude,
+            city: cityName,
+            resolvedAt: new Date(now).toISOString(),
+          }).catch(() => {});
+        }
+      } catch {
+        // 静默降级，不阻断定位返回
+      }
+
       return {
         latitude: position.coords.latitude,
         longitude: position.coords.longitude,
