@@ -62,14 +62,22 @@ export async function maybeCreateMomiInterjection({
       recentChatHistory,
       triggerSource: 'chat_mention',
     });
-    if (!generated.success || !generated.content) return null;
+    let replyContent = generated.content;
+    if (!generated.success) {
+      if (generated.errorCode === 'VISION_UNSUPPORTED') {
+        replyContent = '现在这个模型看不了图，去 momi 设置里换支持识图的模型 🐾';
+      } else {
+        return null;
+      }
+    }
+    if (!replyContent) return null;
 
     const { data, error } = await fetchWithTimeout(() =>
       supabase.from('momi_chat_interjections').insert([{
         couple_id: COUPLE_ID,
         trigger_message_id: String(triggerMessageId),
         trigger_user: userId,
-        content: generated.content,
+        content: replyContent,
       }]).select(),
     { kind: 'write' });
     if (error) {

@@ -33,7 +33,7 @@ export const AI_ERRORS = {
   NETWORK: 'momi 睡着了，请稍后再试 zzz',
   AUTH_OR_BALANCE: 'momi 的能量耗尽了，请检查 API Key 或账户余额',
   TIMEOUT: 'momi 正在思考但超时了，请重试',
-  VISION_UNSUPPORTED: '当前模型看不见图片，请在设置中改用支持识图的模型（如 Qwen-VL）',
+  VISION_UNSUPPORTED: '现在这个模型看不了图，去 momi 设置里换支持识图的模型 🐾',
   RATE_LIMIT: 'momi 被问得太频繁啦，稍等一下再试~',
   SERVER_ERROR: 'AI 服务暂时开小差了，请稍后再试',
 };
@@ -73,10 +73,10 @@ function getImageSize(uri) {
 }
 
 /**
- * 图片压缩预处理：长边 <= 1280px、JPEG quality 0.7。
+ * 图片压缩预处理：长边 <= 1024px、JPEG quality 0.7。
  * 手机原图（5-12MB）直接转 Base64 会接近 10MB 文本，必定超时或被服务端 413 拒绝。
  */
-export async function compressImageForAI(uri) {
+export async function compressImageForAI(uri, maxEdge = 1024) {
   if (!uri || uri.startsWith('data:') || uri.startsWith('http://') || uri.startsWith('https://')) {
     return uri;
   }
@@ -85,11 +85,12 @@ export async function compressImageForAI(uri) {
     const { width, height } = await getImageSize(uri);
     const context = ImageManipulator.manipulate(uri);
     const longEdge = Math.max(width, height);
-    if (longEdge > 1280 && width > 0 && height > 0) {
+    const targetEdge = Number(maxEdge) || 1024;
+    if (longEdge > targetEdge && width > 0 && height > 0) {
       if (width >= height) {
-        context.resize({ width: 1280 });
+        context.resize({ width: targetEdge });
       } else {
-        context.resize({ height: 1280 });
+        context.resize({ height: targetEdge });
       }
     }
     const ref = await context.renderAsync();

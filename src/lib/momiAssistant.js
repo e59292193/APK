@@ -291,9 +291,18 @@ export async function chatWithMomi({
     requiresVision: images.length > 0,
   });
   if (!res.success) {
+    let reply = res.error;
+    if (res.errorCode === 'VISION_UNSUPPORTED') {
+      reply = '现在这个模型看不了图，去 momi 设置里换支持识图的模型 🐾';
+    }
     return {
-      success: false, content: '', reply: res.error,
-      emotionDelta: null, memoryWrites: [], usedFallbackModel: false, errorCode: res.errorCode,
+      success: false,
+      content: '',
+      reply,
+      emotionDelta: null,
+      memoryWrites: [],
+      usedFallbackModel: false,
+      errorCode: res.errorCode,
     };
   }
 

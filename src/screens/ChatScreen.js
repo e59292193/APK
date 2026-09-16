@@ -19,6 +19,7 @@ import { supabase } from '../lib/supabase';
 import { fetchWithTimeout } from '../lib/fetchWithTimeout';
 import { onSignal, emitSignal } from '../lib/realtimeSignal';
 import { maybeCreateMomiInterjection } from '../lib/momiMention';
+import { collectMomiContextImageRefs, resolveImageRefsForAI } from '../lib/momiChatImages';
 import { fetchTodayCount } from '../lib/checkinUtils';
 import { formatLocalDateTime } from '../lib/dateUtils';
 import CheckinCreateModal from '../components/CheckinCreateModal';
@@ -161,11 +162,15 @@ export default function ChatScreen({
         {
           text: '引用',
           onPress: () => {
+            const isImg = msgType === 'image' || item.content_type === 'image' || Boolean(item.metadata?.image_url || item.image_url);
             setQuotedMessage({
               id: item.id,
               user_id: isMomi ? 'momi' : item.user_id,
               content: getQuotePreviewText(item),
               type: msgType,
+              content_type: isImg ? 'image' : (item.content_type || msgType),
+              metadata: item.metadata || null,
+              image_url: item.metadata?.image_url || item.image_url || null,
               isMomi,
             });
           },
@@ -450,6 +455,7 @@ export default function ChatScreen({
       };
 
       // 带引用消息时写入 metadata.quote
+      const quoteForMomi = quotedMessage;
       if (quotedMessage) {
         insertData.metadata = {
           quote: {
@@ -457,6 +463,7 @@ export default function ChatScreen({
             user_id: quotedMessage.user_id === 'momi' ? 'momi' : quotedMessage.user_id,
             content: quotedMessage.content,
             type: quotedMessage.type,
+            image_url: quotedMessage.image_url || quotedMessage.metadata?.image_url || null,
           },
         };
       }
@@ -481,23 +488,50 @@ export default function ChatScreen({
         }, 100);
 
         // ─── 触发 momi 名字唤醒 / 引用插话（仅在发送端调用并写入 momi_chat_interjections）───
-        const recentHistory = messages.slice(0, 8).reverse().map((m) => ({
-          sender: m.user_id === userId ? 'me' : m.user_id === 'momi' ? 'momi' : 'partner',
-          content: m.content || '',
-        }));
+        (async () => {
+          try {
+            const imageRefs = collectMomiContextImageRefs({
+              messages,
+              quotedMessage: quoteForMomi,
+              now: new Date(),
+              windowMinutes: 10,
+              maxImages: 4,
+            });
+            const resolvedImages = await resolveImageRefsForAI(imageRefs).catch((imgErr) => {
+              console.warn('[Chat] 图片签名 URL 解析异常:', imgErr.message);
+              return { urls: [], failed: [] };
+            });
 
-        maybeCreateMomiInterjection({
-          isSender: true,
-          userId,
-          triggerMessageId: sentMessage.id,
-          text: sentMessage.content,
-          message: sentMessage.content,
-          recentChatHistory: recentHistory,
-          isQuote: isQuoteMomi,
-          quotedContent: quotedContent || '',
-        }).catch((err) => {
-          console.warn('[Chat] 名字唤醒插话触发异常:', err.message);
-        });
+            const recentHistory = messages.slice(0, 16).reverse().map((m) => {
+              const mSender = m.user_id === userId ? 'me' : (m.user_id === 'momi' ? 'momi' : 'partner');
+              const senderName = m.user_id === 'baomi' ? '苞米' : (m.user_id === 'momo' ? 'momo' : (m.user_id || '用户'));
+              const isImg = m.type === 'image' || m.content_type === 'image' || Boolean(m.metadata?.image_url || m.image_url);
+              const rawContent = (m.content || '').trim();
+              const displayContent = rawContent || (isImg ? `[${senderName} 发了一张图片]` : '');
+
+              return {
+                sender: mSender,
+                content: displayContent,
+                content_type: isImg ? 'image' : (m.content_type || m.type || 'text'),
+                image_urls: isImg ? (m.metadata?.image_url ? [m.metadata.image_url] : (m.image_url ? [m.image_url] : [])) : [],
+              };
+            });
+
+            await maybeCreateMomiInterjection({
+              isSender: true,
+              userId,
+              triggerMessageId: sentMessage.id,
+              text: sentMessage.content,
+              message: sentMessage.content,
+              recentChatHistory: recentHistory,
+              isQuote: isQuoteMomi,
+              quotedContent: quotedContent || '',
+              images: resolvedImages.urls || [],
+            });
+          } catch (err) {
+            console.warn('[Chat] 名字唤醒插话触发异常:', err.message);
+          }
+        })();
       }
 
       // 每 30 条消息自动触发一次记忆提取
@@ -664,9 +698,10 @@ export default function ChatScreen({
       const publicUrls = await uploadImages(uris);
 
       // Send messages
-      const inserts = publicUrls.map(url => ({
+      const senderName = userId === 'baomi' ? '苞米' : (userId === 'momo' ? 'momo' : (userId || '用户'));
+      const inserts = publicUrls.map((url) => ({
         user_id: userId,
-        content: '',
+        content: `[${senderName} 发了一张图片]`,
         type: 'image',
         metadata: { image_url: url },
       }));
