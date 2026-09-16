@@ -26,34 +26,39 @@ export function Button({
   const { colors: currentColors = colors } = useTheme();
   const s = SIZES[size] || SIZES.medium;
 
+  const primaryBg = currentColors.primaryAction || currentColors.primary || '#8B5FC7';
+  const primaryBgPressed = currentColors.primaryActionPressed || currentColors.primaryPressed || '#7A4EB6';
+  const primaryBgDisabled = currentColors.primaryActionDisabled || currentColors.primaryDisabled || '#D1C2E8';
+  const textOnPrimary = currentColors.textOnPrimary || '#FFFFFF';
+
   const VARIANTS = {
     primary: {
-      bg: currentColors.primaryAction,
-      bgPressed: currentColors.primaryActionPressed,
-      bgDisabled: currentColors.primaryActionDisabled,
-      text: '#FFFFFF',
-      textDisabled: '#FFFFFF',
+      bg: primaryBg,
+      bgPressed: primaryBgPressed,
+      bgDisabled: primaryBgDisabled,
+      text: textOnPrimary,
+      textDisabled: textOnPrimary,
     },
     secondary: {
-      bg: currentColors.primary ? currentColors.primary[100] : currentColors.surfaceSoft,
-      bgPressed: currentColors.primary ? currentColors.primary[200] : currentColors.border,
-      bgDisabled: currentColors.neutral ? currentColors.neutral[100] : '#F5F3F7',
-      text: currentColors.primary ? currentColors.primary[700] : currentColors.primaryAction,
-      textDisabled: currentColors.textDisabled,
+      bg: currentColors.primarySoft || currentColors.surfaceSoft || '#F5F3F7',
+      bgPressed: currentColors.border || '#EAE5EF',
+      bgDisabled: '#F5F3F7',
+      text: primaryBg,
+      textDisabled: currentColors.textDisabled || '#999999',
     },
     ghost: {
       bg: 'transparent',
-      bgPressed: currentColors.primary ? currentColors.primary[50] : currentColors.surfaceSoft,
+      bgPressed: currentColors.surfaceSoft || '#F5F3F7',
       bgDisabled: 'transparent',
-      text: currentColors.primaryAction,
-      textDisabled: currentColors.textDisabled,
+      text: primaryBg,
+      textDisabled: currentColors.textDisabled || '#999999',
     },
     danger: {
-      bg: currentColors.errorSoft,
+      bg: currentColors.errorSoft || '#FDEBE9',
       bgPressed: '#FFE0DE',
-      bgDisabled: currentColors.neutral ? currentColors.neutral[100] : '#F5F3F7',
-      text: currentColors.error,
-      textDisabled: currentColors.textDisabled,
+      bgDisabled: '#F5F3F7',
+      text: currentColors.error || '#F05A4F',
+      textDisabled: currentColors.textDisabled || '#999999',
     },
   };
 
@@ -71,7 +76,7 @@ export function Button({
           height: s.height,
           paddingHorizontal: s.padH,
           backgroundColor: pressed && !isDisabled ? v.bgPressed : bg,
-          opacity: variant === 'ghost' && isDisabled ? 0.5 : 1,
+          opacity: isDisabled ? 0.6 : 1,
         },
         fullWidth && styles.fullWidth,
         style,

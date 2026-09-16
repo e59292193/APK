@@ -13,6 +13,7 @@ import {
   ScrollView,
   AppState,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useKeyboardHeight } from '../hooks/useKeyboardHeight';
 import { supabase } from '../lib/supabase';
 import { fetchWithTimeout } from '../lib/fetchWithTimeout';
@@ -112,8 +113,9 @@ export default function ChatScreen({
 
   // Partner
   const partnerId = Object.keys(VALID_USERS).find((u) => u !== userId) || '';
+  const insets = useSafeAreaInsets();
   const keyboardHeight = useKeyboardHeight();
-  const composerBottomOffset = keyboardHeight > 0 ? keyboardHeight : 0;
+  const composerBottomOffset = Platform.OS === 'ios' ? (keyboardHeight > 0 ? keyboardHeight : 0) : 0;
 
   // ─── Avatars state (功能4) ───
   const [avatars, setAvatars] = useState({ momo: '', '苞米': '', momi: '' });
@@ -1207,7 +1209,7 @@ export default function ChatScreen({
         contentContainerStyle={styles.messagesList}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
-        keyboardDismissMode="on-drag"
+        keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
         initialNumToRender={15}
         maxToRenderPerBatch={10}
         windowSize={10}
@@ -1311,7 +1313,11 @@ export default function ChatScreen({
       )}
 
       {/* Input Bar */}
-      <View style={[styles.inputBar, { backgroundColor: cardBg, borderTopColor: border }]}>
+      <View style={[styles.inputBar, {
+        backgroundColor: cardBg,
+        borderTopColor: border,
+        paddingBottom: (keyboardHeight > 0 ? spacing[2] : Math.max(insets.bottom, spacing[2])) + 2,
+      }]}>
         <TouchableOpacity
           style={[styles.plusButton, { backgroundColor: bg }]}
           onPress={() => setPlusPanelVisible(!plusPanelVisible)}
@@ -1817,7 +1823,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing[3] + 2,
     paddingVertical: spacing[2] + 2,
     fontSize: 15,
-    maxHeight: 80,
+    maxHeight: 120,
     color: colors.textPrimary,
   },
   sendBtn: {

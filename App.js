@@ -95,8 +95,24 @@ function LoginScreen({ onLogin }) {
           <Text style={styles.formTitle}>欢迎回来</Text>
           <AppInput label="昵称" placeholder="输入你的昵称" value={nickname} onChangeText={(v) => { setNickname(v); setErrorMsg(''); }} autoCapitalize="none" autoCorrect={false} />
           <AppInput label="密码" placeholder="输入密码" value={password} onChangeText={(v) => { setPassword(v); setErrorMsg(''); }} secureTextEntry returnKeyType="go" onSubmitEditing={handleLogin} />
-          {errorMsg ? <View style={styles.errorRow}><Ionicons name="alert-circle-outline" size={16} color={colors.error} /><Text style={styles.errorText}>{errorMsg}</Text></View> : null}
-          <Button variant="primary" size="large" fullWidth loading={loading} disabled={loading} onPress={handleLogin} style={{ marginTop: spacing[3] }}>登录</Button>
+          {errorMsg ? <View style={styles.errorRow}><Ionicons name="alert-circle-outline" size={16} color={colors.error || '#F05A4F'} /><Text style={styles.errorText}>{errorMsg}</Text></View> : null}
+          <Button
+            variant="primary"
+            size="large"
+            fullWidth
+            loading={loading}
+            disabled={loading}
+            onPress={handleLogin}
+            style={{
+              marginTop: spacing[3],
+              height: 52,
+              borderRadius: 14,
+              backgroundColor: colors.primaryAction || colors.primary || '#8B5FC7',
+            }}
+            textStyle={{ color: '#FFFFFF', fontSize: 16, fontWeight: '700' }}
+          >
+            登录
+          </Button>
           <Text style={styles.hintText}>专属账号，仅限两人使用</Text>
         </View>
       </ScrollView>

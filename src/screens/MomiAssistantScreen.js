@@ -1,7 +1,7 @@
 // momi 独立陪伴界面 V2：识图 / 情绪养成 / 主动消息 / 长按记忆
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator, Alert, FlatList, Image, KeyboardAvoidingView, Platform,
+  ActivityIndicator, Alert, FlatList, Image,
   StyleSheet, Text, TextInput, TouchableOpacity, View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -19,6 +19,12 @@ import { pickImage } from '../lib/imagePicker';
 import { fetchAllAvatars } from '../lib/avatarService';
 import { supabase } from '../lib/supabase';
 import { formatLocalTime } from '../lib/dateUtils';
+import {
+  KeyboardAwareChatLayout,
+  CHAT_LIST_KEYBOARD_PROPS,
+  getChatListPaddingBottom,
+  MAX_COMPOSER_INPUT_HEIGHT,
+} from '../components/KeyboardAwareChatLayout';
 
 function nextExp(state) {
   return GROWTH_THRESHOLDS[(state?.growth_level || 1) - 1] || GROWTH_THRESHOLDS.at(-1);
@@ -201,17 +207,18 @@ export default function MomiAssistantScreen({ userId, onBack, onNavigateSettings
         </View>
       </View>
 
-      {loading ? <View style={styles.center}><ActivityIndicator color={colors.primary} /><Text style={styles.muted}>正在呼唤 momi...</Text></View> : (
-        <FlatList
-          ref={flatListRef} data={messages} keyExtractor={(item, i) => item.id || `msg-${i}`}
-          renderItem={renderItem} contentContainerStyle={styles.listContent}
-          onContentSizeChange={() => flatListRef.current?.scrollToEnd({ animated: false })}
-          ListEmptyComponent={<View style={styles.empty}><Text style={styles.emptyEmoji}>🐾</Text><Text style={styles.emptyTitle}>我是你们的宠物 momi</Text><Text style={styles.muted}>发张照片给我看，或者问问我你们的共同记录吧～</Text></View>}
-          ListFooterComponent={sending ? <View style={styles.typing}><Text style={styles.typingText}>{uploadProgress > 0 && uploadProgress < 1 ? `图片上传中 ${Math.round(uploadProgress * 100)}%` : 'momi 正在想…'}</Text><ActivityIndicator size="small" color={colors.primary} /></View> : null}
-        />
-      )}
+      <KeyboardAwareChatLayout listRef={flatListRef} headerHeight={56}>
+        {loading ? <View style={styles.center}><ActivityIndicator color={colors.primary} /><Text style={styles.muted}>正在呼唤 momi...</Text></View> : (
+          <FlatList
+            ref={flatListRef} data={messages} keyExtractor={(item, i) => item.id || `msg-${i}`}
+            renderItem={renderItem} contentContainerStyle={[styles.listContent, { paddingBottom: getChatListPaddingBottom(insets, 60) }]}
+            {...CHAT_LIST_KEYBOARD_PROPS}
+            onContentSizeChange={() => flatListRef.current?.scrollToEnd({ animated: false })}
+            ListEmptyComponent={<View style={styles.empty}><Text style={styles.emptyEmoji}>🐾</Text><Text style={styles.emptyTitle}>我是你们的宠物 momi</Text><Text style={styles.muted}>发张照片给我看，或者问问我你们的共同记录吧～</Text></View>}
+            ListFooterComponent={sending ? <View style={styles.typing}><Text style={styles.typingText}>{uploadProgress > 0 && uploadProgress < 1 ? `图片上传中 ${Math.round(uploadProgress * 100)}%` : 'momi 正在想…'}</Text><ActivityIndicator size="small" color={colors.primary} /></View> : null}
+          />
+        )}
 
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={Platform.OS === 'ios' ? insets.bottom : 0}>
         {selectedImages.length ? <View style={styles.previewRow}>{selectedImages.map((uri, i) => (
           <View key={uri} style={styles.previewWrap}><Image source={{ uri }} style={styles.preview} /><TouchableOpacity style={styles.removeImage} onPress={() => setSelectedImages((p) => p.filter((_, n) => n !== i))}><Ionicons name="close" size={14} color={colors.textOnPrimary} /></TouchableOpacity></View>
         ))}</View> : null}
@@ -225,7 +232,7 @@ export default function MomiAssistantScreen({ userId, onBack, onNavigateSettings
             <Ionicons name="arrow-up" size={20} color={colors.textOnPrimary} />
           </TouchableOpacity>
         </View>
-      </KeyboardAvoidingView>
+      </KeyboardAwareChatLayout>
     </View>
   );
 }
@@ -272,7 +279,7 @@ const createStyles = (c) => StyleSheet.create({
   removeImage: { position: 'absolute', top: -5, right: -5, width: 20, height: 20, borderRadius: 10, backgroundColor: c.error, alignItems: 'center', justifyContent: 'center' },
   composer: { flexDirection: 'row', alignItems: 'flex-end', gap: spacing[2], paddingHorizontal: spacing[3], paddingTop: spacing[2], backgroundColor: c.card, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: c.border },
   imageButton: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center' },
-  input: { flex: 1, minHeight: 42, maxHeight: 110, backgroundColor: c.surfaceSoft, borderRadius: radius.lg, paddingHorizontal: spacing[3], paddingVertical: 10, color: c.text, ...typography.body },
+  input: { flex: 1, minHeight: 42, maxHeight: MAX_COMPOSER_INPUT_HEIGHT, backgroundColor: c.surfaceSoft, borderRadius: radius.lg, paddingHorizontal: spacing[3], paddingVertical: 10, color: c.text, ...typography.body },
   send: { width: 40, height: 40, borderRadius: 20, backgroundColor: c.primary, alignItems: 'center', justifyContent: 'center' },
   disabled: { opacity: 0.35 },
 });

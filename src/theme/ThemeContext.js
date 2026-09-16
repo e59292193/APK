@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { THEMES, DEFAULT_THEME, THEME_LIST, resolveThemeId } from './themes';
+import { assertThemeTokens } from '../lib/themeIntegrity';
 
 // 现行存储键；旧键仅用于一次性搬家读取
 export const THEME_STORAGE_KEY = '@momi_theme';
@@ -113,18 +114,19 @@ export function ThemeProvider({ children, initialThemeId }) {
   }, []);
 
   const currentTheme = useMemo(() => THEMES[themeId] || DEFAULT_THEME, [themeId]);
+  const enrichedColors = useMemo(() => assertThemeTokens(currentTheme), [currentTheme]);
 
   const contextValue = useMemo(
     () => ({
       theme: currentTheme,
       themeId,
-      colors: currentTheme.colors,
+      colors: enrichedColors,
       isDark: currentTheme.isDark,
       setTheme,
       setThemeId: setTheme, // 向后兼容旧调用名
       availableThemes: THEME_LIST,
     }),
-    [currentTheme, themeId, setTheme]
+    [currentTheme, themeId, enrichedColors, setTheme]
   );
 
   return <ThemeContext.Provider value={contextValue}>{children}</ThemeContext.Provider>;
@@ -136,7 +138,7 @@ export function useTheme() {
     return {
       theme: currentActiveTheme,
       themeId: currentActiveTheme.id,
-      colors: currentActiveTheme.colors,
+      colors: assertThemeTokens(currentActiveTheme),
       isDark: currentActiveTheme.isDark,
       setTheme: () => {},
       setThemeId: () => {},
