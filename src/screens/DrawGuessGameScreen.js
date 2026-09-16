@@ -5,7 +5,6 @@ import {
   Dimensions,
   KeyboardAvoidingView,
   ScrollView,
-  StatusBar,
   StyleSheet,
   Text,
   TextInput,
@@ -289,7 +288,6 @@ export default function DrawGuessGameScreen({ gameId, userId, onBack }) {
 
   return (
     <View style={styles.screen}>
-      <StatusBar barStyle="dark-content" backgroundColor={C.background} />
       <KeyboardAvoidingView
         style={styles.flex}
         // 新架构 edge-to-edge 下 Android adjustResize 失效，必须显式 padding

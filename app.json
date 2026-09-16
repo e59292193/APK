@@ -16,7 +16,29 @@
         "monochromeImage": "./assets/android-icon-monochrome.png"
       }
     },
+    "ios": {
+      "supportsTablet": false,
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "允许在前台获取您的位置，以便获取当天的天气状况与贴心提醒"
+      }
+    },
     "plugins": [
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/icon.png",
+          "color": "#FF6B35",
+          "defaultChannel": "momi-reminders"
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "允许在前台获取您的位置，以便获取当天的天气状况与贴心提醒",
+          "isIosBackgroundLocationEnabled": false,
+          "isAndroidBackgroundLocationEnabled": false
+        }
+      ],
       "@react-native-community/datetimepicker",
       [
         "expo-image-picker",

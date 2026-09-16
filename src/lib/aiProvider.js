@@ -31,9 +31,9 @@ export const AI_ERROR_CODES = {
 export const AI_ERRORS = {
   NO_KEY: '请先在设置中配置 momi AI',
   NETWORK: 'momi 睡着了，请稍后再试 zzz',
-  AUTH_OR_BALANCE: 'momi 的能量耗尽了，请检查 API Key',
+  AUTH_OR_BALANCE: 'momi 的能量耗尽了，请检查 API Key 或账户余额',
   TIMEOUT: 'momi 正在思考但超时了，请重试',
-  VISION_UNSUPPORTED: '当前模型看不见图片，请在设置中改用 DeepSeek V4.1 Flash',
+  VISION_UNSUPPORTED: '当前模型看不见图片，请在设置中改用支持识图的模型（如 Qwen-VL）',
   RATE_LIMIT: 'momi 被问得太频繁啦，稍等一下再试~',
   SERVER_ERROR: 'AI 服务暂时开小差了，请稍后再试',
 };
@@ -121,6 +121,42 @@ export async function localUriToDataUrl(uri) {
 }
 
 /**
+ * 解析底层实际发送给 API 的 model 参数：
+ * - 用户若填入具体的官方模型（如 deepseek-chat, deepseek-reasoner, qwen-plus, qwen-turbo, qwen-max, qwen-vl-plus 等）或自定义代理模型，直接透传；
+ * - 若为默认别名「DeepSeek V4.1 Flash」或「Qwen3.8-Flash」，在调用对应官方平台时映射为可用的标准模型（DeepSeek -> deepseek-chat；Qwen -> 识图时 qwen-vl-plus，纯文本 qwen-plus）。
+ */
+export function resolveApiModel(provider, modelName, needsVision = false) {
+  const clean = String(modelName || '').trim();
+  if (provider === 'deepseek') {
+    if (/^deepseek[- ]v?4(\.1)?[- ]flash$/i.test(clean)) {
+      return 'deepseek-chat';
+    }
+    return clean || 'deepseek-chat';
+  }
+  if (provider === 'qwen') {
+    if (/^qwen[- ]?3?\.?8?[- ]?flash$/i.test(clean)) {
+      return needsVision ? 'qwen-vl-plus' : 'qwen-plus';
+    }
+    return clean || (needsVision ? 'qwen-vl-plus' : 'qwen-plus');
+  }
+  return clean;
+}
+
+function isModelNotFoundError(status, errText) {
+  if (status === 400 || status === 404) {
+    const text = String(errText || '').toLowerCase();
+    return (
+      text.includes('model_not_found') ||
+      text.includes('does not exist') ||
+      text.includes('invalidmodel') ||
+      text.includes('model not found') ||
+      text.includes('not found: model')
+    );
+  }
+  return false;
+}
+
+/**
  * 执行统一的 OpenAI 兼容 Chat Completions 请求
  * @param {object} params
  * @param {Array} params.messages - OpenAI 兼容 messages 数组
@@ -129,11 +165,6 @@ export async function localUriToDataUrl(uri) {
  * @param {object} [params.overrideConfig] - 用于测试连接或临时覆盖配置
  * @param {boolean} [params.requiresVision=false] - 本轮请求必须支持识图
  * @returns {Promise<{ success: boolean, text: string, error?: string, errorCode?: string, usedFallbackModel?: boolean, modelUsed?: string }>}
- *
- * 【铁律】当 requiresVision/hasImages 为真而当前模型不支持识图时：
- *   优先临时切换到 provider 配置的 visionFallbackModel（不持久化用户配置）；
- *   无可用降级模型则返回 VISION_UNSUPPORTED 结构化失败。
- *   绝对不得静默把图片从 messages 里丢弃再当纯文本发出。
  */
 export async function sendChatCompletion({
   messages,
@@ -143,9 +174,9 @@ export async function sendChatCompletion({
   requiresVision = false,
 }) {
   const config = overrideConfig || (await getAIConfig());
-  const provider = config.provider || 'deepseek';
+  const provider = config.provider === 'qwen' ? 'qwen' : 'deepseek';
   const apiKey = (config.apiKey || '').trim();
-  let modelName = (config.modelName || '').trim() || getDefaultModel(provider);
+  let configuredModel = (config.modelName || '').trim() || getDefaultModel(provider);
   let usedFallbackModel = false;
 
   if (!apiKey) {
@@ -156,10 +187,10 @@ export async function sendChatCompletion({
   const needsVision = requiresVision || hasImages;
 
   // 识图能力判定：当前模型不支持时，先尝试临时降级模型
-  if (needsVision && !modelSupportsVision(provider, modelName)) {
-    const fallback = getVisionFallbackModel(provider, modelName);
+  if (needsVision && !modelSupportsVision(provider, configuredModel)) {
+    const fallback = getVisionFallbackModel(provider, configuredModel);
     if (fallback) {
-      modelName = fallback; // 仅本次请求生效，不持久化用户配置
+      configuredModel = fallback; // 仅本次请求生效，不持久化用户配置
       usedFallbackModel = true;
     } else {
       return failure(AI_ERROR_CODES.VISION_UNSUPPORTED);
@@ -168,69 +199,110 @@ export async function sendChatCompletion({
 
   const endpoint = PROVIDER_ENDPOINTS[provider] || PROVIDER_ENDPOINTS.deepseek;
   const timeoutMs = needsVision ? REQUEST_TIMEOUT_VISION_MS : REQUEST_TIMEOUT_TEXT_MS;
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
-  try {
-    const headers = {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-    };
+  const actualModel = resolveApiModel(provider, configuredModel, needsVision);
 
-    const payload = {
-      model: modelName,
-      messages,
-      temperature,
-      max_tokens,
-    };
+  async function executeRequest(targetModel) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
-    const res = await fetch(endpoint, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(payload),
-      signal: controller.signal,
-    });
+    try {
+      const headers = {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      };
 
-    clearTimeout(timeoutId);
+      const payload = {
+        model: targetModel,
+        messages,
+        temperature,
+        max_tokens,
+      };
 
-    if (!res.ok) {
-      const errText = await res.text().catch(() => '');
-      console.warn(`[aiProvider] ${provider} 响应异常 [${res.status}]:`, errText);
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
 
-      if (res.status === 401 || res.status === 403 || res.status === 402) {
-        return failure(AI_ERROR_CODES.AUTH_OR_BALANCE);
+      clearTimeout(timeoutId);
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => '');
+        console.warn(`[aiProvider] ${provider} 响应异常 [${res.status}]:`, errText);
+
+        if (isModelNotFoundError(res.status, errText)) {
+          return { modelNotFound: true, status: res.status, errText };
+        }
+
+        const errLower = errText.toLowerCase();
+        if (
+          res.status === 401 ||
+          res.status === 403 ||
+          res.status === 402 ||
+          errLower.includes('insufficient_quota') ||
+          errLower.includes('quota') ||
+          errLower.includes('arrearage') ||
+          errLower.includes('balance') ||
+          errLower.includes('欠费')
+        ) {
+          return failure(AI_ERROR_CODES.AUTH_OR_BALANCE);
+        }
+        if (res.status === 429) {
+          return failure(AI_ERROR_CODES.RATE_LIMIT);
+        }
+        if (res.status >= 500) {
+          return failure(AI_ERROR_CODES.SERVER_ERROR, `AI 服务异常 (${res.status})，请稍后再试`);
+        }
+        return failure(AI_ERROR_CODES.SERVER_ERROR, `调用失败 (${res.status})，请稍后再试`);
       }
-      if (res.status === 429) {
-        return failure(AI_ERROR_CODES.RATE_LIMIT);
-      }
-      if (res.status >= 500) {
-        return failure(AI_ERROR_CODES.SERVER_ERROR, `AI 服务异常 (${res.status})，请稍后再试`);
-      }
-      return failure(AI_ERROR_CODES.SERVER_ERROR, `调用失败 (${res.status})，请稍后再试`);
-    }
 
-    const data = await res.json();
-    let text = '';
-    if (data.choices && data.choices[0] && data.choices[0].message) {
-      text = data.choices[0].message.content || '';
-    } else if (data.reply) {
-      text = data.reply;
-    }
+      const data = await res.json();
+      let text = '';
+      if (data.choices && data.choices[0] && data.choices[0].message) {
+        text = data.choices[0].message.content || '';
+      } else if (data.reply) {
+        text = data.reply;
+      }
 
-    return {
-      success: true,
-      text: text.trim(),
-      usedFallbackModel,
-      modelUsed: modelName,
-    };
-  } catch (err) {
-    clearTimeout(timeoutId);
-    if (err.name === 'AbortError') {
-      return failure(AI_ERROR_CODES.TIMEOUT);
+      return {
+        success: true,
+        text: text.trim(),
+        usedFallbackModel,
+        modelUsed: targetModel,
+      };
+    } catch (err) {
+      clearTimeout(timeoutId);
+      if (err.name === 'AbortError') {
+        return failure(AI_ERROR_CODES.TIMEOUT);
+      }
+      console.warn('[aiProvider] 请求异常:', err.message);
+      return failure(AI_ERROR_CODES.NETWORK);
     }
-    console.warn('[aiProvider] 请求异常:', err.message);
-    return failure(AI_ERROR_CODES.NETWORK);
   }
+
+  let result = await executeRequest(actualModel);
+
+  // 若服务端提示模型不存在，自动降级至平台标配基底模型重试一次
+  if (result.modelNotFound) {
+    const fallbackStandard = provider === 'deepseek'
+      ? 'deepseek-chat'
+      : (needsVision ? 'qwen-vl-plus' : 'qwen-plus');
+
+    if (actualModel !== fallbackStandard) {
+      console.warn(`[aiProvider] 模型 ${actualModel} 未找到，尝试降级到 ${fallbackStandard}`);
+      result = await executeRequest(fallbackStandard);
+      if (result.success) {
+        result.usedFallbackModel = true;
+      }
+    }
+    if (result.modelNotFound) {
+      return failure(AI_ERROR_CODES.SERVER_ERROR, `模型不存在或未开通权限 (${result.status})`);
+    }
+  }
+
+  return result;
 }
 
 /**

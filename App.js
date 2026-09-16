@@ -13,6 +13,15 @@ import { Button, AppInput } from './src/components/ui';
 import { typography, spacing, radius, ThemeProvider, useTheme, prefetchThemeId } from './src/theme';
 import { lazyScreen } from './src/lib/lazyScreen';
 import { signIn, restoreSession, signOutSupabase } from './src/lib/auth';
+import { createNotificationAdapter } from './src/lib/notificationAdapter';
+import { createWeatherLocationProvider } from './src/lib/weatherLocationProvider';
+import { setNotificationAdapter } from './src/lib/proactiveScheduler';
+import { setWeatherLocationProvider } from './src/lib/weatherService';
+
+const notificationAdapter = createNotificationAdapter();
+const weatherLocationProvider = createWeatherLocationProvider();
+setNotificationAdapter(notificationAdapter);
+setWeatherLocationProvider(weatherLocationProvider);
 
 // 未访问的重页面不参与冷启动求值
 const TimeCapsuleScreen = lazyScreen(() => require('./src/screens/TimeCapsuleScreen'));
@@ -200,6 +209,7 @@ function MainApp() {
       { text: '取消', style: 'cancel' },
       { text: '退出', style: 'destructive', onPress: async () => {
         try { await require('./src/lib/realtimeSignal').disconnectSignal(); } catch {}
+        try { await notificationAdapter.cancelAll(); } catch {}
         await signOutSupabase();
         setFullscreenPage(null); setUserId(''); setIsLoggedIn(false); setUnreadCount(0); setCurrentTab('Capsule'); setMountedTabs(new Set(['Capsule']));
       } },

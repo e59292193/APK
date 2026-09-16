@@ -7,6 +7,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  BackHandler,
   Image,
   KeyboardAvoidingView,
   Platform,
@@ -125,9 +126,20 @@ export default function MomiAISettingsScreen({ onBack }) {
     }
     setTestingConnection(true);
     try {
-      const res = await testAIConnection(activeConfig());
-      if (res.success) showToast('🎉 连接成功！momi 已准备就绪');
-      else Alert.alert('连接测试失败', `${res.error || '无法连通该 API'}${res.errorCode ? `\n错误码：${res.errorCode}` : ''}`);
+      const active = activeConfig();
+      const res = await testAIConnection(active);
+      if (res.success) {
+        // 自动保存配置到本地
+        const updated = {
+          ...providersData,
+          [provider]: { apiKey: active.apiKey, modelName: active.modelName },
+        };
+        await saveAIConfig({ ...active, providers: updated });
+        setProvidersData(updated);
+        showToast('🎉 连接成功！配置已自动保存');
+      } else {
+        Alert.alert('连接测试失败', `${res.error || '无法连通该 API'}${res.errorCode ? `\n错误码：${res.errorCode}` : ''}`);
+      }
     } catch (err) {
       Alert.alert('连接测试失败', err.message || '网络异常');
     } finally {
@@ -143,10 +155,17 @@ export default function MomiAISettingsScreen({ onBack }) {
     setTestingVision(true);
     setVisionResult('');
     try {
-      const res = await testVisionCapability(activeConfig());
+      const active = activeConfig();
+      const res = await testVisionCapability(active);
       if (res.success && res.text.trim()) {
         setVisionResult(res.text.trim());
-        showToast(`📷 识图成功${res.usedFallbackModel ? '（使用了临时视觉模型）' : ''}`);
+        const updated = {
+          ...providersData,
+          [provider]: { apiKey: active.apiKey, modelName: active.modelName },
+        };
+        await saveAIConfig({ ...active, providers: updated });
+        setProvidersData(updated);
+        showToast(`📷 识图成功！配置已自动保存${res.usedFallbackModel ? '（使用了视觉模型）' : ''}`);
       } else {
         Alert.alert('识图测试失败', `${res.error || '模型没有返回有效描述'}${res.errorCode ? `\n错误码：${res.errorCode}` : ''}`);
       }
@@ -177,6 +196,31 @@ export default function MomiAISettingsScreen({ onBack }) {
     }
   };
 
+  const handleBack = async () => {
+    try {
+      if (apiKey.trim()) {
+        const active = activeConfig();
+        const updated = {
+          ...providersData,
+          [provider]: { apiKey: active.apiKey, modelName: active.modelName },
+        };
+        await saveAIConfig({ ...active, providers: updated });
+      }
+    } catch (err) {
+      console.warn('[MomiAISettings] 退出自动保存失败:', err.message);
+    }
+    onBack?.();
+  };
+
+  useEffect(() => {
+    const onHardwareBack = () => {
+      handleBack();
+      return true;
+    };
+    const sub = BackHandler.addEventListener('hardwareBackPress', onHardwareBack);
+    return () => sub.remove();
+  }, [provider, apiKey, modelName, providersData]);
+
   const suggestedModels = getSuggestedModels(provider);
   const currentModel = modelName.trim() || getDefaultModel(provider);
   const visionCapable = modelSupportsVision(provider, currentModel);
@@ -185,7 +229,7 @@ export default function MomiAISettingsScreen({ onBack }) {
 
   return (
     <View style={styles.container}>
-      <AppHeader title="momi AI 配置" subtitle="API Key 只保存在这台手机" showBack onBack={onBack} />
+      <AppHeader title="momi AI 配置" subtitle="API Key 只保存在这台手机" showBack onBack={handleBack} />
       <CenterToast
         visible={toastVisible}
         message={toastMessage}
@@ -241,7 +285,7 @@ export default function MomiAISettingsScreen({ onBack }) {
                 placeholderTextColor={colors.textMuted}
                 value={showKey ? apiKey : maskApiKey(apiKey)}
                 onChangeText={handleKeyChange}
-                editable={showKey || !apiKey}
+                onFocus={() => setShowKey(true)}
                 autoCapitalize="none"
                 autoCorrect={false}
                 accessibilityLabel="API Key"

@@ -12,12 +12,12 @@ import {
   Dimensions,
   ScrollView,
   AppState,
-  StatusBar,
 } from 'react-native';
 import { useKeyboardHeight } from '../hooks/useKeyboardHeight';
 import { supabase } from '../lib/supabase';
 import { fetchWithTimeout } from '../lib/fetchWithTimeout';
 import { onSignal, emitSignal } from '../lib/realtimeSignal';
+import { maybeCreateMomiInterjection } from '../lib/momiMention';
 import { fetchTodayCount } from '../lib/checkinUtils';
 import { formatLocalDateTime } from '../lib/dateUtils';
 import CheckinCreateModal from '../components/CheckinCreateModal';
@@ -202,24 +202,100 @@ export default function ChatScreen({
     return unsub;
   }, [userId, noteUnreadIfPartner]);
 
-  // ─── 轮询兜底：腾讯 IM 信号偶发丢失时，定时拉取保证消息/邀请近实时显示 ───
-  // 参照 DrawGuess 的 4 秒 fetchGame 轮询机制：信号是主通道，轮询是补漏网
+  // ─── 订阅 momi 名字唤醒插话 (momi_chat_interjections) ───
+  useEffect(() => {
+    const appendInterjection = (row) => {
+      if (!row) return;
+      const momiMsg = {
+        id: row.id,
+        user_id: 'momi',
+        content: row.content,
+        type: 'momi',
+        created_at: row.created_at,
+        trigger_message_id: row.trigger_message_id,
+        isMomi: true,
+      };
+      setMessages((prev) => {
+        if (
+          prev.some(
+            (m) =>
+              (row.trigger_message_id && m.trigger_message_id === row.trigger_message_id) ||
+              m.id === row.id
+          )
+        ) {
+          return prev;
+        }
+        return [momiMsg, ...prev];
+      });
+    };
+
+    const channel = supabase
+      .channel('chat_screen_momi_interjections')
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'momi_chat_interjections',
+          filter: 'couple_id=eq.momo_and_baomi',
+        },
+        (payload) => {
+          appendInterjection(payload.new);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, []);
+
+  // ─── 轮询兜底：定时拉取保证消息/邀请及插话近实时显示 ───
   const pollMessages = useCallback(async () => {
     try {
-      const { data, error } = await fetchWithTimeout(() =>
-        supabase
-          .from('messages')
-          .select('*')
-          .order('created_at', { ascending: false })
-          .limit(50)
-      );
-      if (error) throw error;
-      if (!data || data.length === 0) return;
+      const [msgRes, interjectionRes] = await Promise.all([
+        fetchWithTimeout(() =>
+          supabase
+            .from('messages')
+            .select('*')
+            .order('created_at', { ascending: false })
+            .limit(50)
+        ),
+        fetchWithTimeout(() =>
+          supabase
+            .from('momi_chat_interjections')
+            .select('*')
+            .eq('couple_id', 'momo_and_baomi')
+            .order('created_at', { ascending: false })
+            .limit(20)
+        ).catch(() => ({ data: [], error: null })),
+      ]);
+
+      if (msgRes.error) throw msgRes.error;
+      const rawData = msgRes.data || [];
+      const interjectionMsgs = (interjectionRes?.data || []).map((row) => ({
+        id: row.id,
+        user_id: 'momi',
+        content: row.content,
+        type: 'momi',
+        created_at: row.created_at,
+        trigger_message_id: row.trigger_message_id,
+        isMomi: true,
+      }));
+
+      const incoming = [...rawData, ...interjectionMsgs];
+      if (incoming.length === 0) return;
+
       const newOnes = [];
       setMessages((prev) => {
         const prevIds = new Set(prev.map((m) => m.id));
-        for (const m of data) {
-          if (!prevIds.has(m.id)) newOnes.push(m);
+        const prevTriggerIds = new Set(
+          prev.filter((m) => m.trigger_message_id).map((m) => m.trigger_message_id)
+        );
+        for (const m of incoming) {
+          if (!prevIds.has(m.id) && (!m.trigger_message_id || !prevTriggerIds.has(m.trigger_message_id))) {
+            newOnes.push(m);
+          }
         }
         if (newOnes.length === 0) return prev;
         const merged = [...newOnes, ...prev]
@@ -293,17 +369,40 @@ export default function ChatScreen({
 
   const fetchMessages = async () => {
     try {
-      const { data, error } = await fetchWithTimeout(() =>
-        supabase
-          .from('messages')
-          .select('*')
-          .order('created_at', { ascending: false })
-          .limit(50)
-      );
+      const [msgRes, interjectionRes] = await Promise.all([
+        fetchWithTimeout(() =>
+          supabase
+            .from('messages')
+            .select('*')
+            .order('created_at', { ascending: false })
+            .limit(50)
+        ),
+        fetchWithTimeout(() =>
+          supabase
+            .from('momi_chat_interjections')
+            .select('*')
+            .eq('couple_id', 'momo_and_baomi')
+            .order('created_at', { ascending: false })
+            .limit(20)
+        ).catch(() => ({ data: [], error: null })),
+      ]);
 
-      if (error) throw error;
-      const sortedData = data ? [...data] : [];
-      setMessages(sortedData);
+      if (msgRes.error) throw msgRes.error;
+      const baseMsgs = msgRes.data || [];
+      const interjectionMsgs = (interjectionRes?.data || []).map((row) => ({
+        id: row.id,
+        user_id: 'momi',
+        content: row.content,
+        type: 'momi',
+        created_at: row.created_at,
+        trigger_message_id: row.trigger_message_id,
+        isMomi: true,
+      }));
+
+      const merged = [...baseMsgs, ...interjectionMsgs].sort(
+        (a, b) => new Date(b.created_at) - new Date(a.created_at)
+      );
+      setMessages(merged);
     } catch (error) {
       console.error('Error fetching messages:', error);
       Alert.alert('网络有点开小差', '请尝试下拉刷新或稍后再试');
@@ -336,8 +435,6 @@ export default function ChatScreen({
     const rawText = inputText.trim();
     if (!rawText || sending) return;
 
-    const isAtMomi = /(?:^|\s)@momi(?:\s|$)/i.test(rawText);
-    const atQuery = isAtMomi ? rawText.replace(/@momi\s*/gi, '').trim() : '';
     const isQuoteMomi = Boolean(quotedMessage && (quotedMessage.user_id === 'momi' || quotedMessage.isMomi));
     const quotedContent = quotedMessage?.content;
 
@@ -371,61 +468,34 @@ export default function ChatScreen({
       setQuotedMessage(null);
       // 立即添加到本地消息列表，同时通知对方
       if (data && data[0]) {
+        const sentMessage = data[0];
         setMessages((prev) => {
-          if (prev.some((m) => m.id === data[0].id)) return prev;
-          return [data[0], ...prev];
+          if (prev.some((m) => m.id === sentMessage.id)) return prev;
+          return [sentMessage, ...prev];
         });
-        emitSignal('chat:message', data[0]).catch((e) => console.warn('[Chat] emitMessage failed:', e.message));
+        emitSignal('chat:message', sentMessage).catch((e) => console.warn('[Chat] emitMessage failed:', e.message));
         setTimeout(() => {
           flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
         }, 100);
-      }
 
-      // ─── 触发 @momi 智能回复 或 引用回复 momi ───
-      if (isAtMomi || isQuoteMomi) {
-        (async () => {
-          try {
-            const { chatWithMomi } = require('../lib/momiAssistant');
-            const recent = messages.slice(0, 8).reverse();
-            let userPrompt = rawText;
-            if (isQuoteMomi) {
-              userPrompt = `[引用回复了你刚才说的: "${quotedContent}"]\n对你说: ${rawText}`;
-            } else if (isAtMomi) {
-              userPrompt = atQuery || '你好呀 momi！🐾';
-            }
-            const aiRes = await chatWithMomi({
-              userId,
-              message: userPrompt,
-              recentChatHistory: recent,
-            });
-            const replyText = aiRes.reply || '在呢在呢！🐾 收到你的回复啦~';
+        // ─── 触发 momi 名字唤醒 / 引用插话（仅在发送端调用并写入 momi_chat_interjections）───
+        const recentHistory = messages.slice(0, 8).reverse().map((m) => ({
+          sender: m.user_id === userId ? 'me' : m.user_id === 'momi' ? 'momi' : 'partner',
+          content: m.content || '',
+        }));
 
-            const { data: momiData, error: momiErr } = await supabase
-              .from('messages')
-              .insert([
-                {
-                  user_id: 'momi',
-                  content: replyText,
-                  type: 'momi',
-                  metadata: {
-                    is_ai: true,
-                    reply_to_quote: isQuoteMomi ? quotedContent : undefined,
-                  },
-                },
-              ])
-              .select();
-
-            if (!momiErr && momiData && momiData[0]) {
-              setMessages((prev) => {
-                if (prev.some((m) => m.id === momiData[0].id)) return prev;
-                return [momiData[0], ...prev];
-              });
-              emitSignal('chat:message', momiData[0]).catch(() => {});
-            }
-          } catch (momiErr) {
-            console.warn('[Chat] momi 回复异常:', momiErr.message);
-          }
-        })();
+        maybeCreateMomiInterjection({
+          isSender: true,
+          userId,
+          triggerMessageId: sentMessage.id,
+          text: sentMessage.content,
+          message: sentMessage.content,
+          recentChatHistory: recentHistory,
+          isQuote: isQuoteMomi,
+          quotedContent: quotedContent || '',
+        }).catch((err) => {
+          console.warn('[Chat] 名字唤醒插话触发异常:', err.message);
+        });
       }
 
       // 每 30 条消息自动触发一次记忆提取
@@ -1072,7 +1142,6 @@ export default function ChatScreen({
   if (loading) {
     return (
       <View style={styles.center}>
-        <StatusBar barStyle="dark-content" />
         <ActivityIndicator size="large" color={colors.primaryAction} />
         <Text style={styles.loadingText}>正在加载聊天...</Text>
       </View>
@@ -1081,8 +1150,6 @@ export default function ChatScreen({
 
   const chatContent = (
     <View style={[styles.container, { backgroundColor: bg }]}>
-      <StatusBar barStyle={theme?.statusBarStyle || 'dark-content'} backgroundColor={bg} />
-
       {/* Header */}
       <AppHeader
         compact

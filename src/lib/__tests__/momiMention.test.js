@@ -95,4 +95,62 @@ describe('momiMention 名字唤醒', () => {
     expect(warn).not.toHaveBeenCalled();
     warn.mockRestore();
   });
+
+  test('支持 text 参数替代 message', async () => {
+    const inserted = { id: 'interjection-text-param', content: 'momi 来了' };
+    mockInterjectionTable({ inserted });
+    const result = await maybeCreateMomiInterjection({
+      isSender: true,
+      userId: 'momo',
+      text: 'momi 看看这个',
+      triggerMessageId: 'msg-text',
+    });
+    expect(result).toEqual(inserted);
+    expect(chatWithMomi).toHaveBeenCalledWith(expect.objectContaining({
+      userId: 'momo',
+      triggerSource: 'chat_mention',
+    }));
+  });
+
+  test('引用 momi 消息在开关开启时触发，开关关闭或非发送端时不触发', async () => {
+    const inserted = { id: 'interjection-quote', content: '收到回复' };
+    mockInterjectionTable({ inserted });
+
+    // 1. 开关开启且是发送端：即使内容没有 momi 字样，由于 isQuote 也触发
+    const res1 = await maybeCreateMomiInterjection({
+      isSender: true,
+      userId: '苞米',
+      text: '好的呀',
+      triggerMessageId: 'msg-quote-1',
+      isQuote: true,
+      quotedContent: '早点休息哦',
+    });
+    expect(res1).toEqual(inserted);
+    expect(chatWithMomi).toHaveBeenCalledWith(expect.objectContaining({
+      message: expect.stringContaining('引用回复了你刚才说的话「早点休息哦」'),
+    }));
+
+    // 2. 开关关闭：不触发
+    getProactiveSettings.mockResolvedValueOnce({ nameWakeEnabled: false });
+    const res2 = await maybeCreateMomiInterjection({
+      isSender: true,
+      userId: '苞米',
+      text: '好的呀',
+      triggerMessageId: 'msg-quote-2',
+      isQuote: true,
+      quotedContent: '早点休息哦',
+    });
+    expect(res2).toBeNull();
+
+    // 3. 接收端：不触发
+    const res3 = await maybeCreateMomiInterjection({
+      isSender: false,
+      userId: '苞米',
+      text: '好的呀',
+      triggerMessageId: 'msg-quote-3',
+      isQuote: true,
+      quotedContent: '早点休息哦',
+    });
+    expect(res3).toBeNull();
+  });
 });

@@ -17,11 +17,16 @@ export function mentionsMomi(text) {
 export async function maybeCreateMomiInterjection({
   userId,
   message,
+  text,
   triggerMessageId,
   recentChatHistory = [],
   isSender = true,
+  isQuote = false,
+  quotedContent = '',
 }) {
-  if (!isSender || !triggerMessageId || !mentionsMomi(message)) return null;
+  const content = (text !== undefined ? text : message) || '';
+  const isMentioned = mentionsMomi(content);
+  if (!isSender || !triggerMessageId || (!isMentioned && !isQuote)) return null;
   const settings = await getProactiveSettings(userId);
   if (!settings.nameWakeEnabled) return null;
 
@@ -36,9 +41,14 @@ export async function maybeCreateMomiInterjection({
     );
     if (existing?.data) return null;
 
+    let userPrompt = `情侣主聊天中，${userId} 说：“${content}”。他们点到了你的名字，请自然插一句，不超过80字。不要说自己被系统唤醒。`;
+    if (isQuote && !isMentioned) {
+      userPrompt = `情侣主聊天中，${userId} 引用回复了你刚才说的话「${quotedContent}」，对你说：“${content}”。请自然回复一句，不超过80字。`;
+    }
+
     const generated = await chatWithMomi({
       userId,
-      message: `情侣主聊天中，${userId} 说：“${message}”。他们点到了你的名字，请自然插一句，不超过80字。不要说自己被系统唤醒。`,
+      message: userPrompt,
       recentChatHistory,
       triggerSource: 'chat_mention',
     });

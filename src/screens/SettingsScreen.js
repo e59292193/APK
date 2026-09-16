@@ -128,7 +128,7 @@ export default function SettingsScreen({ userId, onBack, onNavigateAISettings, o
 
       <Text style={styles.sectionLabel}>应用</Text>
       <View style={styles.card}>
-        {menuItem('hardware-chip-outline', 'momi AI 配置', 'DeepSeek / MiniMax / GLM / 自定义模型', onNavigateAISettings)}
+        {menuItem('hardware-chip-outline', 'momi AI 配置', 'DeepSeek / Qwen / 自定义模型', onNavigateAISettings)}
         <View style={styles.divider} />
         {onNavigateThemeSelector ? menuItem('color-palette-outline', '主题与配色', '7 套完整运行时主题', onNavigateThemeSelector) : null}
         {onNavigateThemeSelector ? <View style={styles.divider} /> : null}
