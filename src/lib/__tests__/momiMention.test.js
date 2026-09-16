@@ -153,4 +153,39 @@ describe('momiMention 名字唤醒', () => {
     });
     expect(res3).toBeNull();
   });
+
+  test('附带图片时透传给 chatWithMomi，且提示词要求先描述图片', async () => {
+    const inserted = { id: 'interjection-img', content: '看到照片啦' };
+    mockInterjectionTable({ inserted });
+    const images = ['https://example.com/a.jpg', 'https://example.com/b.jpg'];
+    const result = await maybeCreateMomiInterjection({
+      isSender: true,
+      userId: 'momo',
+      text: 'momi 这张',
+      triggerMessageId: 'msg-img',
+      images,
+    });
+    expect(result).toEqual(inserted);
+    expect(chatWithMomi).toHaveBeenCalledWith(expect.objectContaining({
+      images,
+      triggerSource: 'chat_mention',
+    }));
+    const callArg = chatWithMomi.mock.calls[0][0];
+    expect(callArg.message).toContain('图片');
+  });
+
+  test('无图片时 images 为空数组，提示词不追加图片指令', async () => {
+    const inserted = { id: 'interjection-no-img', content: '来了' };
+    mockInterjectionTable({ inserted });
+    const result = await maybeCreateMomiInterjection({
+      isSender: true,
+      userId: 'momo',
+      text: 'momi 在吗',
+      triggerMessageId: 'msg-no-img',
+    });
+    expect(result).toEqual(inserted);
+    const callArg = chatWithMomi.mock.calls[0][0];
+    expect(callArg.images).toEqual([]);
+    expect(callArg.message).not.toContain('附上了');
+  });
 });

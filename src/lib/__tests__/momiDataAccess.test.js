@@ -47,6 +47,7 @@ import {
   getUnopenedCapsuleCount,
   getEphemeralSummary,
   getKitchenSummary,
+  getTripsSummary,
   queryByIntent,
 } from '../momiDataAccess';
 
@@ -102,6 +103,19 @@ describe('momiDataAccess 隐私铁律', () => {
     const selectOp = entries[0].ops.find((o) => o.m === 'select');
     expect(selectOp.cols).not.toContain('recipe_text');
   });
+
+  test('恋爱足迹：旅程读 trips、手账读 trip_entries，总数走 COUNT', async () => {
+    await getTripsSummary();
+    const tripsEntries = opsFor('trips');
+    expect(tripsEntries.length).toBe(1);
+    const tripsSelect = tripsEntries[0].ops.find((o) => o.m === 'select');
+    expect(tripsSelect.cols).toContain('title');
+    expect(tripsSelect.cols).toContain('location');
+    const entryQueries = opsFor('trip_entries');
+    expect(entryQueries.length).toBe(2);
+    const countQuery = entryQueries[0].ops.find((o) => o.m === 'select');
+    expect(countQuery.opts).toEqual({ count: 'exact', head: true });
+  });
 });
 
 describe('momiDataAccess 意图路由', () => {
@@ -124,6 +138,12 @@ describe('momiDataAccess 意图路由', () => {
     expect((await queryByIntent('愿望清单还剩几个'))?.intent).toBe('wishlist');
     expect((await queryByIntent('五子棋我赢了几次'))?.intent).toBe('games');
     expect((await queryByIntent('有没有未拆开的信'))?.intent).toBe('capsules');
+  });
+
+  test('恋爱足迹类问题路由到 trips', async () => {
+    expect((await queryByIntent('我们去过哪些地方玩'))?.intent).toBe('trips');
+    expect((await queryByIntent('恋爱足迹里记了几段旅行'))?.intent).toBe('trips');
+    expect((await queryByIntent('翻翻我们的旅行手账'))?.intent).toBe('trips');
   });
 
   test('无关问题不触发查库', async () => {
