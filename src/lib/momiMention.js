@@ -66,8 +66,10 @@ export async function maybeCreateMomiInterjection({
     if (!generated.success) {
       if (generated.errorCode === 'VISION_UNSUPPORTED') {
         replyContent = '现在这个模型看不了图，去 momi 设置里换支持识图的模型 🐾';
+      } else if (generated.reply) {
+        replyContent = generated.reply;
       } else {
-        return null;
+        replyContent = 'momi 刚才开小差了，稍后再叫我哦 🐾';
       }
     }
     if (!replyContent) return null;

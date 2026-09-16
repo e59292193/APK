@@ -629,6 +629,28 @@ export const INTENT_RULES = [
       };
     },
   },
+  {
+    intent: 'tasks',
+    pattern: /(提醒|闹钟|定时任务|待办|备忘).*(有哪些|列表|查看|查一下|记录|什么|几点|什么时候|还有吗)|(查看|查一下|列出|看下).*(提醒|闹钟|定时|任务|待办)/,
+    run: async () => {
+      const { listMomiTasks, formatTasksSummary } = require('./momiTasks');
+      const tasks = await listMomiTasks({ status: 'active', limit: 20 });
+      return {
+        count: tasks.length,
+        tasks,
+        summary: formatTasksSummary(tasks),
+      };
+    },
+  },
+  {
+    intent: 'web_search',
+    pattern: /(搜索|搜一下|查一下外网|外网|上网搜|上网查|最新消息|今日新闻|实时行情|什么是|科普一下|了解一下|谁是|百科).+/,
+    run: async (context = {}) => {
+      const { searchWeb } = require('./webSearchService');
+      const text = context?.message || '';
+      return searchWeb(text);
+    },
+  },
 ];
 
 /**

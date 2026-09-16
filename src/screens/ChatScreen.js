@@ -223,33 +223,34 @@ export default function ChatScreen({
     return unsub;
   }, [userId, noteUnreadIfPartner]);
 
+  // ─── momi 名字唤醒插话添加器 ───
+  const appendInterjection = useCallback((row) => {
+    if (!row) return;
+    const momiMsg = {
+      id: row.id,
+      user_id: 'momi',
+      content: row.content,
+      type: 'momi',
+      created_at: row.created_at,
+      trigger_message_id: row.trigger_message_id,
+      isMomi: true,
+    };
+    setMessages((prev) => {
+      if (
+        prev.some(
+          (m) =>
+            (row.trigger_message_id && m.trigger_message_id === row.trigger_message_id) ||
+            m.id === row.id
+        )
+      ) {
+        return prev;
+      }
+      return [momiMsg, ...prev];
+    });
+  }, []);
+
   // ─── 订阅 momi 名字唤醒插话 (momi_chat_interjections) ───
   useEffect(() => {
-    const appendInterjection = (row) => {
-      if (!row) return;
-      const momiMsg = {
-        id: row.id,
-        user_id: 'momi',
-        content: row.content,
-        type: 'momi',
-        created_at: row.created_at,
-        trigger_message_id: row.trigger_message_id,
-        isMomi: true,
-      };
-      setMessages((prev) => {
-        if (
-          prev.some(
-            (m) =>
-              (row.trigger_message_id && m.trigger_message_id === row.trigger_message_id) ||
-              m.id === row.id
-          )
-        ) {
-          return prev;
-        }
-        return [momiMsg, ...prev];
-      });
-    };
-
     const channel = supabase
       .channel('chat_screen_momi_interjections')
       .on(
@@ -269,7 +270,7 @@ export default function ChatScreen({
     return () => {
       supabase.removeChannel(channel);
     };
-  }, []);
+  }, [appendInterjection]);
 
   // ─── 轮询兜底：定时拉取保证消息/邀请及插话近实时显示 ───
   const pollMessages = useCallback(async () => {
@@ -531,7 +532,7 @@ export default function ChatScreen({
               };
             });
 
-            await maybeCreateMomiInterjection({
+            const interjectionRow = await maybeCreateMomiInterjection({
               isSender: true,
               userId,
               triggerMessageId: sentMessage.id,
@@ -542,6 +543,9 @@ export default function ChatScreen({
               quotedContent: quotedContent || '',
               images: resolvedImages.urls || [],
             });
+            if (interjectionRow) {
+              appendInterjection(interjectionRow);
+            }
           } catch (err) {
             console.warn('[Chat] 名字唤醒插话触发异常:', err.message);
           }

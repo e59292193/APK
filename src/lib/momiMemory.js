@@ -335,3 +335,10 @@ export async function createManualMemory(input) {
     ...input, source: 'user_explicit', importance: input.importance || 5, confidence: 1,
   });
 }
+
+export function formatMemoryBlock(memories = {}) {
+  const identity = memories.identity?.map((m) => `- ${m.content}`).join('\n') || '- 我是 momi';
+  const related = memories.related?.map((m) => `- [${m.subject}/${m.memory_type}] ${m.content}`).join('\n') || '- 本轮暂无额外相关记忆';
+  return `【momi 身份人格】\n${identity}\n\n【与本轮相关的长期记忆】\n${related}`;
+}
+

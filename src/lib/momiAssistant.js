@@ -144,6 +144,18 @@ export function buildSystemPrompt(context = {}) {
   const weatherBlock = context.weatherBlock ? `\n\n${context.weatherBlock}` : (context.weatherData ? `\n\n${formatWeatherBlock(context.weatherData)}` : '');
   const historyBlock = context.historyBlock ? `\n\n${context.historyBlock}` : '';
 
+  const taskCreated = context.preciseData?.taskCreated;
+  const taskBlock = taskCreated
+    ? `\n\n【定时任务/闹钟设定成功】\n已成功为他们创建了定时任务提醒！\n- 任务标题：${taskCreated.title}\n- 设定时间：${taskCreated.due_at}\n【回答硬性约束】请务必亲切开心地向用户确认该提醒已设定好，告诉用户到时间 momi 会准时叫他们 🐾`
+    : (context.preciseData?.intent?.intent === 'tasks' && context.preciseData?.intent?.data?.summary
+      ? `\n\n【进行中的定时提醒与待办列表】\n${context.preciseData.intent.data.summary}`
+      : '');
+
+  const webSearchResult = context.preciseData?.intent?.intent === 'web_search' ? context.preciseData.intent.data : null;
+  const webSearchBlock = webSearchResult
+    ? `\n\n【实时外网信息检索结果】\n关键词：${webSearchResult.query}\n检索结果内容：\n${webSearchResult.formattedText || '未检索到更多直接内容'}\n【回答硬性约束】本轮上下文已包含外网实时检索权威结果，请直接结合上述内容回答用户，证明你具备实时查询外网信息的能力！`
+    : '';
+
   return `${MOMI_PERSONA_CORE}
 
 ${DATA_CAPABILITIES_BLOCK}
@@ -151,7 +163,7 @@ ${DATA_CAPABILITIES_BLOCK}
 ${sceneRule.guideline}
 ${sceneRule.lengthConstraint}
 
-${memoryBlock}${emotionBlock}${digestBlock}${legacyKitchen}${legacyCapsules}${dataBlock}${weatherBlock}${historyBlock}
+${memoryBlock}${emotionBlock}${digestBlock}${legacyKitchen}${legacyCapsules}${dataBlock}${taskBlock}${webSearchBlock}${weatherBlock}${historyBlock}
 
 【输出格式约束】
 回答正文后另起一行输出隐藏机器标记：<momi_meta>{"rudeness":0}</momi_meta>，rudeness 为用户本轮粗鲁度 0-10。正文不得提及此标记。`.trim();
@@ -199,14 +211,16 @@ export function historyToMessages(history, { maxMessages = 16, maxImages = 2 } =
   let remainingHistoricalImages = maxImages;
   // 从新到旧决定哪 2 张图保留，然后恢复顺序
   const prepared = (history || []).slice(-maxMessages).reverse().map((item) => {
-    let imageUrls = Array.isArray(item.image_urls) ? item.image_urls : [];
-    if (imageUrls.length > remainingHistoricalImages) imageUrls = imageUrls.slice(0, remainingHistoricalImages);
-    remainingHistoricalImages -= imageUrls.length;
+    const rawUrls = Array.isArray(item.image_urls) ? item.image_urls : [];
+    // 严格过滤：必须是合法的 http://, https:// 或 data:image/，严禁把相对存储路径（如 uploads/photo_...jpg）作为 image_url 送给模型
+    let validUrls = rawUrls.filter((url) => typeof url === 'string' && (/^https?:\/\//i.test(url) || url.startsWith('data:image/')));
+    if (validUrls.length > remainingHistoricalImages) validUrls = validUrls.slice(0, remainingHistoricalImages);
+    remainingHistoricalImages -= validUrls.length;
     if (remainingHistoricalImages < 0) remainingHistoricalImages = 0;
-    return { item, imageUrls };
+    return { item, imageUrls: validUrls, hadAnyImage: rawUrls.length > 0 };
   }).reverse();
 
-  for (const { item, imageUrls } of prepared) {
+  for (const { item, imageUrls, hadAnyImage } of prepared) {
     const isMomi = item.sender === 'momi' || item.role === 'assistant' || item.user_id === 'momi';
     if (isMomi) {
       out.push({ role: 'assistant', content: item.content || '' });
@@ -224,8 +238,8 @@ export function historyToMessages(history, { maxMessages = 16, maxImages = 2 } =
         ],
       });
     } else {
-      const hadImage = item.content_type === 'image' || item.content_type === 'mixed' || (item.image_urls?.length > 0);
-      out.push({ role: 'user', content: `${prefix}: ${item.content || ''}${hadImage ? ' [历史图片，已省略以节省上下文]' : ''}` });
+      const hadImage = item.content_type === 'image' || item.content_type === 'mixed' || hadAnyImage;
+      out.push({ role: 'user', content: `${prefix}: ${item.content || ''}${hadImage ? ' [图片]' : ''}` });
     }
   }
   return out;
@@ -262,6 +276,39 @@ export async function chatWithMomi({
     };
   }
 
+  // 1.5) 定时任务/提醒设定解析与创建（如果用户提出了提醒需求）
+  try {
+    const { createTaskFromMessage, parseReminderLocally } = require('./momiTasks');
+    const parsedReminder = parseReminderLocally(message);
+    if (parsedReminder) {
+      const created = await createTaskFromMessage({
+        userId,
+        message,
+        sourceMessageId: null,
+      });
+      if (created) {
+        preciseData = preciseData || {};
+        preciseData.taskCreated = created;
+      }
+    }
+  } catch (taskErr) {
+    console.warn('[momiAssistant] 解析/创建定时任务异常:', taskErr.message);
+  }
+
+  // 1.6) 外网检索兜底匹配（若用户显式要求查询外网但未被 intent 拦截）
+  if (!preciseData?.intent && /(查|搜索|搜).*外网|外网.*(信息|消息)|上网查|查一下最新|外网/i.test(message)) {
+    try {
+      const { searchWeb } = require('./webSearchService');
+      const searchRes = await searchWeb(message);
+      if (searchRes) {
+        preciseData = preciseData || {};
+        preciseData.intent = { intent: 'web_search', data: searchRes };
+      }
+    } catch (searchErr) {
+      console.warn('[momiAssistant] 外网检索触发异常:', searchErr.message);
+    }
+  }
+
   // 跨场景多层级上下文构建（近端40条打通主聊天与助手 + 7天滚动摘要）
   const convContext = await buildConversationContext({
     scene: triggerSource,
@@ -292,27 +339,46 @@ export async function chatWithMomi({
   // 5) 组装 messages：合并跨场景近端历史（最多40条），本轮图片绝不静默丢弃
   const effectiveHistory = convContext?.nearMessages?.length ? convContext.nearMessages : recentChatHistory;
   const messages = [{ role: 'system', content: systemPrompt }, ...historyToMessages(effectiveHistory, { maxMessages: 40 })];
+  const preparedImages = [];
   if (images.length) {
-    const preparedImages = [];
     for (const uri of images) {
-      // Storage https URL 优先；本地 URI 回退为压缩 data URL
-      // eslint-disable-next-line no-await-in-loop
-      const url = /^https?:\/\//i.test(uri) || uri.startsWith('data:') ? uri : await localUriToDataUrl(uri);
+      let url = uri;
+      if (typeof url === 'string' && !/^https?:\/\//i.test(url) && !url.startsWith('data:')) {
+        if (url.startsWith('file://') || url.startsWith('/')) {
+          // eslint-disable-next-line no-await-in-loop
+          url = await localUriToDataUrl(url);
+        } else {
+          // Supabase Storage 路径（如 uploads/photo_...jpg 或 chat/...）
+          try {
+            const bucket = url.startsWith('chat/') ? MOMI_CHAT_BUCKET : 'photos';
+            // eslint-disable-next-line no-await-in-loop
+            const { data } = await supabase.storage.from(bucket).createSignedUrl(url, 3600);
+            url = data?.signedUrl || '';
+          } catch {
+            url = '';
+          }
+        }
+      } else if (typeof url === 'string' && !url.startsWith('data:') && !/^https?:\/\//i.test(url)) {
+        // eslint-disable-next-line no-await-in-loop
+        url = await localUriToDataUrl(url);
+      }
       if (!url) {
-        return {
-          success: false, content: '', reply: '图片处理失败了，请重新选择图片再试。',
-          emotionDelta: null, memoryWrites: [], usedFallbackModel: false, errorCode: 'IMAGE_PREPARE_FAILED',
-        };
+        console.warn('[momiAssistant] 无法解析图片有效 URL，已忽略:', uri);
+        continue;
       }
       preparedImages.push(url);
     }
-    messages.push({
-      role: 'user',
-      content: [
-        { type: 'text', text: `[${userId}]: ${message || '看看这张图片'}` },
-        ...preparedImages.map((url) => ({ type: 'image_url', image_url: { url } })),
-      ],
-    });
+    if (preparedImages.length > 0) {
+      messages.push({
+        role: 'user',
+        content: [
+          { type: 'text', text: `[${userId}]: ${message || '看看这张图片'}` },
+          ...preparedImages.map((u) => ({ type: 'image_url', image_url: { url: u } })),
+        ],
+      });
+    } else {
+      messages.push({ role: 'user', content: `[${userId}]: ${message || '[图片]'}` });
+    }
   } else {
     messages.push({ role: 'user', content: `[${userId}]: ${message}` });
   }
@@ -329,7 +395,7 @@ export async function chatWithMomi({
     temperature: 0.75,
     top_p: 0.9,
     max_tokens,
-    requiresVision: images.length > 0,
+    requiresVision: preparedImages.length > 0,
   });
   if (!res.success) {
     let reply = res.error;

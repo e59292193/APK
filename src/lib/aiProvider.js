@@ -255,6 +255,16 @@ export async function sendChatCompletion({
         if (res.status === 429) {
           return failure(AI_ERROR_CODES.RATE_LIMIT);
         }
+        if (
+          res.status === 400 &&
+          (errLower.includes('image_url') ||
+            errLower.includes('multimodal') ||
+            errLower.includes('image') ||
+            errLower.includes('vision') ||
+            errLower.includes('picture'))
+        ) {
+          return failure(AI_ERROR_CODES.VISION_UNSUPPORTED);
+        }
         if (res.status >= 500) {
           return failure(AI_ERROR_CODES.SERVER_ERROR, `AI 服务异常 (${res.status})，请稍后再试`);
         }
