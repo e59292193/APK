@@ -342,8 +342,8 @@ export async function tickProactiveScheduler({ userId, onMessage, now = new Date
 
   const bucket = Math.floor(now.getTime() / 7200000);
   const userPrompt = force
-    ? '向你的家人打个活泼可爱的招呼，证明你在正常陪伴他们。不超过50字。'
-    : `已经有 ${Math.floor(silentHours)} 小时没人和你互动。请主动关心一下；不超过50字。`;
+    ? '（主动测试）：向你的家人打个活泼可爱的招呼。'
+    : `（状态提示）：已经有 ${Math.floor(silentHours)} 小时没人和你互动，发条消息关心一下他们吧。`;
 
   const generated = await chatWithMomi({
     userId,

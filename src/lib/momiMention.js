@@ -47,12 +47,12 @@ export async function maybeCreateMomiInterjection({
     if (existing?.data) return null;
 
     const hasImages = Array.isArray(images) && images.length > 0;
-    let userPrompt = `情侣主聊天中，${userId} 说：“${content}”。他们点到了你的名字，请自然插一句，不超过80字。不要说自己被系统唤醒。`;
+    let userPrompt = `情侣主聊天中，${userId} 说：“${content}”。`;
     if (isQuote && !isMentioned) {
-      userPrompt = `情侣主聊天中，${userId} 引用回复了你刚才说的话「${quotedContent}」，对你说：“${content}”。请自然回复一句，不超过80字。`;
+      userPrompt = `情侣主聊天中，${userId} 引用回复了你刚才说的话「${quotedContent}」，对你说：“${content}”。`;
     }
     if (hasImages) {
-      userPrompt += `\n对方同时附上了 ${images.length} 张图片（就在这条消息里）。你必须先用自己的语气具体说说看到了什么，再自然接话；禁止说看不到图片，也不要假装看到了不存在的内容。总长不超过120字。`;
+      userPrompt += `\n对方同时附上了 ${images.length} 张图片（就在这条消息里）。`;
     }
 
     const generated = await chatWithMomi({

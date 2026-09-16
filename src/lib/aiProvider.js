@@ -170,6 +170,7 @@ function isModelNotFoundError(status, errText) {
 export async function sendChatCompletion({
   messages,
   temperature = 0.7,
+  top_p = 0.9,
   max_tokens = 1024,
   overrideConfig = null,
   requiresVision = false,
@@ -217,6 +218,7 @@ export async function sendChatCompletion({
         model: targetModel,
         messages,
         temperature,
+        top_p,
         max_tokens,
       };
 

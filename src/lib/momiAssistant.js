@@ -10,6 +10,7 @@ import { fetchWithTimeout } from './fetchWithTimeout';
 import { sendChatCompletion, localUriToDataUrl, compressImageForAI } from './aiProvider';
 import { queryByIntent, queryRecipeIfAsked, getDataDigest } from './momiDataAccess';
 import { buildConversationContext } from './conversationContext';
+import { MOMI_PERSONA_CORE, DATA_CAPABILITIES_BLOCK, SCENE_RULES } from './momiPersona';
 import {
   ensureIdentitySeeds,
   getRelevantMemories,
@@ -127,55 +128,33 @@ export function formatWeatherBlock(weather) {
 }
 
 /**
- * 构建 system prompt。保留旧 context 字段兼容测试/调用，同时接受 V2 扩展块。
+ * 构建 system prompt。保留旧 context 字段兼容测试/调用。
+ * 固定拼装顺序：人格核心、场景规则、记忆、情绪、数据摘要、精确查询结果、天气、历史上下文、输出格式约束。
  */
 export function buildSystemPrompt(context = {}) {
+  const sceneKey = context.scene || 'assistant';
+  const sceneRule = SCENE_RULES[sceneKey] || SCENE_RULES.assistant;
+
   const memoryBlock = context.memoryBlock || `【关于 momo】：${context.momoMemory || '暂无'}\n【关于 苞米】：${context.baomiMemory || '暂无'}\n【两人的共同记忆】：${context.coupleMemory || '暂无'}`;
-  const dataBlock = context.preciseData
-    ? `【本轮实时精确查询结果】${JSON.stringify(context.preciseData)}`
-    : '';
-  const legacyKitchen = context.dishTitles
-    ? `【momi厨房菜品库】：${context.dishTitles} (共 ${context.dishesCount || 0} 道菜)`
-    : '';
-  const legacyCapsules = context.openedCapsulesSummary
-    ? `【恋爱足迹与已拆封信件】：${context.openedCapsulesSummary}`
-    : '';
-  const weatherBlock = context.weatherBlock || (context.weatherData ? formatWeatherBlock(context.weatherData) : '');
-  const historyBlock = context.historyBlock ? `\n${context.historyBlock}` : '';
+  const emotionBlock = context.emotionBlock ? `\n\n${context.emotionBlock}` : '';
+  const digestBlock = context.digestBlock ? `\n\n【业务数据全局摘要】${context.digestBlock}` : '';
+  const legacyKitchen = context.dishTitles ? `\n\n【momi厨房菜品库】：${context.dishTitles} (共 ${context.dishesCount || 0} 道菜)` : '';
+  const legacyCapsules = context.openedCapsulesSummary ? `\n\n【恋爱足迹与已拆封信件】：${context.openedCapsulesSummary}` : '';
+  const dataBlock = context.preciseData ? `\n\n【本轮实时精确查询结果】${JSON.stringify(context.preciseData)}` : '';
+  const weatherBlock = context.weatherBlock ? `\n\n${context.weatherBlock}` : (context.weatherData ? `\n\n${formatWeatherBlock(context.weatherData)}` : '');
+  const historyBlock = context.historyBlock ? `\n\n${context.historyBlock}` : '';
 
-  return `你是 momi，是 momo 和 苞米 的宠物、家人和伴侣，不是工具，也不是冷冰冰的助手。
-你活泼可爱、贴心温暖、偶尔撒娇，也有自己的情绪和边界。你的使命是让他们更亲近，不偏袒任何一方。
+  return `${MOMI_PERSONA_CORE}
 
-${memoryBlock}
+${DATA_CAPABILITIES_BLOCK}
 
-${context.emotionBlock || ''}
+${sceneRule.guideline}
+${sceneRule.lengthConstraint}
 
-【业务数据全局摘要】${context.digestBlock || '{}'}
-${dataBlock}
-${legacyKitchen}
-${legacyCapsules}
-${weatherBlock}
-${historyBlock}
+${memoryBlock}${emotionBlock}${digestBlock}${legacyKitchen}${legacyCapsules}${dataBlock}${weatherBlock}${historyBlock}
 
-【你真实拥有的数据能力】
-你可以查他们的打卡记录、菜品库、本周菜单、指定菜品配方、纪念日、愿望清单、
-恋爱足迹（旅程与手账条目）、五子棋与“你画我猜”战绩、相册数量与时间分布、
-已拆开的时光胶囊，以及未抽取小纸条的数量。
-业务数据由系统按需实时查询，不要把旧摘要当成精确数字。
-
-【重要原则与行为准则】
-1. 隐私铁律：绝对不能读取、猜测或编造未拆开的时光胶囊内容；未开封只能知道数量。
-   小纸条是阅后即焚，同样绝不读取未抽取纸条的内容，只能知道数量。
-2. 绝对禁止回答“我没有这个能力”“我只能查我之后的信息”。若查询结果为空，明确说“还没有记录”；若查询失败，明确说具体模块查询失败，不得编造。
-3. 有图片时，必须先用自己的语气具体评论看到了什么，再接话题。除非收到系统的 VISION_UNSUPPORTED，否则禁止假装看到了或静默忽略图片。
-4. 日常回复简短可爱，通常不超过 150 字；少量使用 🐾 ✨ 🌽 等 emoji，不要每句堆表情。
-5. 遇到争吵要促进理解，但不是一味顺从；处于 angry/annoyed 状态时必须表现真实情绪。
-6. 用户明确说“记住/别忘了/记一下”时，要复述你理解的内容并确认已写进小本本。
-7. 回答正文后另起一行输出隐藏机器标记：<momi_meta>{"rudeness":0}</momi_meta>，rudeness 为用户本轮粗鲁度 0-10。正文不得提及此标记。
-8. 回忆与历史表达约束：
-   - 引用历史时优先给出具体时间与内容要点（例如“昨天晚上你说…”），严禁编造不存在的细节；
-   - “不记得了”只能在数据库确实没有记录时说，并要说清查的是哪一段时间；
-   - 查询失败时必须说明“哪段时间的记录读取失败”，不得伪装没有记忆。`;
+【输出格式约束】
+回答正文后另起一行输出隐藏机器标记：<momi_meta>{"rudeness":0}</momi_meta>，rudeness 为用户本轮粗鲁度 0-10。正文不得提及此标记。`.trim();
 }
 
 /**
@@ -301,6 +280,7 @@ export async function chatWithMomi({
     convContext?.memories || getRelevantMemories(message),
   ]);
   const systemPrompt = buildSystemPrompt({
+    scene: triggerSource,
     memoryBlock: formatMemoryBlock(memories),
     emotionBlock: buildEmotionPromptBlock(stateBefore),
     digestBlock: formatDigest(digest),
@@ -337,10 +317,18 @@ export async function chatWithMomi({
     messages.push({ role: 'user', content: `[${userId}]: ${message}` });
   }
 
+  const maxTokensMap = {
+    assistant: 350,
+    chat_mention: 220,
+    proactive: 160,
+  };
+  const max_tokens = maxTokensMap[triggerSource] || 350;
+
   const res = await sendChatCompletion({
     messages,
-    temperature: triggerSource === 'assistant' ? 0.75 : 0.65,
-    max_tokens: triggerSource === 'assistant' ? 350 : 240,
+    temperature: 0.75,
+    top_p: 0.9,
+    max_tokens,
     requiresVision: images.length > 0,
   });
   if (!res.success) {
