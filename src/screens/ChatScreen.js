@@ -13,7 +13,6 @@ import {
   ScrollView,
   AppState,
 } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useKeyboardHeight } from '../hooks/useKeyboardHeight';
 import { supabase } from '../lib/supabase';
 import { fetchWithTimeout } from '../lib/fetchWithTimeout';
@@ -128,9 +127,19 @@ export default function ChatScreen({
 
   // Partner
   const partnerId = Object.keys(VALID_USERS).find((u) => u !== userId) || '';
-  const insets = useSafeAreaInsets();
   const keyboardHeight = useKeyboardHeight();
-  const composerBottomOffset = Platform.OS === 'ios' ? (keyboardHeight > 0 ? keyboardHeight : 0) : 0;
+  const composerBottomOffset = keyboardHeight > 0 ? keyboardHeight : 0;
+
+  useEffect(() => {
+    if (keyboardHeight > 0) {
+      setTimeout(() => {
+        flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
+      }, 50);
+      setTimeout(() => {
+        flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
+      }, 200);
+    }
+  }, [keyboardHeight]);
 
   // ─── Avatars state (功能4) ───
   const [avatars, setAvatars] = useState({ momo: '', '苞米': '', momi: '' });
@@ -1392,7 +1401,7 @@ export default function ChatScreen({
       <View style={[styles.inputBar, {
         backgroundColor: cardBg,
         borderTopColor: border,
-        paddingBottom: (keyboardHeight > 0 ? spacing[2] : Math.max(insets.bottom, spacing[2])) + 2,
+        paddingBottom: spacing[2] + 2,
       }]}>
         <TouchableOpacity
           style={[styles.plusButton, { backgroundColor: bg }]}
@@ -1413,6 +1422,11 @@ export default function ChatScreen({
           placeholderTextColor={textMuted}
           multiline
           maxLength={500}
+          onFocus={() => {
+            setTimeout(() => {
+              flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
+            }, 100);
+          }}
         />
         <TouchableOpacity
           style={[styles.sendBtn, { backgroundColor: primary }, (!inputText.trim() || sending) && [styles.sendBtnDisabled, { backgroundColor: border }]]}

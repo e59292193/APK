@@ -156,6 +156,10 @@ export function buildSystemPrompt(context = {}) {
     ? `\n\n【实时外网信息检索结果】\n关键词：${webSearchResult.query}\n检索结果内容：\n${webSearchResult.formattedText || '未检索到更多直接内容'}\n【回答硬性约束】本轮上下文已包含外网实时检索权威结果，请直接结合上述内容回答用户，证明你具备实时查询外网信息的能力！`
     : '';
 
+  const now = new Date();
+  const timeString = `${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日 ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+  const currentTimeBlock = `\n\n【当前真实时间】${timeString}。你可以基于此时间计算任何相对时间（如5分钟后是几点几分、明天是几月几日等），绝对禁止回答“看不到现在的具体时间”。`;
+
   return `${MOMI_PERSONA_CORE}
 
 ${DATA_CAPABILITIES_BLOCK}
@@ -163,7 +167,7 @@ ${DATA_CAPABILITIES_BLOCK}
 ${sceneRule.guideline}
 ${sceneRule.lengthConstraint}
 
-${memoryBlock}${emotionBlock}${digestBlock}${legacyKitchen}${legacyCapsules}${dataBlock}${taskBlock}${webSearchBlock}${weatherBlock}${historyBlock}
+${memoryBlock}${emotionBlock}${digestBlock}${legacyKitchen}${legacyCapsules}${dataBlock}${taskBlock}${webSearchBlock}${weatherBlock}${currentTimeBlock}${historyBlock}
 
 【输出格式约束】
 回答正文后另起一行输出隐藏机器标记：<momi_meta>{"rudeness":0}</momi_meta>，rudeness 为用户本轮粗鲁度 0-10。正文不得提及此标记。`.trim();

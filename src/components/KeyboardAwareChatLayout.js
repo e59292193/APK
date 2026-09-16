@@ -48,18 +48,36 @@ export function KeyboardAwareChatLayout({
   }, [headerHeight, insets]);
 
   useEffect(() => {
-    const eventName = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
-    const showSub = Keyboard.addListener(eventName, () => {
+    const handleScroll = () => {
       setTimeout(() => {
         if (listRef?.current?.scrollToEnd) {
           listRef.current.scrollToEnd({ animated: true });
         } else if (listRef?.current?.scrollToOffset) {
           listRef.current.scrollToOffset({ offset: 0, animated: true });
         }
-      }, 100);
-    });
+      }, 50);
+      setTimeout(() => {
+        if (listRef?.current?.scrollToEnd) {
+          listRef.current.scrollToEnd({ animated: true });
+        } else if (listRef?.current?.scrollToOffset) {
+          listRef.current.scrollToOffset({ offset: 0, animated: true });
+        }
+      }, 200);
+      setTimeout(() => {
+        if (listRef?.current?.scrollToEnd) {
+          listRef.current.scrollToEnd({ animated: true });
+        } else if (listRef?.current?.scrollToOffset) {
+          listRef.current.scrollToOffset({ offset: 0, animated: true });
+        }
+      }, 350);
+    };
+
+    const subs = [
+      Keyboard.addListener('keyboardWillShow', handleScroll),
+      Keyboard.addListener('keyboardDidShow', handleScroll),
+    ];
     return () => {
-      showSub.remove();
+      subs.forEach((s) => s.remove());
     };
   }, [listRef]);
 

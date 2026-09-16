@@ -22,9 +22,9 @@ import { formatLocalTime } from '../lib/dateUtils';
 import {
   KeyboardAwareChatLayout,
   CHAT_LIST_KEYBOARD_PROPS,
-  getChatListPaddingBottom,
   MAX_COMPOSER_INPUT_HEIGHT,
 } from '../components/KeyboardAwareChatLayout';
+import { useKeyboardHeight } from '../hooks/useKeyboardHeight';
 
 function nextExp(state) {
   return GROWTH_THRESHOLDS[(state?.growth_level || 1) - 1] || GROWTH_THRESHOLDS.at(-1);
@@ -36,6 +36,8 @@ function messageImages(item) {
 
 export default function MomiAssistantScreen({ userId, onBack, onNavigateSettings, onOpenAISettings, onOpenNotebook }) {
   const insets = useSafeAreaInsets();
+  const keyboardHeight = useKeyboardHeight();
+  const isKeyboardVisible = keyboardHeight > 0;
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const flatListRef = useRef(null);
@@ -207,13 +209,14 @@ export default function MomiAssistantScreen({ userId, onBack, onNavigateSettings
         </View>
       </View>
 
-      <KeyboardAwareChatLayout listRef={flatListRef} headerHeight={56}>
+      <KeyboardAwareChatLayout listRef={flatListRef} headerHeight={120}>
         {loading ? <View style={styles.center}><ActivityIndicator color={colors.primary} /><Text style={styles.muted}>正在呼唤 momi...</Text></View> : (
           <FlatList
             ref={flatListRef} data={messages} keyExtractor={(item, i) => item.id || `msg-${i}`}
-            renderItem={renderItem} contentContainerStyle={[styles.listContent, { paddingBottom: getChatListPaddingBottom(insets, 60) }]}
+            renderItem={renderItem} contentContainerStyle={[styles.listContent, { paddingBottom: 16 }]}
             {...CHAT_LIST_KEYBOARD_PROPS}
             onContentSizeChange={() => flatListRef.current?.scrollToEnd({ animated: false })}
+            onLayout={() => { setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100); }}
             ListEmptyComponent={<View style={styles.empty}><Text style={styles.emptyEmoji}>🐾</Text><Text style={styles.emptyTitle}>我是你们的宠物 momi</Text><Text style={styles.muted}>发张照片给我看，或者问问我你们的共同记录吧～</Text></View>}
             ListFooterComponent={sending ? <View style={styles.typing}><Text style={styles.typingText}>{uploadProgress > 0 && uploadProgress < 1 ? `图片上传中 ${Math.round(uploadProgress * 100)}%` : 'momi 正在想…'}</Text><ActivityIndicator size="small" color={colors.primary} /></View> : null}
           />
@@ -222,11 +225,12 @@ export default function MomiAssistantScreen({ userId, onBack, onNavigateSettings
         {selectedImages.length ? <View style={styles.previewRow}>{selectedImages.map((uri, i) => (
           <View key={uri} style={styles.previewWrap}><Image source={{ uri }} style={styles.preview} /><TouchableOpacity style={styles.removeImage} onPress={() => setSelectedImages((p) => p.filter((_, n) => n !== i))}><Ionicons name="close" size={14} color={colors.textOnPrimary} /></TouchableOpacity></View>
         ))}</View> : null}
-        <View style={[styles.composer, { paddingBottom: Math.max(insets.bottom, 10) }]}>
+        <View style={[styles.composer, { paddingBottom: isKeyboardVisible ? 10 : Math.max(insets.bottom, 10) }]}>
           <TouchableOpacity style={styles.imageButton} onPress={pickImages} disabled={sending}><Ionicons name="image-outline" size={23} color={colors.primary} /></TouchableOpacity>
           <TextInput
             style={styles.input} placeholder="和 momi 聊聊天…" placeholderTextColor={colors.textMuted}
             value={inputText} onChangeText={setInputText} multiline maxLength={500}
+            onFocus={() => { setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 150); }}
           />
           <TouchableOpacity style={[styles.send, ((!inputText.trim() && !selectedImages.length) || sending) && styles.disabled]} disabled={(!inputText.trim() && !selectedImages.length) || sending} onPress={handleSend}>
             <Ionicons name="arrow-up" size={20} color={colors.textOnPrimary} />
