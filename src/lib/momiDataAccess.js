@@ -11,7 +11,8 @@
 //   3. 小纸条 ephemeral_notes 已核实为阅后即焚（消费即 DELETE 整行），
 //      与未拆开的信同等级严格：只统计待抽取数量，绝不读取 content/sender_id。
 //
-// 表名字段名均已核对 src/lib/*_schema.sql（checkin/kitchen/momi/gomoku/drawGuess/ephemeral）。
+// 表名字段名均已核对 src/lib/*_schema.sql（checkin/kitchen/momi/gomoku/drawGuess/ephemeral，
+// trips/trip_entries 见 checkin_schema.sql 第 6/7 节）。
 // ═══════════════════════════════════════════════════════
 
 import { supabase } from './supabase';
@@ -261,6 +262,50 @@ export async function getWishlistSummary() {
 }
 
 // ─────────────────────────────────────────────────────
+// 恋爱足迹（trips / trip_entries）
+// 旅程列表 + 手账条目统计，回答“我们去过哪里玩”类问题
+// ─────────────────────────────────────────────────────
+
+export async function getTripsSummary() {
+  const tripsRes = await safeQuery('trips', () =>
+    supabase
+      .from('trips')
+      .select('id, title, location, created_at')
+      .order('created_at', { ascending: false })
+      .limit(50),
+  { data: [] });
+  const trips = tripsRes.data || [];
+
+  const entriesCountRes = await safeQuery('trip_entries', () =>
+    supabase.from('trip_entries').select('id', { count: 'exact', head: true }),
+  { count: 0 });
+
+  const recentEntriesRes = await safeQuery('trip_entries', () =>
+    supabase
+      .from('trip_entries')
+      .select('trip_id, user_id, content, photo_url, created_at')
+      .order('created_at', { ascending: false })
+      .limit(10),
+  { data: [] });
+
+  return {
+    totalTrips: trips.length,
+    trips: trips.map((t) => ({
+      title: t.title,
+      location: t.location || '',
+      at: t.created_at,
+    })),
+    totalEntries: entriesCountRes.count || 0,
+    recentEntries: (recentEntriesRes.data || []).map((e) => ({
+      by: e.user_id,
+      preview: (e.content || '').slice(0, 40),
+      hasPhoto: Boolean(e.photo_url),
+      at: e.created_at,
+    })),
+  };
+}
+
+// ─────────────────────────────────────────────────────
 // 时光胶囊（time_capsules）—— 隐私铁律实施点
 // ─────────────────────────────────────────────────────
 
@@ -470,7 +515,7 @@ export async function getDataDigest({ forceRefresh = false } = {}) {
   }
 
   // 2. 重算（并行）
-  const [checkin, kitchen, anniversary, wishlist, photos, capsules, ephemeral, games] = await Promise.all([
+  const [checkin, kitchen, anniversary, wishlist, photos, capsules, ephemeral, games, trips] = await Promise.all([
     getCheckinSummary(),
     getKitchenSummary(),
     getAnniversarySummary(),
@@ -482,6 +527,7 @@ export async function getDataDigest({ forceRefresh = false } = {}) {
     }))(),
     getEphemeralSummary(),
     getGamesSummary(),
+    getTripsSummary(),
   ]);
 
   const digest = {
@@ -506,6 +552,11 @@ export async function getDataDigest({ forceRefresh = false } = {}) {
       gomokuBaomiWins: games.gomoku.baomiWins,
       gomokuDraws: games.gomoku.draws,
       drawguessStats: games.drawguess.stats,
+    },
+    trips: {
+      totalTrips: trips.totalTrips,
+      tripTitles: trips.trips.map((t) => t.title).slice(0, 20),
+      totalEntries: trips.totalEntries,
     },
   };
 
@@ -538,6 +589,7 @@ export const INTENT_RULES = [
   { intent: 'wishlist', pattern: /愿望|想做|想去|清单/, run: () => getWishlistSummary() },
   { intent: 'games', pattern: /输|赢|战绩|下棋|五子棋|你画我猜|画画/, run: () => getGamesSummary() },
   { intent: 'photos', pattern: /照片|相册|拍了多少/, run: () => getPhotosSummary() },
+  { intent: 'trips', pattern: /足迹|旅行|旅游|去过|出行|手账|游记/, run: () => getTripsSummary() },
   { intent: 'ephemeral', pattern: /小纸条|纸条|语音信箱/, run: () => getEphemeralSummary() },
   {
     intent: 'capsules',
