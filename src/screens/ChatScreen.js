@@ -12,12 +12,13 @@ import {
   Dimensions,
   ScrollView,
   AppState,
-  StatusBar,
 } from 'react-native';
 import { useKeyboardHeight } from '../hooks/useKeyboardHeight';
 import { supabase } from '../lib/supabase';
 import { fetchWithTimeout } from '../lib/fetchWithTimeout';
 import { onSignal, emitSignal } from '../lib/realtimeSignal';
+import { maybeCreateMomiInterjection } from '../lib/momiMention';
+import { collectMomiContextImageRefs, resolveImageRefsForAI } from '../lib/momiChatImages';
 import { fetchTodayCount } from '../lib/checkinUtils';
 import { formatLocalDateTime } from '../lib/dateUtils';
 import CheckinCreateModal from '../components/CheckinCreateModal';
@@ -42,6 +43,7 @@ export default function ChatScreen({
   onNavigateEphemeralNote,
   onNavigateVoiceMailbox,
   onNavigateMomiKitchen,
+  onNavigateMomiAssistant,
   onNavigateThemeSelector,
   onUnreadChange,
   isActive = true,
@@ -110,10 +112,34 @@ export default function ChatScreen({
   const [activeThemes, setActiveThemes] = useState([]);
   const [selectedTheme, setSelectedTheme] = useState(null);
 
+  // ─── momi 主动消息未读计数 (功能6) ───
+  const [momiUnread, setMomiUnread] = useState(0);
+  const refreshMomiUnread = useCallback(async () => {
+    try {
+      const { getProactiveUnreadCount } = require('../lib/momiUnread');
+      const count = await getProactiveUnreadCount();
+      setMomiUnread(count);
+    } catch {}
+  }, []);
+  useEffect(() => {
+    refreshMomiUnread();
+  }, [refreshMomiUnread, isActive, refreshTrigger]);
+
   // Partner
   const partnerId = Object.keys(VALID_USERS).find((u) => u !== userId) || '';
   const keyboardHeight = useKeyboardHeight();
   const composerBottomOffset = keyboardHeight > 0 ? keyboardHeight : 0;
+
+  useEffect(() => {
+    if (keyboardHeight > 0) {
+      setTimeout(() => {
+        flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
+      }, 50);
+      setTimeout(() => {
+        flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
+      }, 200);
+    }
+  }, [keyboardHeight]);
 
   // ─── Avatars state (功能4) ───
   const [avatars, setAvatars] = useState({ momo: '', '苞米': '', momi: '' });
@@ -159,11 +185,15 @@ export default function ChatScreen({
         {
           text: '引用',
           onPress: () => {
+            const isImg = msgType === 'image' || item.content_type === 'image' || Boolean(item.metadata?.image_url || item.image_url);
             setQuotedMessage({
               id: item.id,
               user_id: isMomi ? 'momi' : item.user_id,
               content: getQuotePreviewText(item),
               type: msgType,
+              content_type: isImg ? 'image' : (item.content_type || msgType),
+              metadata: item.metadata || null,
+              image_url: item.metadata?.image_url || item.image_url || null,
               isMomi,
             });
           },
@@ -202,24 +232,101 @@ export default function ChatScreen({
     return unsub;
   }, [userId, noteUnreadIfPartner]);
 
-  // ─── 轮询兜底：腾讯 IM 信号偶发丢失时，定时拉取保证消息/邀请近实时显示 ───
-  // 参照 DrawGuess 的 4 秒 fetchGame 轮询机制：信号是主通道，轮询是补漏网
+  // ─── momi 名字唤醒插话添加器 ───
+  const appendInterjection = useCallback((row) => {
+    if (!row) return;
+    const momiMsg = {
+      id: row.id,
+      user_id: 'momi',
+      content: row.content,
+      type: 'momi',
+      created_at: row.created_at,
+      trigger_message_id: row.trigger_message_id,
+      isMomi: true,
+    };
+    setMessages((prev) => {
+      if (
+        prev.some(
+          (m) =>
+            (row.trigger_message_id && m.trigger_message_id === row.trigger_message_id) ||
+            m.id === row.id
+        )
+      ) {
+        return prev;
+      }
+      return [momiMsg, ...prev];
+    });
+  }, []);
+
+  // ─── 订阅 momi 名字唤醒插话 (momi_chat_interjections) ───
+  useEffect(() => {
+    const channel = supabase
+      .channel('chat_screen_momi_interjections')
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'momi_chat_interjections',
+          filter: 'couple_id=eq.momo_and_baomi',
+        },
+        (payload) => {
+          appendInterjection(payload.new);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [appendInterjection]);
+
+  // ─── 轮询兜底：定时拉取保证消息/邀请及插话近实时显示 ───
   const pollMessages = useCallback(async () => {
     try {
-      const { data, error } = await fetchWithTimeout(() =>
-        supabase
-          .from('messages')
-          .select('*')
-          .order('created_at', { ascending: false })
-          .limit(50)
-      );
-      if (error) throw error;
-      if (!data || data.length === 0) return;
+      const [msgRes, interjectionRes] = await Promise.all([
+        fetchWithTimeout(() =>
+          supabase
+            .from('messages')
+            .select('*')
+            .order('created_at', { ascending: false })
+            .limit(50)
+        ),
+        fetchWithTimeout(() =>
+          supabase
+            .from('momi_chat_interjections')
+            .select('*')
+            .eq('couple_id', 'momo_and_baomi')
+            .order('created_at', { ascending: false })
+            .limit(20)
+        ).catch(() => ({ data: [], error: null })),
+      ]);
+
+      if (msgRes.error) throw msgRes.error;
+      const rawData = msgRes.data || [];
+      const interjectionMsgs = (interjectionRes?.data || []).map((row) => ({
+        id: row.id,
+        user_id: 'momi',
+        content: row.content,
+        type: 'momi',
+        created_at: row.created_at,
+        trigger_message_id: row.trigger_message_id,
+        isMomi: true,
+      }));
+
+      const incoming = [...rawData, ...interjectionMsgs];
+      if (incoming.length === 0) return;
+
       const newOnes = [];
       setMessages((prev) => {
         const prevIds = new Set(prev.map((m) => m.id));
-        for (const m of data) {
-          if (!prevIds.has(m.id)) newOnes.push(m);
+        const prevTriggerIds = new Set(
+          prev.filter((m) => m.trigger_message_id).map((m) => m.trigger_message_id)
+        );
+        for (const m of incoming) {
+          if (!prevIds.has(m.id) && (!m.trigger_message_id || !prevTriggerIds.has(m.trigger_message_id))) {
+            newOnes.push(m);
+          }
         }
         if (newOnes.length === 0) return prev;
         const merged = [...newOnes, ...prev]
@@ -293,17 +400,40 @@ export default function ChatScreen({
 
   const fetchMessages = async () => {
     try {
-      const { data, error } = await fetchWithTimeout(() =>
-        supabase
-          .from('messages')
-          .select('*')
-          .order('created_at', { ascending: false })
-          .limit(50)
-      );
+      const [msgRes, interjectionRes] = await Promise.all([
+        fetchWithTimeout(() =>
+          supabase
+            .from('messages')
+            .select('*')
+            .order('created_at', { ascending: false })
+            .limit(50)
+        ),
+        fetchWithTimeout(() =>
+          supabase
+            .from('momi_chat_interjections')
+            .select('*')
+            .eq('couple_id', 'momo_and_baomi')
+            .order('created_at', { ascending: false })
+            .limit(20)
+        ).catch(() => ({ data: [], error: null })),
+      ]);
 
-      if (error) throw error;
-      const sortedData = data ? [...data] : [];
-      setMessages(sortedData);
+      if (msgRes.error) throw msgRes.error;
+      const baseMsgs = msgRes.data || [];
+      const interjectionMsgs = (interjectionRes?.data || []).map((row) => ({
+        id: row.id,
+        user_id: 'momi',
+        content: row.content,
+        type: 'momi',
+        created_at: row.created_at,
+        trigger_message_id: row.trigger_message_id,
+        isMomi: true,
+      }));
+
+      const merged = [...baseMsgs, ...interjectionMsgs].sort(
+        (a, b) => new Date(b.created_at) - new Date(a.created_at)
+      );
+      setMessages(merged);
     } catch (error) {
       console.error('Error fetching messages:', error);
       Alert.alert('网络有点开小差', '请尝试下拉刷新或稍后再试');
@@ -336,8 +466,6 @@ export default function ChatScreen({
     const rawText = inputText.trim();
     if (!rawText || sending) return;
 
-    const isAtMomi = /(?:^|\s)@momi(?:\s|$)/i.test(rawText);
-    const atQuery = isAtMomi ? rawText.replace(/@momi\s*/gi, '').trim() : '';
     const isQuoteMomi = Boolean(quotedMessage && (quotedMessage.user_id === 'momi' || quotedMessage.isMomi));
     const quotedContent = quotedMessage?.content;
 
@@ -351,6 +479,7 @@ export default function ChatScreen({
       };
 
       // 带引用消息时写入 metadata.quote
+      const quoteForMomi = quotedMessage;
       if (quotedMessage) {
         insertData.metadata = {
           quote: {
@@ -358,6 +487,7 @@ export default function ChatScreen({
             user_id: quotedMessage.user_id === 'momi' ? 'momi' : quotedMessage.user_id,
             content: quotedMessage.content,
             type: quotedMessage.type,
+            image_url: quotedMessage.image_url || quotedMessage.metadata?.image_url || null,
           },
         };
       }
@@ -371,59 +501,62 @@ export default function ChatScreen({
       setQuotedMessage(null);
       // 立即添加到本地消息列表，同时通知对方
       if (data && data[0]) {
+        const sentMessage = data[0];
         setMessages((prev) => {
-          if (prev.some((m) => m.id === data[0].id)) return prev;
-          return [data[0], ...prev];
+          if (prev.some((m) => m.id === sentMessage.id)) return prev;
+          return [sentMessage, ...prev];
         });
-        emitSignal('chat:message', data[0]).catch((e) => console.warn('[Chat] emitMessage failed:', e.message));
+        emitSignal('chat:message', sentMessage).catch((e) => console.warn('[Chat] emitMessage failed:', e.message));
         setTimeout(() => {
           flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
         }, 100);
-      }
 
-      // ─── 触发 @momi 智能回复 或 引用回复 momi ───
-      if (isAtMomi || isQuoteMomi) {
+        // ─── 触发 momi 名字唤醒 / 引用插话（仅在发送端调用并写入 momi_chat_interjections）───
         (async () => {
           try {
-            const { chatWithMomi } = require('../lib/momiAssistant');
-            const recent = messages.slice(0, 8).reverse();
-            let userPrompt = rawText;
-            if (isQuoteMomi) {
-              userPrompt = `[引用回复了你刚才说的: "${quotedContent}"]\n对你说: ${rawText}`;
-            } else if (isAtMomi) {
-              userPrompt = atQuery || '你好呀 momi！🐾';
-            }
-            const aiRes = await chatWithMomi({
-              userId,
-              message: userPrompt,
-              recentChatHistory: recent,
+            const imageRefs = collectMomiContextImageRefs({
+              messages,
+              quotedMessage: quoteForMomi,
+              now: new Date(),
+              windowMinutes: 10,
+              maxImages: 4,
             });
-            const replyText = aiRes.reply || '在呢在呢！🐾 收到你的回复啦~';
+            const resolvedImages = await resolveImageRefsForAI(imageRefs).catch((imgErr) => {
+              console.warn('[Chat] 图片签名 URL 解析异常:', imgErr.message);
+              return { urls: [], failed: [] };
+            });
 
-            const { data: momiData, error: momiErr } = await supabase
-              .from('messages')
-              .insert([
-                {
-                  user_id: 'momi',
-                  content: replyText,
-                  type: 'momi',
-                  metadata: {
-                    is_ai: true,
-                    reply_to_quote: isQuoteMomi ? quotedContent : undefined,
-                  },
-                },
-              ])
-              .select();
+            const recentHistory = messages.slice(0, 16).reverse().map((m) => {
+              const mSender = m.user_id === userId ? 'me' : (m.user_id === 'momi' ? 'momi' : 'partner');
+              const senderName = m.user_id === 'baomi' ? '苞米' : (m.user_id === 'momo' ? 'momo' : (m.user_id || '用户'));
+              const isImg = m.type === 'image' || m.content_type === 'image' || Boolean(m.metadata?.image_url || m.image_url);
+              const rawContent = (m.content || '').trim();
+              const displayContent = rawContent || (isImg ? `[${senderName} 发了一张图片]` : '');
 
-            if (!momiErr && momiData && momiData[0]) {
-              setMessages((prev) => {
-                if (prev.some((m) => m.id === momiData[0].id)) return prev;
-                return [momiData[0], ...prev];
-              });
-              emitSignal('chat:message', momiData[0]).catch(() => {});
+              return {
+                sender: mSender,
+                content: displayContent,
+                content_type: isImg ? 'image' : (m.content_type || m.type || 'text'),
+                image_urls: isImg ? (m.metadata?.image_url ? [m.metadata.image_url] : (m.image_url ? [m.image_url] : [])) : [],
+              };
+            });
+
+            const interjectionRow = await maybeCreateMomiInterjection({
+              isSender: true,
+              userId,
+              triggerMessageId: sentMessage.id,
+              text: sentMessage.content,
+              message: sentMessage.content,
+              recentChatHistory: recentHistory,
+              isQuote: isQuoteMomi,
+              quotedContent: quotedContent || '',
+              images: resolvedImages.urls || [],
+            });
+            if (interjectionRow) {
+              appendInterjection(interjectionRow);
             }
-          } catch (momiErr) {
-            console.warn('[Chat] momi 回复异常:', momiErr.message);
+          } catch (err) {
+            console.warn('[Chat] 名字唤醒插话触发异常:', err.message);
           }
         })();
       }
@@ -592,9 +725,10 @@ export default function ChatScreen({
       const publicUrls = await uploadImages(uris);
 
       // Send messages
-      const inserts = publicUrls.map(url => ({
+      const senderName = userId === 'baomi' ? '苞米' : (userId === 'momo' ? 'momo' : (userId || '用户'));
+      const inserts = publicUrls.map((url) => ({
         user_id: userId,
-        content: '',
+        content: `[${senderName} 发了一张图片]`,
         type: 'image',
         metadata: { image_url: url },
       }));
@@ -1072,7 +1206,6 @@ export default function ChatScreen({
   if (loading) {
     return (
       <View style={styles.center}>
-        <StatusBar barStyle="dark-content" />
         <ActivityIndicator size="large" color={colors.primaryAction} />
         <Text style={styles.loadingText}>正在加载聊天...</Text>
       </View>
@@ -1081,8 +1214,6 @@ export default function ChatScreen({
 
   const chatContent = (
     <View style={[styles.container, { backgroundColor: bg }]}>
-      <StatusBar barStyle={theme?.statusBarStyle || 'dark-content'} backgroundColor={bg} />
-
       {/* Header */}
       <AppHeader
         compact
@@ -1140,7 +1271,7 @@ export default function ChatScreen({
         contentContainerStyle={styles.messagesList}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
-        keyboardDismissMode="on-drag"
+        keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
         initialNumToRender={15}
         maxToRenderPerBatch={10}
         windowSize={10}
@@ -1172,6 +1303,22 @@ export default function ChatScreen({
             { icon: 'brush-outline', bg: colors.primarySoft || bg, color: primary, label: '你画我猜', onPress: handleOpenDrawGuessLobby },
             { icon: 'paper-plane-outline', bg: colors.primarySoft || bg, color: primary, label: '小纸条', onPress: handleOpenEphemeralNote },
             { icon: 'mic-outline', bg: colors.primarySoft || bg, color: primary, label: '语音信箱', onPress: handleOpenVoiceMailbox },
+            {
+              icon: 'paw-outline',
+              bg: colors.primarySoft || bg,
+              color: primary,
+              label: 'momi 助手',
+              badge: momiUnread,
+              onPress: async () => {
+                setPlusPanelVisible(false);
+                try {
+                  const { markProactiveSeen } = require('../lib/momiUnread');
+                  await markProactiveSeen();
+                  setMomiUnread(0);
+                } catch {}
+                onNavigateMomiAssistant && onNavigateMomiAssistant();
+              },
+            },
           ].map((item, idx) => (
             <TouchableOpacity
               key={idx}
@@ -1183,6 +1330,13 @@ export default function ChatScreen({
             >
               <View style={[styles.plusPanelIconBg, { backgroundColor: item.bg }]}>
                 <Ionicons name={item.icon} size={24} color={item.color} />
+                {Boolean(item.badge && item.badge > 0) && (
+                  <View style={styles.plusPanelBadge}>
+                    <Text style={styles.plusPanelBadgeText}>
+                      {item.badge > 99 ? '99+' : item.badge}
+                    </Text>
+                  </View>
+                )}
               </View>
               <Text style={[styles.plusPanelLabel, { color: textMain }]}>{item.label}</Text>
             </TouchableOpacity>
@@ -1244,7 +1398,11 @@ export default function ChatScreen({
       )}
 
       {/* Input Bar */}
-      <View style={[styles.inputBar, { backgroundColor: cardBg, borderTopColor: border }]}>
+      <View style={[styles.inputBar, {
+        backgroundColor: cardBg,
+        borderTopColor: border,
+        paddingBottom: spacing[2] + 2,
+      }]}>
         <TouchableOpacity
           style={[styles.plusButton, { backgroundColor: bg }]}
           onPress={() => setPlusPanelVisible(!plusPanelVisible)}
@@ -1264,6 +1422,11 @@ export default function ChatScreen({
           placeholderTextColor={textMuted}
           multiline
           maxLength={500}
+          onFocus={() => {
+            setTimeout(() => {
+              flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
+            }, 100);
+          }}
         />
         <TouchableOpacity
           style={[styles.sendBtn, { backgroundColor: primary }, (!inputText.trim() || sending) && [styles.sendBtnDisabled, { backgroundColor: border }]]}
@@ -1750,7 +1913,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing[3] + 2,
     paddingVertical: spacing[2] + 2,
     fontSize: 15,
-    maxHeight: 80,
+    maxHeight: 120,
     color: colors.textPrimary,
   },
   sendBtn: {
@@ -1793,6 +1956,26 @@ const styles = StyleSheet.create({
     ...typography.label,
     color: colors.textSecondary,
     fontWeight: '600',
+  },
+  plusPanelBadge: {
+    position: 'absolute',
+    top: -4,
+    right: -4,
+    backgroundColor: colors.primaryAction || '#FF6B35',
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 4,
+    borderWidth: 1.5,
+    borderColor: '#FFFFFF',
+  },
+  plusPanelBadgeText: {
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: '700',
+    lineHeight: 12,
   },
 
   // ── @momi 提及候选弹窗 ──

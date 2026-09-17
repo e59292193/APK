@@ -12,6 +12,7 @@ import { supabase } from './supabase';
 
 export const PHOTOS_BUCKET = 'photos';
 export const KITCHEN_BUCKET = 'kitchen-images';
+export { resolveImageRefsForAI } from './momiChatImages';
 
 const SUPABASE_URL = 'https://kotakqdxwvienrmbcrnk.supabase.co';
 const LEGACY_PUBLIC_PREFIX = `${SUPABASE_URL}/storage/v1/object/public/${PHOTOS_BUCKET}/`;

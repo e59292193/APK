@@ -6,7 +6,6 @@ import {
   ScrollView,
   TouchableOpacity,
   Vibration,
-  StatusBar,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -15,7 +14,7 @@ import { AppHeader, Badge } from '../components/ui';
 
 export default function ThemeSelectorScreen({ onBack }) {
   const insets = useSafeAreaInsets();
-  const { theme, themeId, colors, setThemeId } = useTheme();
+  const { themeId, colors, setThemeId } = useTheme();
 
   const handleSelectTheme = (id) => {
     if (id === themeId) return;
@@ -25,10 +24,6 @@ export default function ThemeSelectorScreen({ onBack }) {
 
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
-      <StatusBar
-        barStyle={theme.statusBarStyle || 'dark-content'}
-        backgroundColor={colors.backgroundLavender}
-      />
       <AppHeader
         title="主题换装"
         subtitle="随心切换专属清新配色，即选即生效"

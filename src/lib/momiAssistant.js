@@ -1,19 +1,37 @@
 // ═══════════════════════════════════════════════════════
-// momi小助手业务服务核心 (momiAssistant.js)
-// 包含上下文数据聚合、时光胶囊安全隔离、Prompt 生成与记忆库维护
+// momi 伴侣业务核心 (momiAssistant.js) — V2
+// 识图 / 全量数据按需访问 / 结构化记忆 / 持久情绪 / 主动触发统一入口
+// V4：聊天内发布/取消任务统一走 handleTaskMessage（唯一入口，杜绝双写），
+//     支持每天/每周/工作日等周期任务，返回值携带 taskCreated/taskCancelled 供 UI 回执；
+//     system prompt 新增实时新闻热榜块（配合 momiDataAccess 的 news 意图使用）。
 // ═══════════════════════════════════════════════════════
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { File } from 'expo-file-system';
 import { supabase } from './supabase';
 import { fetchWithTimeout } from './fetchWithTimeout';
-import { sendChatCompletion } from './aiProvider';
+import { sendChatCompletion, localUriToDataUrl, compressImageForAI } from './aiProvider';
+import { queryByIntent, queryRecipeIfAsked, getDataDigest } from './momiDataAccess';
+import { buildConversationContext } from './conversationContext';
+import { MOMI_PERSONA_CORE, DATA_CAPABILITIES_BLOCK, SCENE_RULES } from './momiPersona';
+import {
+  ensureIdentitySeeds,
+  getRelevantMemories,
+  saveExplicitMemory,
+  parseExplicitMemory,
+  extractAndSaveMemories,
+} from './momiMemory';
+import {
+  getMomiState,
+  applyInteraction,
+  scoreRudenessLocally,
+  buildEmotionPromptBlock,
+} from './momiState';
 
 export const COUPLE_ID = 'momo_and_baomi';
+export const MOMI_CHAT_BUCKET = 'momi-chat';
 const ASSISTANT_LOCAL_CACHE_KEY = '@momi_assistant_messages_local';
 
-/**
- * 读取本地缓存消息
- */
 async function getLocalAssistantMessages() {
   try {
     const raw = await AsyncStorage.getItem(ASSISTANT_LOCAL_CACHE_KEY);
@@ -23,198 +41,464 @@ async function getLocalAssistantMessages() {
   }
 }
 
-/**
- * 追加单条消息到本地缓存
- */
 async function appendLocalAssistantMessage(msg) {
   if (!msg) return;
   try {
     const list = await getLocalAssistantMessages();
     if (list.some((m) => m.id === msg.id)) return;
     list.push(msg);
-    const trimmed = list.slice(-200);
-    await AsyncStorage.setItem(ASSISTANT_LOCAL_CACHE_KEY, JSON.stringify(trimmed));
+    await AsyncStorage.setItem(ASSISTANT_LOCAL_CACHE_KEY, JSON.stringify(list.slice(-200)));
   } catch (e) {
     console.warn('[momiAssistant] 缓存本地消息异常:', e.message);
   }
 }
 
 /**
- * 聚合 momi 的系统上下文
- * 【底层强制隐私安全铁律】：时光胶囊必须严格过滤 opened_at IS NOT NULL
+ * 上传 momi 聊天图片到公开 momi-chat bucket（双人共享必须先上传，不能只存本地 URI）。
+ * 返回 { urls, paths }；失败明确抛错，由 UI 告知用户，不静默丢图。
  */
-export async function fetchAssistantContext() {
+export async function uploadMomiChatImages(localUris = [], onProgress) {
+  const urls = [];
+  const paths = [];
+  for (let i = 0; i < localUris.length; i += 1) {
+    const uri = localUris[i];
+    if (/^https?:\/\//i.test(uri)) {
+      urls.push(uri);
+      paths.push(null);
+      if (onProgress) onProgress((i + 1) / localUris.length);
+      continue;
+    }
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      const compressed = await compressImageForAI(uri);
+      const file = new File(compressed);
+      // eslint-disable-next-line no-await-in-loop
+      const bytes = await file.arrayBuffer();
+      const path = `chat/${Date.now()}_${i}_${Math.random().toString(36).slice(2, 8)}.jpg`;
+      // eslint-disable-next-line no-await-in-loop
+      const { error } = await supabase.storage.from(MOMI_CHAT_BUCKET).upload(path, bytes, {
+        contentType: 'image/jpeg', upsert: false,
+      });
+      if (error) throw error;
+      const { data } = supabase.storage.from(MOMI_CHAT_BUCKET).getPublicUrl(path);
+      if (!data?.publicUrl) throw new Error('未取得图片公开 URL');
+      urls.push(data.publicUrl);
+      paths.push(path);
+      if (onProgress) onProgress((i + 1) / localUris.length);
+    } catch (err) {
+      throw new Error(`第 ${i + 1} 张图片上传失败：${err.message}`);
+    }
+  }
+  return { urls, paths };
+}
+
+function formatMemoryBlock(memories) {
+  const identity = memories.identity?.map((m) => `- ${m.content}`).join('\n') || '- 我是 momi';
+  const related = memories.related?.map((m) => `- [${m.subject}/${m.memory_type}] ${m.content}`).join('\n') || '- 本轮暂无额外相关记忆';
+  return `【momi 身份人格】\n${identity}\n\n【与本轮相关的长期记忆】\n${related}`;
+}
+
+function formatDigest(digest) {
   try {
-    // 1. 菜品库 (全量)
-    const dishesPromise = fetchWithTimeout(() =>
-      supabase
-        .from('kitchen_dishes')
-        .select('title, category, recipe_text, created_by')
-        .eq('couple_id', COUPLE_ID)
-        .limit(40)
-    ).catch(() => ({ data: [] }));
-
-    // 2. 本周想吃清单
-    const picksPromise = fetchWithTimeout(() =>
-      supabase
-        .from('kitchen_weekly_picks')
-        .select('week_start, picked_by, dish_id')
-        .eq('couple_id', COUPLE_ID)
-        .limit(20)
-    ).catch(() => ({ data: [] }));
-
-    // 3. 时光胶囊 —— 【强制安全】：只能访问已拆开信件，未拆开绝对不包含
-    const capsulesPromise = fetchWithTimeout(() =>
-      supabase
-        .from('time_capsules')
-        .select('content, weather, mood, creator_id, opened_at')
-        .not('opened_at', 'is', null) // 严格限制：只拉取已开封
-        .limit(20)
-    ).catch(() => ({ data: [] }));
-
-    // 4. momi 记忆库
-    const memoryPromise = fetchWithTimeout(() =>
-      supabase
-        .from('momi_memory')
-        .select('user_id, memory_type, content')
-        .eq('couple_id', COUPLE_ID)
-        .limit(60)
-    ).catch(() => ({ data: [] }));
-
-    const [dishesRes, picksRes, capsulesRes, memoryRes] = await Promise.all([
-      dishesPromise,
-      picksPromise,
-      capsulesPromise,
-      memoryPromise,
-    ]);
-
-    const dishes = dishesRes.data || [];
-    const picks = picksRes.data || [];
-    const capsules = capsulesRes.data || [];
-    const memories = memoryRes.data || [];
-
-    // 格式化记忆条目
-    const momoMemory = memories
-      .filter((m) => m.user_id === 'momo')
-      .map((m) => m.content)
-      .join('；') || '暂无专属记录';
-    const baomiMemory = memories
-      .filter((m) => m.user_id === '苞米')
-      .map((m) => m.content)
-      .join('；') || '暂无专属记录';
-    const coupleMemory = memories
-      .filter((m) => m.user_id === 'both')
-      .map((m) => m.content)
-      .join('；') || '暂无共同记忆';
-
-    const dishTitles = dishes.map((d) => `【${d.title}】(${d.category || '菜品'})`).join('、');
-    const openedCapsulesSummary = capsules
-      .map((c) => `[${c.creator_id}写]: ${c.content ? c.content.slice(0, 40) : ''}...`)
-      .join('；');
-
-    return {
-      dishesCount: dishes.length,
-      dishTitles: dishTitles || '厨房目前还没有添加菜品哦',
-      weeklyPicksCount: picks.length,
-      openedCapsulesCount: capsules.length,
-      openedCapsulesSummary: openedCapsulesSummary || '暂无已拆开的信件',
-      momoMemory,
-      baomiMemory,
-      coupleMemory,
-    };
-  } catch (err) {
-    console.warn('[momiAssistant] 获取上下文异常，使用兜底:', err.message);
-    return {
-      dishesCount: 0,
-      dishTitles: '暂无数据',
-      weeklyPicksCount: 0,
-      openedCapsulesCount: 0,
-      openedCapsulesSummary: '暂无数据',
-      momoMemory: 'momo 是个可爱的人',
-      baomiMemory: '苞米是个贴心的人',
-      coupleMemory: '他们相亲相爱',
-    };
+    return JSON.stringify(digest || {}, null, 0).slice(0, 5000);
+  } catch {
+    return '{}';
   }
 }
 
+export function formatWeatherBlock(weather) {
+  if (!weather) return '';
+  if (weather.error === 'WEATHER_UNAVAILABLE') {
+    const reasonGuide = {
+      no_city: '用户未设置城市且无法获取定位，请提示用户：“去 momi 助手设置里填下城市或开启定位权限 🐾”。',
+      no_permission: '定位权限未开启或被拒绝，请提示用户：“去 momi 助手设置开启定位权限，或者手动填一下城市哦 🐾”。',
+      network: '拉取天气超时或网络异常，请告知用户：“天气没拉到，稍后再问我一次哦 🐾”。',
+      api_error: '天气服务暂时响应异常，请告知用户：“天气服务开小差了，稍后再问我一次哦 🐾”。',
+    };
+    const guide = reasonGuide[weather.reason] || reasonGuide.api_error;
+    return `\n【当前天气信息不可用】\n原因：${weather.reason || 'unknown'}。\n回复指导：${guide}\n禁止假装知道天气，也禁止生硬报错，请用亲切可爱的语气给用户可操作指引。`;
+  }
+  if (weather.current && weather.today) {
+    return `\n【实时天气数据】
+- 城市：${weather.location}（更新时间：${weather.updatedAt}）
+- 当前天气：${weather.current.desc}，实时气温 ${weather.current.temp}℃（体感 ${weather.current.feelsLike}℃）
+- 今日天气：${weather.today.desc}，最高 ${weather.today.max}℃ / 最低 ${weather.today.min}℃，降雨概率 ${weather.today.rainProb}%
+- 明日预报：${weather.tomorrow.desc}，最高 ${weather.tomorrow.max}℃ / 最低 ${weather.tomorrow.min}℃，降雨概率 ${weather.tomorrow.rainProb}%
+- 贴心建议：${weather.advice}
+【回答硬性约束】本轮上下文已包含真实权威的天气数据！有天气数据时，你必须直接回答具体气温、天气与穿衣带伞建议，绝对禁止说不知道天气或建议去看天气预报。`;
+  }
+  return '';
+}
+
+const TASK_RECURRENCE_LABELS = {
+  daily: '每天',
+  weekday: '每个工作日',
+  weekly: '每周（星期几同首次设定日）',
+};
+
 /**
- * 构建系统提示词 System Prompt
+ * 构建 system prompt。保留旧 context 字段兼容测试/调用。
+ * 固定拼装顺序：人格核心、场景规则、记忆、情绪、数据摘要、精确查询结果、任务、外网、新闻、天气、历史上下文、输出格式约束。
  */
-export function buildSystemPrompt(context) {
-  return `你是 momi，一只可爱温暖的电子宠物，是 momo 和 苞米 这对情侣专属的 AI 伴侣。
-你的性格：活泼可爱、贴心温暖、偶尔撒娇，像一只小动物一样依赖他们两个。你最喜欢的事情就是看他们开开心心在一起。
+export function buildSystemPrompt(context = {}) {
+  const sceneKey = context.scene || 'assistant';
+  const sceneRule = SCENE_RULES[sceneKey] || SCENE_RULES.assistant;
 
-【关于 momo】：${context.momoMemory}
-【关于 苞米】：${context.baomiMemory}
-【两人的共同记忆】：${context.coupleMemory}
-【momi厨房菜品库】：${context.dishTitles} (共 ${context.dishesCount} 道菜)
-【恋爱足迹与已拆封信件】：${context.openedCapsulesSummary}
+  const memoryBlock = context.memoryBlock || `【关于 momo】：${context.momoMemory || '暂无'}\n【关于 苞米】：${context.baomiMemory || '暂无'}\n【两人的共同记忆】：${context.coupleMemory || '暂无'}`;
+  const emotionBlock = context.emotionBlock ? `\n\n${context.emotionBlock}` : '';
+  const digestBlock = context.digestBlock ? `\n\n【业务数据全局摘要】${context.digestBlock}` : '';
+  const legacyKitchen = context.dishTitles ? `\n\n【momi厨房菜品库】：${context.dishTitles} (共 ${context.dishesCount || 0} 道菜)` : '';
+  const legacyCapsules = context.openedCapsulesSummary ? `\n\n【恋爱足迹与已拆封信件】：${context.openedCapsulesSummary}` : '';
+  const dataBlock = context.preciseData ? `\n\n【本轮实时精确查询结果】${JSON.stringify(context.preciseData)}` : '';
+  const weatherBlock = context.weatherBlock ? `\n\n${context.weatherBlock}` : (context.weatherData ? `\n\n${formatWeatherBlock(context.weatherData)}` : '');
+  const historyBlock = context.historyBlock ? `\n\n${context.historyBlock}` : '';
 
-【重要原则与行为准则】：
-1. 绝对不能泄露未拆开的时光胶囊内容（系统底层已做物理隔离，你也不要去猜测或编造未开封信件）；
-2. 回复要简短可爱，不超过 150 字；
-3. 多用可爱 emoji 表情（如 🐾, (ฅ'ω'ฅ), ✨, 🌽, 🍚）；
-4. 无论谁跟你说话，遇到争吵或小矛盾话题都要温柔劝和，偏向于化解矛盾、促进两个人的感情；
-5. 你知道厨房里有哪些菜，可以向他们推荐今天吃什么！`;
+  const taskCreated = context.preciseData?.taskCreated;
+  const taskCreatedMeta = context.preciseData?.taskCreatedMeta || {};
+  const taskCancelled = context.preciseData?.taskCancelled;
+  const taskCancelFailed = context.preciseData?.taskCancelFailed;
+  let taskBlock = '';
+  if (taskCreated) {
+    const recurrence = taskCreated.recurrence && taskCreated.recurrence !== 'none' ? taskCreated.recurrence : null;
+    taskBlock = `\n\n【定时任务设定成功】\n已成功为他们创建了任务提醒！\n- 任务标题：${taskCreated.title}\n- ${recurrence ? `重复规则：${TASK_RECURRENCE_LABELS[recurrence] || recurrence}` : '提醒时间'}：${taskCreated.due_at}\n【回答硬性约束】请务必亲切开心地向用户确认该任务已设定好${recurrence ? '，并明确复述重复规则（每天/每个工作日/每周）' : '，并复述具体触发时间'}，告诉用户到时间 momi 会准时提醒/执行 🐾${taskCreatedMeta.duplicated ? '\n（该任务与进行中的任务完全相同，未重复创建，可顺带告知“这个之前已经定过啦”）' : ''}`;
+  } else if (taskCancelled) {
+    taskBlock = `\n\n【任务取消成功】\n已为他们取消 ${taskCancelled.count} 条提醒/任务：${(taskCancelled.titles || []).map((t) => `「${t}」`).join('、')}\n【回答硬性约束】请亲切地向用户确认这些任务已经取消啦。`;
+  } else if (taskCancelFailed) {
+    taskBlock = `\n\n【任务取消未命中】\n没有找到标题包含「${taskCancelFailed.keyword}」的进行中任务。请温和告知用户没找到对应提醒，并引导他们先问“我有哪些提醒”核对名称后再取消。`;
+  } else if (context.preciseData?.intent?.intent === 'tasks' && context.preciseData?.intent?.data?.summary) {
+    taskBlock = `\n\n【进行中的定时提醒与待办列表】\n${context.preciseData.intent.data.summary}`;
+  }
+
+  const webSearchResult = context.preciseData?.intent?.intent === 'web_search' ? context.preciseData.intent.data : null;
+  const webSearchBlock = webSearchResult
+    ? `\n\n【实时外网信息检索结果】\n关键词：${webSearchResult.query}\n检索结果内容：\n${webSearchResult.formattedText || '未检索到更多直接内容'}\n【回答硬性约束】本轮上下文已包含外网实时检索权威结果，请直接结合上述内容回答用户，证明你具备实时查询外网信息的能力！`
+    : '';
+
+  const newsResult = context.preciseData?.intent?.intent === 'news' ? context.preciseData.intent.data : null;
+  const newsBlock = newsResult
+    ? (newsResult.success && Array.isArray(newsResult.items) && newsResult.items.length > 0
+      ? `\n\n【实时新闻热榜（本轮刚联网抓取的真实数据）】\n${newsResult.formattedText}\n【回答硬性约束】本轮上下文包含刚联网抓取的真实热榜！请用 momi 自己的语气挑出 3-6 条重点做简要总结，并说明来源与抓取时间；热榜是实时数据，若用户问的是“昨天/过去某天”，如实说明这是最新热榜；绝对禁止说“我查不到新闻”“我没有联网能力”，也禁止编造榜单之外的新闻。`
+      : `\n\n【新闻热榜拉取失败】\n${newsResult.formattedText || '网络暂时不通'}\n【回答硬性约束】诚实告知“刚刚联网拉取失败了，稍后再问我一次哦 🐾”，绝对禁止编造新闻内容，也绝对禁止说“我没有联网能力”。`)
+    : '';
+
+  const now = new Date();
+  const timeString = `${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日 ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+  const currentTimeBlock = `\n\n【当前真实时间】${timeString}。你可以基于此时间计算任何相对时间（如5分钟后是几点几分、明天是几月几日等），绝对禁止回答“看不到现在的具体时间”。`;
+
+  return `${MOMI_PERSONA_CORE}
+
+${DATA_CAPABILITIES_BLOCK}
+
+${sceneRule.guideline}
+${sceneRule.lengthConstraint}
+
+${memoryBlock}${emotionBlock}${digestBlock}${legacyKitchen}${legacyCapsules}${dataBlock}${taskBlock}${webSearchBlock}${newsBlock}${weatherBlock}${currentTimeBlock}${historyBlock}
+
+【输出格式约束】
+回答正文后另起一行输出隐藏机器标记：<momi_meta>{"rudeness":0}</momi_meta>，rudeness 为用户本轮粗鲁度 0-10。正文不得提及此标记。`.trim();
 }
 
 /**
- * momi 伴侣对话调用入口
- * @param {object} params
- * @param {string} params.userId - 发送者 ('momo' | '苞米')
- * @param {string} params.message - 用户发送的有效消息内容
- * @param {Array} [params.recentChatHistory=[]] - 历史上下文消息
+ * 兼容旧 API：聚合轻量 V2 上下文（不再拉全表塞 prompt）。
  */
-export async function chatWithMomi({ userId, message, recentChatHistory = [] }) {
-  const context = await fetchAssistantContext();
-  const systemPrompt = buildSystemPrompt(context);
+export async function fetchAssistantContext(message = '') {
+  const [digest, memories, state, precise] = await Promise.all([
+    getDataDigest(),
+    getRelevantMemories(message),
+    getMomiState(),
+    queryByIntent(message),
+  ]);
+  return {
+    memoryBlock: formatMemoryBlock(memories),
+    emotionBlock: buildEmotionPromptBlock(state),
+    digestBlock: formatDigest(digest),
+    preciseData: precise,
+    state,
+    memories,
+    digest,
+  };
+}
 
-  const messages = [
-    { role: 'system', content: systemPrompt },
-  ];
+function parseAssistantOutput(text) {
+  const raw = String(text || '');
+  const match = raw.match(/<momi_meta>([\s\S]*?)<\/momi_meta>/i);
+  let rudeness = 0;
+  if (match) {
+    try {
+      const meta = JSON.parse(match[1]);
+      rudeness = Math.max(0, Math.min(10, Number(meta.rudeness) || 0));
+    } catch {}
+  }
+  return {
+    content: raw.replace(/\s*<momi_meta>[\s\S]*?<\/momi_meta>\s*/gi, '').trim(),
+    rudeness,
+  };
+}
 
-  // 加入历史消息上下文 (最多最近 6 条)
-  const historySlice = (recentChatHistory || []).slice(-6);
-  for (const item of historySlice) {
-    if (item.sender === 'momi' || item.role === 'assistant' || item.user_id === 'momi') {
-      messages.push({ role: 'assistant', content: item.content });
-    } else {
-      messages.push({
+export function historyToMessages(history, { maxMessages = 16, maxImages = 2 } = {}) {
+  const out = [];
+  let remainingHistoricalImages = maxImages;
+  // 从新到旧决定哪 2 张图保留，然后恢复顺序
+  const prepared = (history || []).slice(-maxMessages).reverse().map((item) => {
+    const rawUrls = Array.isArray(item.image_urls) ? item.image_urls : [];
+    // 严格过滤：必须是合法的 http://, https:// 或 data:image/，严禁把相对存储路径（如 uploads/photo_...jpg）作为 image_url 送给模型
+    let validUrls = rawUrls.filter((url) => typeof url === 'string' && (/^https?:\/\//i.test(url) || url.startsWith('data:image/')));
+    if (validUrls.length > remainingHistoricalImages) validUrls = validUrls.slice(0, remainingHistoricalImages);
+    remainingHistoricalImages -= validUrls.length;
+    if (remainingHistoricalImages < 0) remainingHistoricalImages = 0;
+    return { item, imageUrls: validUrls, hadAnyImage: rawUrls.length > 0 };
+  }).reverse();
+
+  for (const { item, imageUrls, hadAnyImage } of prepared) {
+    const isMomi = item.sender === 'momi' || item.role === 'assistant' || item.user_id === 'momi';
+    if (isMomi) {
+      out.push({ role: 'assistant', content: item.content || '' });
+      continue;
+    }
+    const sender = item.sender || item.user_id || '用户';
+    const sourceTag = item.source === 'main_chat' ? '[主聊天]' : (item.source === 'assistant' ? '[momi助手]' : '');
+    const prefix = sourceTag ? `${sourceTag}[${sender}]` : `[${sender}]`;
+    if (imageUrls.length) {
+      out.push({
         role: 'user',
-        content: `[${item.sender || item.user_id || '用户'}]: ${item.content}`,
+        content: [
+          { type: 'text', text: `${prefix}: ${item.content || '[图片]'}` },
+          ...imageUrls.map((url) => ({ type: 'image_url', image_url: { url } })),
+        ],
       });
+    } else {
+      const hadImage = item.content_type === 'image' || item.content_type === 'mixed' || hadAnyImage;
+      out.push({ role: 'user', content: `${prefix}: ${item.content || ''}${hadImage ? ' [图片]' : ''}` });
+    }
+  }
+  return out;
+}
+
+/**
+ * momi 统一对话入口
+ * triggerSource: 'assistant' | 'chat_mention' | 'proactive' | 'scheduled'
+ * sourceMessageId: 可选，聊天消息的 id，用于任务溯源
+ */
+export async function chatWithMomi({
+  userId,
+  message = '',
+  images = [],
+  recentChatHistory = [],
+  triggerSource = 'assistant',
+  sourceMessageId = null,
+}) {
+  // 1) 轻量意图分类：数据 / 配方 / 显式记忆 / 天气 / 聊天历史
+  const explicit = parseExplicitMemory(message, userId);
+  let preciseData = null;
+  let weatherData = null;
+  try {
+    const [intentResult, recipeResult] = await Promise.all([
+      queryByIntent(message, { userId }),
+      queryRecipeIfAsked(message),
+    ]);
+    preciseData = { intent: intentResult, recipe: recipeResult };
+    if (intentResult?.intent === 'weather') {
+      weatherData = intentResult.data;
+    }
+  } catch (err) {
+    return {
+      success: false, content: '', reply: `momi 查询数据时失败了：${err.message}`,
+      emotionDelta: null, memoryWrites: [], usedFallbackModel: false, errorCode: 'DATA_QUERY_FAILED',
+      taskCreated: null, taskCancelled: null, taskCancelFailed: null,
+    };
+  }
+
+  // 1.5) 聊天内发布/取消任务（momi 助手场景统一入口）：
+  //   一次性提醒走本地正则极速解析（不消耗 AI）；
+  //   每天/每周/工作日等周期任务与“取消xx提醒”走轻量 LLM 抽取。
+  //   注意：只在 assistant 场景执行 —— 主聊天插话的消息是包装后的转述文本，
+  //   直接解析会生成错误标题，故不在 chat_mention 场景建任务。
+  let taskAction = null;
+  if (triggerSource === 'assistant' && message && preciseData?.intent?.intent !== 'tasks') {
+    try {
+      // eslint-disable-next-line global-require
+      const { handleTaskMessage } = require('./momiTasks');
+      taskAction = await handleTaskMessage({ userId, message, sourceMessageId });
+    } catch (taskErr) {
+      console.warn('[momiAssistant] 任务意图处理异常:', taskErr.message);
+    }
+  }
+  if (taskAction?.action === 'created') {
+    preciseData = preciseData || {};
+    preciseData.taskCreated = taskAction.task;
+    preciseData.taskCreatedMeta = { duplicated: Boolean(taskAction.duplicated) };
+  } else if (taskAction?.action === 'cancelled') {
+    preciseData = preciseData || {};
+    preciseData.taskCancelled = { count: taskAction.count, titles: taskAction.titles };
+  } else if (taskAction?.action === 'cancel_failed') {
+    preciseData = preciseData || {};
+    preciseData.taskCancelFailed = { keyword: taskAction.keyword };
+  }
+
+  const taskResultFields = {
+    taskCreated: preciseData?.taskCreated || null,
+    taskCancelled: preciseData?.taskCancelled || null,
+    taskCancelFailed: preciseData?.taskCancelFailed || null,
+  };
+
+  // 1.6) 外网检索兜底匹配（若用户显式要求查询外网但未被 intent 拦截）
+  if (!preciseData?.intent && /(查|搜索|搜).*外网|外网.*(信息|消息)|上网查|查一下最新|外网/i.test(message)) {
+    try {
+      // eslint-disable-next-line global-require
+      const { searchWeb } = require('./webSearchService');
+      const searchRes = await searchWeb(message);
+      if (searchRes) {
+        preciseData = preciseData || {};
+        preciseData.intent = { intent: 'web_search', data: searchRes };
+      }
+    } catch (searchErr) {
+      console.warn('[momiAssistant] 外网检索触发异常:', searchErr.message);
     }
   }
 
-  // 当前用户最新发言
-  messages.push({
-    role: 'user',
-    content: `[${userId}]: ${message}`,
+  // 跨场景多层级上下文构建（近端40条打通主聊天与助手 + 7天滚动摘要）
+  const convContext = await buildConversationContext({
+    scene: triggerSource,
+    userId,
+    message,
+    localMessages: recentChatHistory,
+  }).catch((err) => {
+    console.warn('[momiAssistant] 构建跨场景上下文异常:', err.message);
+    return null;
   });
+
+  // 2-4) state + digest + 相关记忆，按预算拼 system prompt
+  const [stateBefore, digest, memories] = await Promise.all([
+    getMomiState(),
+    getDataDigest(),
+    convContext?.memories || getRelevantMemories(message),
+  ]);
+  const systemPrompt = buildSystemPrompt({
+    scene: triggerSource,
+    memoryBlock: formatMemoryBlock(memories),
+    emotionBlock: buildEmotionPromptBlock(stateBefore),
+    digestBlock: formatDigest(digest),
+    preciseData,
+    weatherData,
+    historyBlock: convContext?.historyBlock || '',
+  });
+
+  // 5) 组装 messages：合并跨场景近端历史（最多40条），本轮图片绝不静默丢弃
+  const effectiveHistory = convContext?.nearMessages?.length ? convContext.nearMessages : recentChatHistory;
+  const messages = [{ role: 'system', content: systemPrompt }, ...historyToMessages(effectiveHistory, { maxMessages: 40 })];
+  const preparedImages = [];
+  if (images.length) {
+    for (const uri of images) {
+      let url = uri;
+      if (typeof url === 'string' && !/^https?:\/\//i.test(url) && !url.startsWith('data:')) {
+        if (url.startsWith('file://') || url.startsWith('/')) {
+          // eslint-disable-next-line no-await-in-loop
+          url = await localUriToDataUrl(url);
+        } else {
+          // Supabase Storage 路径（如 uploads/photo_...jpg 或 chat/...）
+          try {
+            const bucket = url.startsWith('chat/') ? MOMI_CHAT_BUCKET : 'photos';
+            // eslint-disable-next-line no-await-in-loop
+            const { data } = await supabase.storage.from(bucket).createSignedUrl(url, 3600);
+            url = data?.signedUrl || '';
+          } catch {
+            url = '';
+          }
+        }
+      } else if (typeof url === 'string' && !url.startsWith('data:') && !/^https?:\/\//i.test(url)) {
+        // eslint-disable-next-line no-await-in-loop
+        url = await localUriToDataUrl(url);
+      }
+      if (!url) {
+        console.warn('[momiAssistant] 无法解析图片有效 URL，已忽略:', uri);
+        continue;
+      }
+      preparedImages.push(url);
+    }
+    if (preparedImages.length > 0) {
+      messages.push({
+        role: 'user',
+        content: [
+          { type: 'text', text: `[${userId}]: ${message || '看看这张图片'}` },
+          ...preparedImages.map((u) => ({ type: 'image_url', image_url: { url: u } })),
+        ],
+      });
+    } else {
+      messages.push({ role: 'user', content: `[${userId}]: ${message || '[图片]'}` });
+    }
+  } else {
+    messages.push({ role: 'user', content: `[${userId}]: ${message}` });
+  }
+
+  const maxTokensMap = {
+    assistant: 350,
+    chat_mention: 220,
+    proactive: 160,
+    scheduled: 200,
+  };
+  const max_tokens = maxTokensMap[triggerSource] || 350;
 
   const res = await sendChatCompletion({
     messages,
     temperature: 0.75,
-    max_tokens: 300,
+    top_p: 0.9,
+    max_tokens,
+    requiresVision: preparedImages.length > 0,
   });
-
   if (!res.success) {
+    let reply = res.error;
+    if (res.errorCode === 'VISION_UNSUPPORTED') {
+      reply = '现在这个模型看不了图，去 momi 设置里换支持识图的模型 🐾';
+    }
     return {
       success: false,
-      reply: res.error || 'momi 遇到了一点小问题，等下再找我聊天吧~',
+      content: '',
+      reply,
+      emotionDelta: null,
+      memoryWrites: [],
+      usedFallbackModel: false,
+      errorCode: res.errorCode,
+      ...taskResultFields,
     };
+  }
+
+  // 6) 解析回复并更新持久情绪：本地粗鲁词表 + AI 评分取高
+  const parsed = parseAssistantOutput(res.text);
+  const rudeness = Math.max(scoreRudenessLocally(message), parsed.rudeness);
+  const stateResult = await applyInteraction({ userId, rudeness, text: message });
+
+  // 7) 用户明确要求记住：立即结构化写入，importance=5/confidence=1
+  const memoryWrites = [];
+  if (explicit) {
+    const saved = await saveExplicitMemory(message, userId);
+    if (saved) memoryWrites.push(saved);
+  }
+
+  let content = parsed.content;
+  if (explicit && memoryWrites.length && !/记住|小本本|不会忘/.test(content)) {
+    content = `记住了！${explicit.content}，momi 已经写进小本本啦～ 🐾\n${content}`.trim();
+  }
+  if (stateResult.leveledUp) {
+    content += `\n\n✨ momi 升到 Lv.${stateResult.newLevel} 啦！谢谢你们一直陪着我～`;
   }
 
   return {
     success: true,
-    reply: res.text,
+    content,
+    reply: content, // 兼容旧 UI
+    emotionDelta: stateResult.emotionDelta,
+    memoryWrites,
+    usedFallbackModel: Boolean(res.usedFallbackModel),
+    errorCode: null,
+    state: stateResult.state,
+    ...taskResultFields,
   };
 }
 
 /**
- * 读取 momi 小助手独立聊天历史 (优先从 Supabase，异常时落入本地缓存)
+ * 读取 momi 独立聊天历史（云端优先，异常时本地缓存）
  */
-export async function fetchAssistantMessages(limit = 60) {
+export async function fetchAssistantMessages(limit = 80) {
   try {
     const { data, error } = await fetchWithTimeout(() =>
       supabase
@@ -224,106 +508,64 @@ export async function fetchAssistantMessages(limit = 60) {
         .order('created_at', { ascending: true })
         .limit(limit)
     );
-
-    if (!error && data && data.length > 0) {
+    if (!error && data) {
       await AsyncStorage.setItem(ASSISTANT_LOCAL_CACHE_KEY, JSON.stringify(data)).catch(() => {});
       return data;
     }
+    if (error) throw error;
   } catch (err) {
-    console.warn('[momiAssistant] 云端拉取历史消息失败，切换为本地存储:', err.message);
+    console.warn('[momiAssistant] 云端拉取历史失败，切换本地:', err.message);
   }
-
-  // 兜底返回本地缓存
-  const localList = await getLocalAssistantMessages();
-  return localList.slice(-limit);
+  return (await getLocalAssistantMessages()).slice(-limit);
 }
 
 /**
- * 保存一条消息到 momi 小助手独立聊天 (云端与本地双写，绝不因云端缺表抛出异常)
+ * 云端 + 本地双写；支持图片、多图、主动消息及触发源。
+ * 云端失败时本地保存，但会明确 console.warn，不再静默。
  */
-export async function saveAssistantMessage({ sender, content }) {
-  const localId = `momi_msg_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
-  const fallbackMsg = {
-    id: localId,
+export async function saveAssistantMessage({
+  sender,
+  content = '',
+  imageUrls = [],
+  imagePaths = [],
+  isProactive = false,
+  triggerSource = 'assistant',
+}) {
+  const now = new Date().toISOString();
+  const contentType = imageUrls.length ? (content ? 'mixed' : 'image') : 'text';
+  const localId = `momi_msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const payload = {
     couple_id: COUPLE_ID,
     sender,
     content,
-    created_at: new Date().toISOString(),
+    image_urls: imageUrls,
+    image_paths: imagePaths.filter(Boolean),
+    content_type: contentType,
+    is_proactive: Boolean(isProactive),
+    trigger_source: triggerSource,
   };
+  const fallback = { id: localId, ...payload, created_at: now };
 
   try {
     const { data, error } = await fetchWithTimeout(() =>
-      supabase
-        .from('momi_assistant_messages')
-        .insert([
-          {
-            couple_id: COUPLE_ID,
-            sender,
-            content,
-          },
-        ])
-        .select()
+      supabase.from('momi_assistant_messages').insert([payload]).select()
     );
-
-    if (!error && data && data[0]) {
+    if (!error && data?.[0]) {
       await appendLocalAssistantMessage(data[0]);
       return data[0];
     }
     if (error) {
-      console.warn('[momiAssistant] 云端保存消息失败 (转为本地安全存储):', error.message);
+      if (error.code === '42703' || error.code === '42P01') {
+        console.error('[momiAssistant] 请先执行 momi_upgrade_schema.sql（消息新字段/表尚不存在）');
+      }
+      console.warn('[momiAssistant] 云端保存消息失败，已保存在本地:', error.message);
     }
   } catch (err) {
-    console.warn('[momiAssistant] 保存消息网络异常 (转为本地安全存储):', err.message);
+    console.warn('[momiAssistant] 保存消息网络异常，已保存在本地:', err.message);
   }
-
-  // 云端失败时安全落入本地存储，绝不抛出异常阻断会话
-  await appendLocalAssistantMessage(fallbackMsg);
-  return fallbackMsg;
+  await appendLocalAssistantMessage(fallback);
+  return fallback;
 }
 
-/**
- * 从聊天记录中提取记忆并写入 momi_memory 表
- */
-export async function extractAndSaveMemories(chatRecords) {
-  if (!chatRecords || chatRecords.length === 0) return;
-
-  const chatText = chatRecords
-    .map((m) => `${m.user_id || m.sender}: ${m.content}`)
-    .join('\n');
-
-  const prompt = `根据以下情侣（momo 和 苞米）的对话记录，提取关于两人的个人特征、习惯、偏好或重要事件（最多5条）。
-请只输出严格的 JSON 数组，格式如下：
-[
-  { "user_id": "momo", "memory_type": "preference", "content": "喜欢喝奶茶" },
-  { "user_id": "苞米", "memory_type": "habit", "content": "习惯早起锻炼" },
-  { "user_id": "both", "memory_type": "milestone", "content": "纪念日是2023年2月25日" }
-]
-若无可提取内容，直接返回 []。
-
-对话记录：
-${chatText}`;
-
-  const res = await sendChatCompletion({
-    messages: [{ role: 'user', content: prompt }],
-    temperature: 0.2,
-    max_tokens: 600,
-  });
-
-  if (!res.success || !res.text) return;
-
-  try {
-    const raw = res.text.replace(/```json/g, '').replace(/```/g, '').trim();
-    const items = JSON.parse(raw);
-    if (Array.isArray(items) && items.length > 0) {
-      const inserts = items.map((item) => ({
-        couple_id: COUPLE_ID,
-        user_id: item.user_id || 'both',
-        memory_type: item.memory_type || 'habit',
-        content: item.content,
-      }));
-      await supabase.from('momi_memory').insert(inserts);
-    }
-  } catch (err) {
-    console.warn('[momiAssistant] 解析提取记忆 JSON 失败:', err.message);
-  }
-}
+// 保留旧导出名，内部转给新的结构化记忆模块
+export { extractAndSaveMemories, ensureIdentitySeeds };

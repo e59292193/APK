@@ -1,0 +1,573 @@
+================================================================================
+提示词 5 — momocorn APP 第二版：Supabase 迁移、原生依赖与真机验收
+================================================================================
+
+你是接手 momocorn APP 第二版的执行 agent。请直接完成可执行动作，不要只给建议。
+
+【仓库与分支】
+仓库：https://github.com/e59292193/APK.git
+工作分支：feature/v2-momi-upgrade
+草稿 PR：https://github.com/e59292193/APK/pull/1
+Supabase project ref：kotakqdxwvienrmbcrnk
+Supabase URL：https://kotakqdxwvienrmbcrnk.supabase.co
+情侣固定 ID：momo_and_baomi
+真实用户 ID：momo、苞米（不要写成 baomi）
+
+【当前已完成，禁止重复造轮子】
+1. 主动消息方案 A 已完成：登录后前台每 15 分钟调度；到期提醒 > 天气风险 > 静默关心。
+2. momiDataAccess 隐私铁律已落地：
+   - 未开封时光胶囊只 COUNT，不得 SELECT content / creator_id；
+   - 未抽取阅后即焚纸条只查 receiver_id + status=pending，不得读 content / sender_id。
+3. 名字唤醒底层已实现 sender-side only、trigger_message_id 去重与失败不阻塞主聊天。
+4. 7 套主题、momi 情绪/成长/记忆、小本本、多图识图、厨房四分类已进入 PR。
+5. 厨房编辑弹窗已统一到父页面的二次确认 + 5 秒延迟删除/撤销；撤销会恢复本周菜单关联，连续删除不会覆盖上一条待处理操作。
+6. 已新增名字唤醒、自然语言提醒与主动消息调度测试；修复“1月2日上午10点”被误解析为 01:00 的日期/小时冲突。
+7. GitHub CI 的 npm ci、lint、Jest 已在提交 d91f382 通过；不要删测试或降低 lint 规则来制造通过。
+
+================================================================================
+任务 S1 — 按顺序执行数据库迁移（必做，最高优先级）
+================================================================================
+在 Supabase Dashboard → SQL Editor 中严格按下列顺序执行：
+
+1. src/lib/momi_upgrade_schema.sql
+   - 消息图片/主动消息字段
+   - momi_memory 结构与索引
+   - momi_state、momi_scheduled_tasks、momi_proactive_log、
+     momi_chat_interjections、momi_data_digest
+   - Realtime 与 momi-chat Storage bucket
+   - kitchen_dishes 的 drink 分类约束
+
+2. src/lib/momi_v2_corrective_migration.sql（必做，不能漏）
+   - momi_memory.user_id DROP NOT NULL
+   - 创建客户端实际使用的 momi_tasks
+   - 给 momi_proactive_log 补 event_key / event_type / payload
+   - event_key 数据库级唯一去重
+   - 清理重复插话，并创建：
+     UNIQUE (couple_id, trigger_message_id)
+     WHERE trigger_message_id IS NOT NULL
+
+3. src/lib/momi_memory_rpc_migration.sql（建议执行）
+   - 创建 upsert_momi_memory / touch_momi_memories RPC
+   - 这是表达式 + 部分唯一索引的并发安全增强；当前客户端无此 RPC 也能运行，
+     但执行后可供后续 agent 下沉写入与批量命中更新。
+
+4. src/lib/kitchen_drink_migration.sql（条件执行）
+   - 第 1 步已包含 drink 约束；若第 1 步成功，本文件无需执行。
+   - 若 drink 验证失败，再执行本文件；它是独立、可重复的约束修复。
+
+每一步执行后记录“成功”或完整报错原文。不要自行改写 SQL 后连续重试超过 2 次。
+
+================================================================================
+任务 S2 — SQL 验收（必做）
+================================================================================
+逐条执行并保存结果：
+
+-- 1. 消息字段
+SELECT column_name
+FROM information_schema.columns
+WHERE table_schema='public' AND table_name='momi_assistant_messages'
+ORDER BY ordinal_position;
+-- 必须含 image_urls / image_paths / content_type / is_proactive / trigger_source
+
+-- 2. V2 表
+SELECT tablename
+FROM pg_tables
+WHERE schemaname='public'
+  AND tablename IN (
+    'momi_state','momi_tasks','momi_scheduled_tasks','momi_proactive_log',
+    'momi_chat_interjections','momi_data_digest'
+  )
+ORDER BY tablename;
+-- 必须返回 6 行
+
+-- 3. 记忆索引
+SELECT indexname, indexdef
+FROM pg_indexes
+WHERE schemaname='public' AND tablename='momi_memory';
+-- 必须含 momi_memory_dedupe 与 momi_memory_retrieval
+
+-- 4. 主动消息/名字唤醒唯一索引
+SELECT indexname, indexdef
+FROM pg_indexes
+WHERE schemaname='public'
+  AND indexname IN (
+    'momi_proactive_log_event_key_dedupe',
+    'momi_chat_interjections_trigger_dedupe'
+  );
+-- 必须返回 2 行
+
+-- 5. 未归档记忆不得重复
+SELECT couple_id, subject, memory_type, md5(content), COUNT(*)
+FROM public.momi_memory
+WHERE is_archived=false
+GROUP BY 1,2,3,4
+HAVING COUNT(*)>1;
+-- 必须返回 0 行
+
+-- 6. 名字唤醒触发消息不得重复
+SELECT couple_id, trigger_message_id, COUNT(*)
+FROM public.momi_chat_interjections
+WHERE trigger_message_id IS NOT NULL
+GROUP BY 1,2
+HAVING COUNT(*)>1;
+-- 必须返回 0 行
+
+-- 7. Realtime
+SELECT schemaname, tablename
+FROM pg_publication_tables
+WHERE pubname='supabase_realtime'
+  AND tablename IN (
+    'momi_chat_interjections','momi_state','momi_tasks',
+    'momi_scheduled_tasks','momi_assistant_messages'
+  );
+
+-- 8. 饮品分类：测试后必须删除测试行
+INSERT INTO public.kitchen_dishes
+  (couple_id, category, title, image_path, created_by)
+VALUES
+  ('momo_and_baomi','drink','__migration_test_milk_tea__','','momo')
+RETURNING id;
+DELETE FROM public.kitchen_dishes
+WHERE couple_id='momo_and_baomi' AND title='__migration_test_milk_tea__';
+
+================================================================================
+任务 S3 — Storage / RLS / Realtime 实测（必做）
+================================================================================
+1. Dashboard → Storage：确认 momi-chat 存在且 Public = ON。
+2. 使用 anon/authenticated 客户端上传 1 张小图到 momi-chat/chat/，取得 public URL，
+   另一账号必须能打开；完成后删除测试文件。
+3. 两个账号分别读写以下表各 1 次：
+   momi_state、momi_memory、momi_tasks、momi_chat_interjections。
+4. 账号 A 插入 momi_chat_interjections，账号 B 的 Realtime 订阅必须收到。
+5. 对同一 couple_id + trigger_message_id 连续插入两次：第二次必须报唯一冲突 23505。
+6. 不要扩大未开封胶囊或未抽取纸条的读取权限；不得用 service_role 模拟客户端验收。
+
+================================================================================
+任务 N1 — 安装并接入原生依赖（当前未完成，必做后才能宣称方案 B）
+================================================================================
+在能正常访问 npm/Expo 且有 Android/iOS 真机的环境执行：
+
+npx expo install expo-notifications expo-location
+
+然后：
+1. 提交 package.json 与 package-lock.json 的版本变化。
+2. 更新 app.json：
+   - expo-notifications plugin；
+   - Android 通知图标/颜色/默认 channel（按 Expo SDK 56 兼容格式）；
+   - expo-location plugin 与前台定位用途说明；
+   - iOS 通知/定位权限文案，不得写后台持续定位（本项目只需前台获取天气位置）。
+3. 新建通知 adapter，并在 App 启动时注入：
+   setNotificationAdapter(adapter)
+   adapter 至少实现 present({title,body,data})、schedule({title,body,date,data})、
+   cancel(id)；处理通知权限拒绝、重复调度与退出登录清理。
+4. 新建定位 provider 并注入：
+   setWeatherLocationProvider(provider)
+   仅在用户开启天气提醒且无手动城市时申请前台定位；拒绝后回退手动城市，
+   不得循环弹权限。
+5. 现状说明：代码中只有 adapter/provider 注入接口；expo-notifications 与
+   expo-location 尚未安装。完成本任务前，不得声称“系统后台通知/设备定位已完成”。
+
+================================================================================
+任务 N2 — 真机验收（必做）
+================================================================================
+至少使用 1 台 Android 真机，条件允许再测 iOS：
+
+□ 首次请求通知权限；拒绝后 APP 不崩溃，设置页给出可理解提示
+□ 创建 2 分钟后的提醒，APP 前台/后台均只收到 1 次
+□ 取消提醒后不再触发；退出登录后清理当前用户未触发调度
+□ 免扰 22:30–09:00 内不展示普通主动关心；用户手动打开 APP 不受阻
+□ 每日主动消息最多 3 条；event_key 并发只写 1 条
+□ 开启天气提醒：定位允许时使用设备位置；拒绝时使用手动城市
+□ 降雨：未来 3 小时概率 >=60% 才提醒；降温：未来 12 小时下降 >=6℃ 才提醒
+□ 用有效 AI Key 测文本与图片；图片请求 45s 超时，纯文本 20s 超时
+□ 两个账号验证 momi-chat 图片、momi 小本本、名字唤醒插话与厨房饮品同步
+□ 未开封时光胶囊和未抽取小纸条的正文在网络请求/日志中都不得出现
+
+================================================================================
+任务 C1 — 仍需完成的客户端接线（若有权限修改仓库则继续做）
+================================================================================
+当前 src/lib/momiMention.js 已完成，但旧 src/screens/ChatScreen.js 仍未正式接线。
+请按以下约束完成，不要重写整套聊天：
+
+1. 用户消息成功插入并获得真实 data[0].id 后，且仅在发送端调用：
+   maybeCreateMomiInterjection({
+     isSender: true,
+     userId,
+     triggerMessageId: data[0].id,
+     text: data[0].content,
+     recentChatHistory
+   })
+2. 必须读取并尊重 nameWakeEnabled；普通文本出现 momi 也命中，不只 @momi。
+3. 接收端绝不能调用 AI；只订阅/拉取 momi_chat_interjections 并渲染 momi 气泡。
+4. 删除或禁用旧内联 @momi 直接回复路径，避免同一消息回复两次。
+5. 组件卸载时清理 Realtime channel；插话按 trigger_message_id 去重。
+6. 删除 ChatScreen 自己的 StatusBar，继续推进 useTheme + useMemo 运行时主题。
+7. 补测试：开关关闭不触发、接收端不触发、同 message id 只写一次、普通 momi 命中。
+
+================================================================================
+交付要求
+================================================================================
+1. 不要 merge PR #1；保持 Draft，直到 Supabase + 原生依赖 + 真机验收完成。
+2. 提交代码后等待 GitHub CI 通过；不得删测试、跳过 lint 或扩大临时 lint 豁免。
+3. 回复中按 S1/S2/S3/N1/N2/C1 列出：完成项、失败项、完整错误、commit/PR URL。
+4. 将 Supabase SQL 查询结果和真机截图/录屏链接回填到本页面评论区。
+================================================================================
+
+
+
+
+================================================================================
+提示词 6 — momocorn APP 第二版：全量测试、缺陷修复与交付验收
+================================================================================
+
+你是 momocorn APP 第二版的测试与验收 agent。你的职责是实际执行测试、保留证据、
+修复测试发现的缺陷并重新验证；不要只输出测试建议或静态总结。
+
+【仓库与工作范围】
+仓库：https://github.com/e59292193/APK.git
+工作分支：feature/v2-momi-upgrade
+草稿 PR：https://github.com/e59292193/APK/pull/1
+基线分支：main
+当前已知最新通过提交：d91f382
+Supabase project ref：kotakqdxwvienrmbcrnk
+Supabase URL：https://kotakqdxwvienrmbcrnk.supabase.co
+情侣固定 ID：momo_and_baomi
+真实用户 ID：momo、苞米（不要写成 baomi）
+
+【强制规则】
+1. 不要 merge PR #1，保持 Draft；只有用户本人明确要求才可合并。
+2. 不得删除测试、改成 skip/only、降低断言、关闭 lint 或扩大临时 ESLint 豁免来制造通过。
+3. 测试失败时先保存完整错误、复现步骤和环境，再做最小修复；每个修复单独提交。
+4. 不得把 AI Key、Supabase service_role、推送证书、UserSig SecretKey 或其他密钥
+   写入代码、测试快照、日志、截图、PR、Notion 或聊天记录。
+5. 客户端测试只能使用 anon/authenticated 权限；service_role 仅可用于必要的管理动作，
+   绝不能用它冒充客户端通过 RLS 验收。
+6. 未满足前置条件时明确标记 BLOCKED，不得声称“已通过”。
+7. 所有测试数据使用 __v2_test__ 前缀；完成后清理，不能污染真实情侣数据。
+8. 先读取 sibling 页面《提示词5 — Supabase 迁移、原生依赖与真机验收》，确认前置任务状态。
+
+================================================================================
+阶段 T0 — 建立可复现测试基线
+================================================================================
+记录以下信息：
+- git rev-parse HEAD
+- node --version
+- npm --version
+- npx expo --version
+- Android/iOS 设备型号与系统版本
+- 测试账号、当前主题、网络条件、是否前台/后台
+
+执行：
+npm ci
+npm run lint
+npm test -- --runInBand
+npx expo-doctor
+
+要求：
+□ 保存每条命令的退出码与完整失败摘要
+□ Expo doctor 当前在 CI 中为非阻断项，但必须逐条列出警告，不得省略
+□ GitHub Actions 必须重新跑到绿色，annotations 必须为 0
+□ 检查 checkout/setup-node 使用 v5，Jest 失败应产生可检索 annotations
+
+================================================================================
+阶段 T1 — 现有自动化测试全量复跑
+================================================================================
+至少确认以下测试文件全部执行，而不是被 Jest 配置漏掉：
+- aiConfig.test.js
+- dateUtils.test.js
+- drawGuessSync.test.js / drawGuessUtils.test.js
+- ephemeralUtils.test.js
+- fetchWithTimeout.test.js
+- gomokuUtils.test.js
+- kitchenUtils.test.js
+- mediaResolver.test.js
+- momiAssistant.test.js
+- momiDataAccess.test.js
+- momiMemory.test.js
+- momiMention.test.js
+- momiState.test.js
+- momiTasks.test.js
+- proactiveScheduler.test.js
+- themeUtils.test.js / themes.test.js
+- timConfig.test.js
+- weatherService.test.js
+
+要求：
+□ 输出 Test Suites / Tests / Snapshots / Time 汇总
+□ 单独记录 flaky、超时、依赖时区或执行顺序的用例
+□ 测试至少连续运行 3 次，结果必须一致
+□ 在 UTC 与 Asia/Shanghai 时区各运行一次日期/提醒/免扰测试
+
+================================================================================
+阶段 T2 — AI 配置、文本与图片能力
+================================================================================
+自动化 + 有效测试 Key 实测：
+□ 旧扁平配置 {provider, apiKey, modelName} 迁移后模型不被默认值覆盖
+□ 默认 provider=deepseek，默认模型 deepseek-v4.1-flash
+□ /v4.1、-vl、4v、vision、omni 的视觉模型识别规则正确
+□ 无 Key 返回 NO_KEY
+□ 断网返回 NETWORK
+□ 文本超过 20 秒返回 TIMEOUT
+□ 图片超过 45 秒返回 TIMEOUT
+□ 401/402/403 返回 AUTH_OR_BALANCE
+□ 429 返回 RATE_LIMIT
+□ 5xx 返回 SERVER_ERROR
+□ 不支持图片且无 fallback 时返回 VISION_UNSUPPORTED，绝不能静默丢图片
+□ 本地图片压缩长边 <=1280，JPEG quality=0.7；content:// 与 file:// 均可处理
+□ 多图顺序不变，上传进度单调递增并最终到 100%
+□ 有图片时 momi 必须具体评论图片；无法识别时明确失败，不得假装看见
+
+不要在输出中展示真实 Key；仅写“已配置/未配置”和错误码。
+
+================================================================================
+阶段 T3 — momi 人格、记忆、情绪与隐私
+================================================================================
+自动化测试：
+□ 显式“记住/别忘了/记一下”写入 importance=5、confidence=1、source=user_explicit
+□ preference/dislike/habit/milestone/promise/ongoing 类型推断
+□ momo、苞米、both subject 判断
+□ 同 couple_id + subject + memory_type + md5(content) 并发写入只保留一条未归档记录
+□ 23505 回读路径正确；RPC 存在/不存在两种环境都能工作
+□ getRelevantMemories 只返回未过期、未归档、相关记忆
+□ hit_count / last_hit_at 更新正确
+□ 维护任务归档过期低价值记录，不删除人格种子
+□ 至少 6 条人格种子，重复执行不重复写入
+□ 粗鲁度、本地词表与 AI 评分取高值
+□ 生气/恢复、亲密度、energy、growth_level 边界与升级提示
+□ 两个用户的 affection 分别更新，不串用户
+
+隐私红线测试（必须抓网络请求或 mock 查询列证明）：
+□ 未开封 time_capsules 只能 COUNT，禁止 SELECT content / creator_id
+□ 已拆封时光胶囊才可读取正文
+□ pending ephemeral_notes 只能 COUNT，禁止 SELECT content / sender_id
+□ 已消费纸条不会再次出现
+□ 日志、AI prompt、异常栈中不得出现未开封胶囊或未抽取纸条正文
+
+================================================================================
+阶段 T4 — 名字唤醒完整链路
+================================================================================
+注意：当前底层 momiMention.js 与测试已存在，但旧 ChatScreen 正式接线仍可能未完成。
+先检查代码现状；若未接线，按提示词5的 C1 完成最小修复，再执行：
+
+自动化：
+□ “momi 你觉得呢”“@momi”“嗨momi呀”命中
+□ “momification”等英文单词内部不误触
+□ nameWakeEnabled=false 不查表、不调用 AI
+□ isSender=false 永远不调用 AI
+□ 缺 triggerMessageId 不触发
+□ 已存在 trigger_message_id 直接短路
+□ 并发相同 couple_id + trigger_message_id，第二条 23505 后安静去重
+□ AI 失败不阻塞情侣主消息发送
+□ 旧内联 @momi 回复路径已禁用，单条消息不会出现两条 momi 回复
+
+双账号集成：
+□ 发送账号生成；接收账号只订阅结果，不调用 AI
+□ 普通 momi 与 @momi 都只出现 1 个 momi 气泡
+□ 引用 momi 消息仍能正确回复，但不绕过开关造成重复
+□ Realtime 断开后 8 秒轮询能补回插话；恢复连接后不重复
+□ trigger_message_id 在客户端列表与数据库均去重
+
+================================================================================
+阶段 T5 — 自然语言提醒与主动消息调度
+================================================================================
+自动化：
+□ 10分钟后 / 2小时后 / 3天后
+□ 今天 / 明天 / 后天 / 今晚
+□ 上午 / 中午 / 下午 / 晚上
+□ 9月20日 / 2027年1月2日 / HH:mm
+□ 无年份日期已过时顺延下一年
+□ “1月2日上午10点”必须为 10:00，不能误解析为 01:00
+□ 2月30日、24:80、过去时间、无明确时间返回 null
+□ 标题清理、source_message_id、真实 created_by 正确
+□ 总开关关闭后不查状态、不查库、不调用 AI
+□ 免扰 22:30–09:00 正确覆盖跨午夜
+□ 每日上限默认 3，达到上限不发送
+□ 静默阈值默认 8 小时
+□ 优先级：到期任务 > 天气风险 > 静默关心
+□ 同 event_key 并发只保存/展示一次
+□ 到期任务送达后 status=done 且 notified_at 非空
+□ 已存在任务 event_key 时不会永久卡在 active
+□ AI 生成失败、日志写入失败、通知失败均有可恢复行为
+□ 前台 scheduler 启动 2.5 秒后首次运行，之后每 15 分钟；卸载后 timer 全部清理
+
+天气：
+□ Open-Meteo URL 正确
+□ 缓存 30 分钟
+□ 未来 3 小时降雨概率 >=60% 才提醒
+□ 未来 12 小时降温 >=6℃ 才提醒
+□ 阈值以下、数据缺失、网络失败不发送错误提醒
+□ 手动城市优先级与设备定位回退正确
+
+================================================================================
+阶段 T6 — 厨房四分类、图片、AI 食谱与删除撤销
+================================================================================
+自动化/组件测试：
+□ UI 顺序 meat / veg / snack / drink
+□ DB 合法值 meat / vegetable / snack / drink
+□ veg→vegetable，drinks/beverage→drink
+□ 未知非空分类在开发环境明确报错，不能无声变成 meat
+□ drink 新增、编辑、查询、周菜单、Realtime 全链路
+□ DishEditModal 不直接调用 deleteDish，只向父级请求删除
+□ 详情页与编辑页都需要二次确认
+□ 删除后 5 秒内撤销恢复菜品和本周菜单关联
+□ 连续删除不会让第一条待处理删除丢失
+□ 5 秒后才真正删除，数据库失败会恢复 UI
+□ 菜品图片、食谱多图上传失败可重试，不产生半条脏数据
+□ AI 食谱识别使用本地可读 URI；Storage path 不得被当成本地文件读取
+
+375pt 真机/模拟器：
+□ 头部操作分两行，无横向溢出
+□ 四个分类等宽可点击
+□ 两列卡片无重叠/裁切
+□ FAB、撤销条与底部安全区不冲突
+□ default / midnight / minimal 至少各截图一组
+
+================================================================================
+阶段 T7 — 七套主题与全局 UI 回归
+================================================================================
+主题：default / lavender / sakura / midnight / matcha / galaxy / minimal
+旧别名：mint→matcha、peach→sakura、sky→galaxy
+
+自动化：
+□ 每套主题 required color keys、textOnPrimary、borderStrong、shadow 均存在
+□ 所有 hex/rgba 格式有效；midnight.borderStrong=#3D5579
+□ @momi_theme 与旧 momo.theme.id 迁移正确
+□ App 全局只保留一个 ThemedStatusBar
+□ 切换主题后已挂载页面立即更新，无需重启
+
+人工页面矩阵：
+□ Chat、Settings、Momi Assistant、Momi Notebook、Momi AI Settings
+□ Kitchen + 所有 modal
+□ Checkin 列表/日历/详情/创建/记录
+□ Time Capsule、Travel Diary、游戏、相册与其他主要页面
+
+每页检查：
+□ 文本对比度、按钮状态、边框、阴影、键盘、safe area
+□ loading / empty / error / offline / disabled / long text / 大字体
+□ 删除剩余屏幕级 StatusBar
+□ 清理静态 StyleSheet.create 中旧 colors.* 与硬编码品牌色
+□ 相应页面改造完成后删除 .eslintrc.js 的精确临时豁免，再跑 lint
+
+================================================================================
+阶段 T8 — Supabase 迁移、RLS、Realtime 与 Storage 集成测试
+================================================================================
+先严格按提示词5执行迁移：
+1. src/lib/momi_upgrade_schema.sql
+2. src/lib/momi_v2_corrective_migration.sql
+3. src/lib/momi_memory_rpc_migration.sql（建议）
+4. src/lib/kitchen_drink_migration.sql（仅 drink 验证失败时）
+
+然后执行并保存 SQL 结果：
+□ momi_assistant_messages 新字段完整
+□ momi_state / momi_tasks / momi_scheduled_tasks / momi_proactive_log /
+   momi_chat_interjections / momi_data_digest 均存在
+□ momi_memory_dedupe / momi_memory_retrieval 存在
+□ momi_proactive_log_event_key_dedupe 存在
+□ momi_chat_interjections_trigger_dedupe 为
+   UNIQUE(couple_id, trigger_message_id) WHERE trigger_message_id IS NOT NULL
+□ 未归档记忆重复查询返回 0 行
+□ 插话触发消息重复查询返回 0 行
+□ momi-chat bucket 存在且 Public=ON
+□ authenticated 上传后另一账号可打开 public URL，测试文件随后删除
+□ 两账号对 momi 表的 RLS 行为符合设计
+□ Realtime 对 state/tasks/interjections/assistant messages 可达且不重复
+□ 同 event_key 与 trigger_message_id 并发写入只有一条成功
+
+迁移失败必须粘贴完整数据库错误，不要擅自放宽 RLS 或删除唯一索引。
+
+================================================================================
+阶段 T9 — 原生通知、定位与真机矩阵
+================================================================================
+前置：确认 expo-notifications / expo-location 已安装并完成 app.json、adapter、provider 接入。
+若未完成，标记 BLOCKED 并先按提示词5的 N1 完成，不得假装已测。
+
+Android 至少 1 台真机；条件允许必须补 iOS：
+□ 首次通知权限允许/拒绝
+□ 拒绝后 APP 不崩溃、不循环弹窗，设置页说明清楚
+□ 2 分钟后的提醒在前台/后台各测一次，均只收到 1 次
+□ 取消提醒后不触发；退出登录清理未触发通知
+□ 免扰期普通主动关心不展示；用户主动打开 APP 不受阻
+□ 通知点击打开正确页面，data 中 taskId/eventKey 正确
+□ 通知 adapter present/schedule/cancel 异常不导致 APP 崩溃
+□ 定位允许时使用设备位置；拒绝后回退手动城市
+□ 仅天气提醒开启且无手动城市时申请前台定位
+□ 不申请后台持续定位；不在后台高频取位置
+□ 飞行模式、弱网、切网、杀进程、重启设备后行为可解释
+
+================================================================================
+阶段 T10 — 双账号端到端与回归
+================================================================================
+使用 momo 与 苞米两个真实测试账号，禁止用同一身份模拟双方：
+□ 文本、图片、多图、引用、未读计数、8 秒轮询补漏
+□ 打卡邀请/接受/记录/今日次数
+□ 五子棋 creator/invitee/draw 与手动胜场
+□ 你画我猜 stats/gallery
+□ 小纸条阅后即焚且隐私列不泄露
+□ 时光胶囊未开封/已开封边界
+□ 厨房 drink 与本周菜单同步
+□ momi 独立聊天、图片、小本本、情绪与主动消息
+□ 名字唤醒仅发送端生成、双方只显示一个气泡
+□ App 前后台切换、重连、重复订阅、退出登录、重新登录
+□ 相同事件在 Realtime + 轮询同时到达时 UI 不重复
+
+================================================================================
+阶段 T11 — 安全、性能与可访问性
+================================================================================
+安全：
+□ 对本 PR diff 和配置文件做 secret scan
+□ 仓库、历史、日志、截图中无真实 Key/Token/Secret
+□ 客户端无 service_role / TIM SecretKey
+□ AI prompt 不包含隐私红线数据
+□ Storage 文件名不可覆盖他人文件；上传类型/大小失败有提示
+
+性能与稳定性：
+□ Chat 100 条消息滚动无明显卡顿
+□ 多图选择 9 张时内存可控，失败可恢复
+□ 所有 interval/timeout/realtime channel 在卸载时清理
+□ 前后台切换 20 次无重复订阅、重复消息或持续增长的 timer
+□ 弱网下关键写操作有明确反馈，不静默丢数据
+
+可访问性：
+□ 主要按钮有 accessibilityLabel/role
+□ 大字体下 375pt 页面不遮挡
+□ 键盘弹出后输入框、发送按钮、弹窗操作仍可见
+□ 点击区域至少约 44pt，颜色不是唯一状态表达
+
+================================================================================
+阶段 T12 — 失败修复循环与最终交付
+================================================================================
+每个失败按以下格式处理：
+1. 编号：BUG-001
+2. 环境与 commit
+3. 前置条件
+4. 最小复现步骤
+5. 期望 / 实际
+6. 完整错误/截图/录屏
+7. 根因
+8. 最小修复 commit
+9. 自动化回归用例
+10. 修复后复测结果
+
+修复规则：
+- 只在 feature/v2-momi-upgrade 工作
+- 每个逻辑问题单独 commit
+- 不顺手重写无关大页面
+- 每次修复后执行 npm run lint + npm test -- --runInBand
+- 最终重新跑全量 T0–T11
+- 不得因为测试难写就删除功能、隐私门禁或数据库约束
+
+【最终回复模板】
+A. 测试环境与最终 commit
+B. 自动化：总套件/总用例/通过/失败/跳过
+C. Supabase：迁移、SQL、RLS、Realtime、Storage
+D. Android 真机
+E. iOS 真机（若无设备明确 BLOCKED）
+F. 双账号 E2E
+G. 安全与隐私
+H. 已修复 BUG 列表（含 commit）
+I. 未修复/BLOCKED（责任方与下一步）
+J. 证据链接（CI、截图、录屏、SQL 输出）
+K. 是否建议将 PR 从 Draft 改为 Ready：YES/NO + 理由
+
+最终仍不要 merge PR；把结果回填到本页面评论区，并通知用户人工确认。
+================================================================================

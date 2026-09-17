@@ -2,9 +2,7 @@ const store = {};
 jest.mock('@react-native-async-storage/async-storage', () => ({
   getItem: jest.fn(async (key) => store[key] || null),
   setItem: jest.fn(async (key, value) => { store[key] = value; }),
-  clear: jest.fn(async () => {
-    Object.keys(store).forEach((k) => delete store[k]);
-  }),
+  clear: jest.fn(async () => { Object.keys(store).forEach((k) => delete store[k]); }),
 }));
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -12,75 +10,124 @@ import {
   PROVIDER_OPTIONS,
   PROVIDER_ENDPOINTS,
   DEFAULT_AI_CONFIG,
+  DEEPSEEK_V41_FLASH_MODEL_ID,
+  QWEN_38_FLASH_MODEL_ID,
+  AI_CONFIG_STORAGE_KEY,
   getDefaultModel,
   getAIConfig,
   saveAIConfig,
+  modelSupportsVision,
+  getVisionFallbackModel,
 } from '../aiConfig';
 
-describe('aiConfig 大模型配置单元测试', () => {
+describe('aiConfig', () => {
   beforeEach(async () => {
     await AsyncStorage.clear();
+    jest.clearAllMocks();
   });
 
-  test('预设供应商及端点定义完整', () => {
-    const keys = PROVIDER_OPTIONS.map((p) => p.key);
-    expect(keys).toContain('minimax');
-    expect(keys).toContain('deepseek');
-    expect(keys).toContain('glm');
+  test('仅支持 DeepSeek 与 Qwen，且默认 DeepSeek V4.1 Flash', async () => {
+    expect(PROVIDER_OPTIONS.map((p) => p.key)).toEqual(['deepseek', 'qwen']);
 
-    expect(PROVIDER_ENDPOINTS.minimax).toContain('minimax.chat');
-    expect(PROVIDER_ENDPOINTS.deepseek).toContain('deepseek.com');
-    expect(PROVIDER_ENDPOINTS.glm).toContain('bigmodel.cn');
+    const deepseek = PROVIDER_OPTIONS.find((p) => p.key === 'deepseek');
+    expect(deepseek.recommended).toBe(true);
+    expect(getDefaultModel('deepseek')).toBe(DEEPSEEK_V41_FLASH_MODEL_ID);
+    expect(DEFAULT_AI_CONFIG.provider).toBe('deepseek');
+    expect((await getAIConfig()).modelName).toBe(DEEPSEEK_V41_FLASH_MODEL_ID);
+    expect(PROVIDER_ENDPOINTS.deepseek).toBe('https://api.deepseek.com/chat/completions');
 
-    expect(getDefaultModel('minimax')).toBe('MiniMax M3');
-    expect(getDefaultModel('deepseek')).toBe('deepseek-flash');
-    expect(getDefaultModel('glm')).toBe('GLM-5.3-Flash');
+    const qwen = PROVIDER_OPTIONS.find((p) => p.key === 'qwen');
+    expect(qwen).toBeDefined();
+    expect(qwen.recommended).toBe(false);
+    expect(getDefaultModel('qwen')).toBe(QWEN_38_FLASH_MODEL_ID);
+    expect(PROVIDER_ENDPOINTS.qwen).toBe('https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions');
   });
 
-  test('首次读取时返回默认配置', async () => {
-    const config = await getAIConfig();
-    expect(config.provider).toBe(DEFAULT_AI_CONFIG.provider);
-    expect(config.apiKey).toBe('');
-    expect(config.modelName).toBe(DEFAULT_AI_CONFIG.modelName);
+  test('多厂商配置独立保存', async () => {
+    await saveAIConfig({ provider: 'deepseek', apiKey: 'sk-d', modelName: 'deepseek-chat' });
+    await saveAIConfig({ provider: 'qwen', apiKey: 'sk-q', modelName: 'qwen-max' });
+    const c = await getAIConfig();
+    expect(c.provider).toBe('qwen');
+    expect(c.providers.deepseek.apiKey).toBe('sk-d');
+    expect(c.providers.deepseek.modelName).toBe('deepseek-chat');
+    expect(c.providers.qwen.apiKey).toBe('sk-q');
+    expect(c.providers.qwen.modelName).toBe('qwen-max');
   });
 
-  test('保存并读取自定义配置', async () => {
-    const customConfig = {
-      provider: 'deepseek',
-      apiKey: 'sk-test-deepseek-123456',
-      modelName: 'deepseek-coder',
-    };
-
-    const saved = await saveAIConfig(customConfig);
-    expect(saved.provider).toBe('deepseek');
-    expect(saved.apiKey).toBe('sk-test-deepseek-123456');
-
-    const loaded = await getAIConfig();
-    expect(loaded.provider).toBe('deepseek');
-    expect(loaded.apiKey).toBe('sk-test-deepseek-123456');
-    expect(loaded.modelName).toBe('deepseek-coder');
-  });
-
-  test('多厂商 API 配置独立保存不丢失', async () => {
-    // 1. 保存 deepseek 配置
-    await saveAIConfig({
-      provider: 'deepseek',
-      apiKey: 'sk-deepseek-key-1',
-      modelName: 'deepseek-flash',
-    });
-
-    // 2. 保存 glm 配置
-    await saveAIConfig({
+  test('迁移旧版本配置（如 GLM/旧模型名）切到 DeepSeek/Qwen 并升级至 v3', async () => {
+    store[AI_CONFIG_STORAGE_KEY] = JSON.stringify({
+      configVersion: 2,
       provider: 'glm',
-      apiKey: 'sk-glm-key-2',
-      modelName: 'GLM-5.3-Flash',
+      providers: {
+        glm: { apiKey: 'sk-old', modelName: 'GLM-5.3-Flash' },
+        deepseek: { apiKey: '', modelName: 'deepseek-flash' },
+      },
     });
+    const c = await getAIConfig();
+    expect(c.provider).toBe('deepseek');
+    expect(c.modelName).toBe(DEEPSEEK_V41_FLASH_MODEL_ID);
+    expect(c.providers.deepseek.modelName).toBe(DEEPSEEK_V41_FLASH_MODEL_ID);
+    expect(c.providers.qwen).toBeDefined();
+    expect(c.providers.glm).toBeUndefined();
+    expect(c.configVersion).toBe(3);
+  });
 
-    const config = await getAIConfig();
-    expect(config.provider).toBe('glm');
-    expect(config.apiKey).toBe('sk-glm-key-2');
-    expect(config.providers.deepseek.apiKey).toBe('sk-deepseek-key-1');
-    expect(config.providers.glm.apiKey).toBe('sk-glm-key-2');
+  test('迁移保留已有 DeepSeek Key 与手动模型', async () => {
+    store[AI_CONFIG_STORAGE_KEY] = JSON.stringify({
+      configVersion: 2,
+      provider: 'deepseek',
+      providers: {
+        deepseek: { apiKey: 'sk-real-deepseek', modelName: 'deepseek-reasoner' },
+      },
+    });
+    const c = await getAIConfig();
+    expect(c.provider).toBe('deepseek');
+    expect(c.apiKey).toBe('sk-real-deepseek');
+    expect(c.modelName).toBe('deepseek-reasoner');
+    expect(c.providers.deepseek.apiKey).toBe('sk-real-deepseek');
+    expect(c.configVersion).toBe(3);
+  });
+
+  test('回归：纯扁平旧配置迁移不丢手动模型和Key', async () => {
+    store[AI_CONFIG_STORAGE_KEY] = JSON.stringify({
+      provider: 'deepseek',
+      apiKey: 'sk-legacy',
+      modelName: 'my-private-model',
+    });
+    const c = await getAIConfig();
+    expect(c.provider).toBe('deepseek');
+    expect(c.apiKey).toBe('sk-legacy');
+    expect(c.modelName).toBe('my-private-model');
+    expect(c.providers.deepseek.modelName).toBe('my-private-model');
+    expect(c.configVersion).toBe(3);
+  });
+
+  test('迁移幂等，只首次写回', async () => {
+    store[AI_CONFIG_STORAGE_KEY] = JSON.stringify({
+      configVersion: 3,
+      provider: 'deepseek',
+      modelName: 'deepseek-chat',
+      apiKey: 'x',
+      providers: {
+        deepseek: { apiKey: 'x', modelName: 'deepseek-chat' },
+        qwen: { apiKey: '', modelName: QWEN_38_FLASH_MODEL_ID },
+      },
+    });
+    const first = await getAIConfig();
+    const writes = AsyncStorage.setItem.mock.calls.length;
+    expect(await getAIConfig()).toEqual(first);
+    expect(AsyncStorage.setItem.mock.calls.length).toBe(writes);
+  });
+
+  test('识图能力与 fallback', () => {
+    expect(modelSupportsVision('deepseek', DEEPSEEK_V41_FLASH_MODEL_ID)).toBe(true);
+    expect(modelSupportsVision('deepseek', 'deepseek-chat')).toBe(false);
+    expect(modelSupportsVision('qwen', QWEN_38_FLASH_MODEL_ID)).toBe(true);
+    expect(modelSupportsVision('qwen', 'qwen-vl-plus')).toBe(true);
+    expect(modelSupportsVision('qwen', 'qwen-vl-max')).toBe(true);
+    expect(modelSupportsVision('qwen', 'qwen-plus')).toBe(false);
+    expect(modelSupportsVision('qwen', 'qwen-turbo')).toBe(false);
+    expect(getVisionFallbackModel('deepseek', 'deepseek-chat')).toBe(DEEPSEEK_V41_FLASH_MODEL_ID);
+    expect(getVisionFallbackModel('qwen', 'qwen-plus')).toBe('qwen-vl-plus');
   });
 });
-
