@@ -1,6 +1,9 @@
 // ═══════════════════════════════════════════════════════
 // momi 伴侣业务核心 (momiAssistant.js) — V2
 // 识图 / 全量数据按需访问 / 结构化记忆 / 持久情绪 / 主动触发统一入口
+// V4：聊天内发布/取消任务统一走 handleTaskMessage（唯一入口，杜绝双写），
+//     支持每天/每周/工作日等周期任务，返回值携带 taskCreated/taskCancelled 供 UI 回执；
+//     system prompt 新增实时新闻热榜块（配合 momiDataAccess 的 news 意图使用）。
 // ═══════════════════════════════════════════════════════
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -127,9 +130,15 @@ export function formatWeatherBlock(weather) {
   return '';
 }
 
+const TASK_RECURRENCE_LABELS = {
+  daily: '每天',
+  weekday: '每个工作日',
+  weekly: '每周（星期几同首次设定日）',
+};
+
 /**
  * 构建 system prompt。保留旧 context 字段兼容测试/调用。
- * 固定拼装顺序：人格核心、场景规则、记忆、情绪、数据摘要、精确查询结果、天气、历史上下文、输出格式约束。
+ * 固定拼装顺序：人格核心、场景规则、记忆、情绪、数据摘要、精确查询结果、任务、外网、新闻、天气、历史上下文、输出格式约束。
  */
 export function buildSystemPrompt(context = {}) {
   const sceneKey = context.scene || 'assistant';
@@ -145,15 +154,31 @@ export function buildSystemPrompt(context = {}) {
   const historyBlock = context.historyBlock ? `\n\n${context.historyBlock}` : '';
 
   const taskCreated = context.preciseData?.taskCreated;
-  const taskBlock = taskCreated
-    ? `\n\n【定时任务/闹钟设定成功】\n已成功为他们创建了定时任务提醒！\n- 任务标题：${taskCreated.title}\n- 设定时间：${taskCreated.due_at}\n【回答硬性约束】请务必亲切开心地向用户确认该提醒已设定好，告诉用户到时间 momi 会准时叫他们 🐾`
-    : (context.preciseData?.intent?.intent === 'tasks' && context.preciseData?.intent?.data?.summary
-      ? `\n\n【进行中的定时提醒与待办列表】\n${context.preciseData.intent.data.summary}`
-      : '');
+  const taskCreatedMeta = context.preciseData?.taskCreatedMeta || {};
+  const taskCancelled = context.preciseData?.taskCancelled;
+  const taskCancelFailed = context.preciseData?.taskCancelFailed;
+  let taskBlock = '';
+  if (taskCreated) {
+    const recurrence = taskCreated.recurrence && taskCreated.recurrence !== 'none' ? taskCreated.recurrence : null;
+    taskBlock = `\n\n【定时任务设定成功】\n已成功为他们创建了任务提醒！\n- 任务标题：${taskCreated.title}\n- ${recurrence ? `重复规则：${TASK_RECURRENCE_LABELS[recurrence] || recurrence}` : '提醒时间'}：${taskCreated.due_at}\n【回答硬性约束】请务必亲切开心地向用户确认该任务已设定好${recurrence ? '，并明确复述重复规则（每天/每个工作日/每周）' : '，并复述具体触发时间'}，告诉用户到时间 momi 会准时提醒/执行 🐾${taskCreatedMeta.duplicated ? '\n（该任务与进行中的任务完全相同，未重复创建，可顺带告知“这个之前已经定过啦”）' : ''}`;
+  } else if (taskCancelled) {
+    taskBlock = `\n\n【任务取消成功】\n已为他们取消 ${taskCancelled.count} 条提醒/任务：${(taskCancelled.titles || []).map((t) => `「${t}」`).join('、')}\n【回答硬性约束】请亲切地向用户确认这些任务已经取消啦。`;
+  } else if (taskCancelFailed) {
+    taskBlock = `\n\n【任务取消未命中】\n没有找到标题包含「${taskCancelFailed.keyword}」的进行中任务。请温和告知用户没找到对应提醒，并引导他们先问“我有哪些提醒”核对名称后再取消。`;
+  } else if (context.preciseData?.intent?.intent === 'tasks' && context.preciseData?.intent?.data?.summary) {
+    taskBlock = `\n\n【进行中的定时提醒与待办列表】\n${context.preciseData.intent.data.summary}`;
+  }
 
   const webSearchResult = context.preciseData?.intent?.intent === 'web_search' ? context.preciseData.intent.data : null;
   const webSearchBlock = webSearchResult
     ? `\n\n【实时外网信息检索结果】\n关键词：${webSearchResult.query}\n检索结果内容：\n${webSearchResult.formattedText || '未检索到更多直接内容'}\n【回答硬性约束】本轮上下文已包含外网实时检索权威结果，请直接结合上述内容回答用户，证明你具备实时查询外网信息的能力！`
+    : '';
+
+  const newsResult = context.preciseData?.intent?.intent === 'news' ? context.preciseData.intent.data : null;
+  const newsBlock = newsResult
+    ? (newsResult.success && Array.isArray(newsResult.items) && newsResult.items.length > 0
+      ? `\n\n【实时新闻热榜（本轮刚联网抓取的真实数据）】\n${newsResult.formattedText}\n【回答硬性约束】本轮上下文包含刚联网抓取的真实热榜！请用 momi 自己的语气挑出 3-6 条重点做简要总结，并说明来源与抓取时间；热榜是实时数据，若用户问的是“昨天/过去某天”，如实说明这是最新热榜；绝对禁止说“我查不到新闻”“我没有联网能力”，也禁止编造榜单之外的新闻。`
+      : `\n\n【新闻热榜拉取失败】\n${newsResult.formattedText || '网络暂时不通'}\n【回答硬性约束】诚实告知“刚刚联网拉取失败了，稍后再问我一次哦 🐾”，绝对禁止编造新闻内容，也绝对禁止说“我没有联网能力”。`)
     : '';
 
   const now = new Date();
@@ -167,7 +192,7 @@ ${DATA_CAPABILITIES_BLOCK}
 ${sceneRule.guideline}
 ${sceneRule.lengthConstraint}
 
-${memoryBlock}${emotionBlock}${digestBlock}${legacyKitchen}${legacyCapsules}${dataBlock}${taskBlock}${webSearchBlock}${weatherBlock}${currentTimeBlock}${historyBlock}
+${memoryBlock}${emotionBlock}${digestBlock}${legacyKitchen}${legacyCapsules}${dataBlock}${taskBlock}${webSearchBlock}${newsBlock}${weatherBlock}${currentTimeBlock}${historyBlock}
 
 【输出格式约束】
 回答正文后另起一行输出隐藏机器标记：<momi_meta>{"rudeness":0}</momi_meta>，rudeness 为用户本轮粗鲁度 0-10。正文不得提及此标记。`.trim();
@@ -252,6 +277,7 @@ export function historyToMessages(history, { maxMessages = 16, maxImages = 2 } =
 /**
  * momi 统一对话入口
  * triggerSource: 'assistant' | 'chat_mention' | 'proactive' | 'scheduled'
+ * sourceMessageId: 可选，聊天消息的 id，用于任务溯源
  */
 export async function chatWithMomi({
   userId,
@@ -259,6 +285,7 @@ export async function chatWithMomi({
   images = [],
   recentChatHistory = [],
   triggerSource = 'assistant',
+  sourceMessageId = null,
 }) {
   // 1) 轻量意图分类：数据 / 配方 / 显式记忆 / 天气 / 聊天历史
   const explicit = parseExplicitMemory(message, userId);
@@ -277,31 +304,47 @@ export async function chatWithMomi({
     return {
       success: false, content: '', reply: `momi 查询数据时失败了：${err.message}`,
       emotionDelta: null, memoryWrites: [], usedFallbackModel: false, errorCode: 'DATA_QUERY_FAILED',
+      taskCreated: null, taskCancelled: null, taskCancelFailed: null,
     };
   }
 
-  // 1.5) 定时任务/提醒设定解析与创建（如果用户提出了提醒需求）
-  try {
-    const { createTaskFromMessage, parseReminderLocally } = require('./momiTasks');
-    const parsedReminder = parseReminderLocally(message);
-    if (parsedReminder) {
-      const created = await createTaskFromMessage({
-        userId,
-        message,
-        sourceMessageId: null,
-      });
-      if (created) {
-        preciseData = preciseData || {};
-        preciseData.taskCreated = created;
-      }
+  // 1.5) 聊天内发布/取消任务（momi 助手场景统一入口）：
+  //   一次性提醒走本地正则极速解析（不消耗 AI）；
+  //   每天/每周/工作日等周期任务与“取消xx提醒”走轻量 LLM 抽取。
+  //   注意：只在 assistant 场景执行 —— 主聊天插话的消息是包装后的转述文本，
+  //   直接解析会生成错误标题，故不在 chat_mention 场景建任务。
+  let taskAction = null;
+  if (triggerSource === 'assistant' && message && preciseData?.intent?.intent !== 'tasks') {
+    try {
+      // eslint-disable-next-line global-require
+      const { handleTaskMessage } = require('./momiTasks');
+      taskAction = await handleTaskMessage({ userId, message, sourceMessageId });
+    } catch (taskErr) {
+      console.warn('[momiAssistant] 任务意图处理异常:', taskErr.message);
     }
-  } catch (taskErr) {
-    console.warn('[momiAssistant] 解析/创建定时任务异常:', taskErr.message);
   }
+  if (taskAction?.action === 'created') {
+    preciseData = preciseData || {};
+    preciseData.taskCreated = taskAction.task;
+    preciseData.taskCreatedMeta = { duplicated: Boolean(taskAction.duplicated) };
+  } else if (taskAction?.action === 'cancelled') {
+    preciseData = preciseData || {};
+    preciseData.taskCancelled = { count: taskAction.count, titles: taskAction.titles };
+  } else if (taskAction?.action === 'cancel_failed') {
+    preciseData = preciseData || {};
+    preciseData.taskCancelFailed = { keyword: taskAction.keyword };
+  }
+
+  const taskResultFields = {
+    taskCreated: preciseData?.taskCreated || null,
+    taskCancelled: preciseData?.taskCancelled || null,
+    taskCancelFailed: preciseData?.taskCancelFailed || null,
+  };
 
   // 1.6) 外网检索兜底匹配（若用户显式要求查询外网但未被 intent 拦截）
   if (!preciseData?.intent && /(查|搜索|搜).*外网|外网.*(信息|消息)|上网查|查一下最新|外网/i.test(message)) {
     try {
+      // eslint-disable-next-line global-require
       const { searchWeb } = require('./webSearchService');
       const searchRes = await searchWeb(message);
       if (searchRes) {
@@ -391,6 +434,7 @@ export async function chatWithMomi({
     assistant: 350,
     chat_mention: 220,
     proactive: 160,
+    scheduled: 200,
   };
   const max_tokens = maxTokensMap[triggerSource] || 350;
 
@@ -414,6 +458,7 @@ export async function chatWithMomi({
       memoryWrites: [],
       usedFallbackModel: false,
       errorCode: res.errorCode,
+      ...taskResultFields,
     };
   }
 
@@ -446,6 +491,7 @@ export async function chatWithMomi({
     usedFallbackModel: Boolean(res.usedFallbackModel),
     errorCode: null,
     state: stateResult.state,
+    ...taskResultFields,
   };
 }
 
