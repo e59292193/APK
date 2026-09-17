@@ -1,9 +1,16 @@
--- ═══════════════════════════════════════════════════════
--- momi V5 原子 RPC (momi_v5_rpc_migration.sql)
--- 前置：先执行 momi_v5_migration.sql
--- 目标：记忆 add/update/forget 与 chat job claim/reply 均数据库原子化、幂等化。
--- 全部 CREATE OR REPLACE，可安全重复执行。
--- ═══════════════════════════════════════════════════════
+-- =============================================================================
+-- LEGACY REFERENCE ONLY - DO NOT DEPLOY
+-- momi V5 历史 RPC 副本 (momi_v5_rpc_migration.sql)
+-- 本文件仅保留作历史/本地对照，可能与正式迁移分叉。
+-- 禁止在 Supabase SQL Editor 或任何生产环境直接执行本文件。
+-- 正式部署请严格按顺序使用：
+--   supabase/migrations/0007_momi_v5_memory_history.sql
+--   supabase/migrations/0008_momi_v5_atomic_rpc.sql
+-- 正式 0008 另含过期 lease 回收、最大尝试终止及严格 generation/source 校验。
+-- 部署与回滚步骤见 supabase/migrations/README.md。
+-- 下方 SQL 不再维护，也不承诺与正式迁移等价。
+-- 历史目标：记忆 add/update/forget 与 chat job claim/reply 原子化、幂等化。
+-- =============================================================================
 
 -- ─────────────────────────────────────────────────────
 -- 1. 写入/确认/纠正一条经过 evidence firewall 验证的记忆
