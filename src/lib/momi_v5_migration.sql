@@ -1,10 +1,14 @@
 -- ═══════════════════════════════════════════════════════
--- momi V5 迁移脚本 (momi_v5_migration.sql)
--- 提示词9：可信记忆证据账本 + 聊天消息幂等链 + worker job
--- 执行顺序：momi_upgrade_schema.sql → momi_v2_corrective_migration.sql
---           → momi_v3_migration.sql → momi_v4_migration.sql → 本文件
--- 执行方式：Supabase Dashboard → SQL Editor → 粘贴执行
--- 全部语句幂等，可安全重复执行；不删除任何用户数据。
+-- ⚠️ LEGACY REFERENCE ONLY — DO NOT DEPLOY
+-- momi V5 历史手工脚本 (momi_v5_migration.sql)
+-- 本文件仅保留作历史/本地对照，可能与正式迁移分叉。
+-- 禁止在 Supabase SQL Editor 或任何生产环境直接执行本文件。
+-- 正式部署请严格按顺序使用：
+--   supabase/migrations/0007_momi_v5_memory_history.sql
+--   supabase/migrations/0008_momi_v5_atomic_rpc.sql
+-- 部署与回滚步骤见 supabase/migrations/README.md。
+-- 下方 SQL 不再维护，也不承诺与正式迁移等价。
+-- 历史目标：可信记忆证据账本 + 聊天消息幂等链 + worker job
 --
 -- 鉴权说明：当前 APP 仍为本地昵称登录，数据库无法从 auth.uid() 区分 momo/苞米。
 -- 本迁移不伪造无效的用户级 RLS；沿用既有封闭双人策略，并要求所有读写在
