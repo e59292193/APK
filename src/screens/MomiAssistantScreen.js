@@ -1,4 +1,4 @@
-// momi 独立陪伴界面 V2：识图 / 情绪养成 / 主动消息 / 长按记忆
+// momi 独立陪伴界面 V2：识图 / 情绪养成 / 主动消息 / 长按记忆 / 聊天内发布任务
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator, Alert, FlatList, Image,
@@ -14,7 +14,7 @@ import {
 } from '../lib/momiAssistant';
 import { getMomiState, MOOD_EMOJI, GROWTH_THRESHOLDS } from '../lib/momiState';
 import { createManualMemory, runMemoryMaintenance, extractAndSaveMemories } from '../lib/momiMemory';
-import { createTaskFromMessage } from '../lib/momiTasks';
+import { formatTaskReceipt } from '../lib/momiTasks';
 import { pickImage } from '../lib/imagePicker';
 import { fetchAllAvatars } from '../lib/avatarService';
 import { supabase } from '../lib/supabase';
@@ -24,7 +24,7 @@ import {
   CHAT_LIST_KEYBOARD_PROPS,
   MAX_COMPOSER_INPUT_HEIGHT,
 } from '../components/KeyboardAwareChatLayout';
-import { useKeyboardHeight } from '../hooks/useKeyboardHeight';
+import { useRawKeyboardHeight } from '../hooks/useKeyboardHeight';
 
 function nextExp(state) {
   return GROWTH_THRESHOLDS[(state?.growth_level || 1) - 1] || GROWTH_THRESHOLDS.at(-1);
@@ -36,7 +36,9 @@ function messageImages(item) {
 
 export default function MomiAssistantScreen({ userId, onBack, onNavigateSettings, onOpenAISettings, onOpenNotebook }) {
   const insets = useSafeAreaInsets();
-  const keyboardHeight = useKeyboardHeight();
+  // 用原始键盘高度判断「键盘是否弹起」（决定输入框底部内边距）；
+  // 自适应补偿值在 resize 模式下约为 0，不能用于该判断。
+  const keyboardHeight = useRawKeyboardHeight();
   const isKeyboardVisible = keyboardHeight > 0;
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
@@ -122,15 +124,18 @@ export default function MomiAssistantScreen({ userId, onBack, onNavigateSettings
       });
       appendUnique(userMsg);
 
-      const task = text ? await createTaskFromMessage({ userId, message: text, sourceMessageId: userMsg?.id }).catch(() => null) : null;
       const recent = [...messages, userMsg].slice(-16);
+      // 任务/提醒的创建与取消统一由 chatWithMomi 内部完成（唯一入口，避免重复创建）
       const res = await chatWithMomi({
         userId, message: text, images: uploaded.urls, recentChatHistory: recent, triggerSource: 'assistant',
+        sourceMessageId: userMsg?.id || null,
       });
       let reply = res.content || res.reply;
-      if (task) {
-        const when = new Date(task.due_at).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-        reply = `提醒记好啦：${when}「${task.title}」⏰\n${reply || ''}`.trim();
+      if (res.taskCreated) {
+        reply = `${formatTaskReceipt(res.taskCreated)}\n${reply || ''}`.trim();
+      } else if (res.taskCancelled && res.taskCancelled.count > 0) {
+        const titles = (res.taskCancelled.titles || []).map((t) => `「${t}」`).join('、');
+        reply = `🗑️ 已取消 ${res.taskCancelled.count} 条提醒：${titles}\n${reply || ''}`.trim();
       }
       if (!res.success) {
         const action = res.errorCode === 'VISION_UNSUPPORTED' ? '请换支持识图的模型' : '可到右上角设置检查 API';
