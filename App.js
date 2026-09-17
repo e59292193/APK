@@ -7,7 +7,7 @@ import {
 } from 'react-native';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { useKeyboardHeight } from './src/hooks/useKeyboardHeight';
+import { useRawKeyboardHeight } from './src/hooks/useKeyboardHeight';
 import { ErrorBoundary } from './src/components/ErrorBoundary';
 import { Button, AppInput } from './src/components/ui';
 import { typography, spacing, radius, ThemeProvider, useTheme, prefetchThemeId } from './src/theme';
@@ -52,7 +52,8 @@ function LoginScreen({ onLogin }) {
   const insets = useSafeAreaInsets();
   const { colors } = useTheme();
   const styles = useMemo(() => createLoginStyles(colors), [colors]);
-  const keyboardHeight = useKeyboardHeight();
+  // 用原始键盘高度做「是否弹起」的布局判断（resize 模式下自适应补偿值约为 0，不能用于判断）
+  const keyboardHeight = useRawKeyboardHeight();
   const isKeyboardVisible = keyboardHeight > 0;
   const [nickname, setNickname] = useState('');
   const [password, setPassword] = useState('');
@@ -73,50 +74,60 @@ function LoginScreen({ onLogin }) {
     }
   };
 
+  const formScroll = (
+    <ScrollView
+      style={staticStyles.flex}
+      contentContainerStyle={[styles.scroll, {
+        paddingTop: insets.top + (isKeyboardVisible ? spacing[2] : spacing[6]),
+        paddingBottom: insets.bottom + spacing[8],
+        justifyContent: isKeyboardVisible ? 'flex-start' : 'center',
+      }]}
+      keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag"
+      showsVerticalScrollIndicator={false} bounces={false}
+    >
+      <View style={styles.decor1} /><View style={styles.decor2} /><View style={styles.decor3} />
+      <View style={[styles.brandSection, isKeyboardVisible && { marginBottom: spacing[3] }]}>
+        {!isKeyboardVisible ? <View style={styles.logoWrap}><Ionicons name="heart" size={36} color={colors.primary} /></View> : null}
+        <Text style={[styles.brandTitle, isKeyboardVisible && { fontSize: 24, lineHeight: 28 }]}>MOMO Corn</Text>
+        <Text style={styles.brandSubtitle}>momo和苞米的小世界</Text>
+      </View>
+      <View style={styles.formCard}>
+        <Text style={styles.formTitle}>欢迎回来</Text>
+        <AppInput label="昵称" placeholder="输入你的昵称" value={nickname} onChangeText={(v) => { setNickname(v); setErrorMsg(''); }} autoCapitalize="none" autoCorrect={false} />
+        <AppInput label="密码" placeholder="输入密码" value={password} onChangeText={(v) => { setPassword(v); setErrorMsg(''); }} secureTextEntry returnKeyType="go" onSubmitEditing={handleLogin} />
+        {errorMsg ? <View style={styles.errorRow}><Ionicons name="alert-circle-outline" size={16} color={colors.error || '#F05A4F'} /><Text style={styles.errorText}>{errorMsg}</Text></View> : null}
+        <Button
+          variant="primary"
+          size="large"
+          fullWidth
+          loading={loading}
+          disabled={loading}
+          onPress={handleLogin}
+          style={{
+            marginTop: spacing[3],
+            height: 52,
+            borderRadius: 14,
+            backgroundColor: colors.primaryAction || colors.primary || '#8B5FC7',
+          }}
+          textStyle={{ color: '#FFFFFF', fontSize: 16, fontWeight: '700' }}
+        >
+          登录
+        </Button>
+        <Text style={styles.hintText}>专属账号，仅限两人使用</Text>
+      </View>
+    </ScrollView>
+  );
+
   return <View style={styles.container}>
-    <KeyboardAvoidingView style={staticStyles.flex} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}>
-      <ScrollView
-        style={staticStyles.flex}
-        contentContainerStyle={[styles.scroll, {
-          paddingTop: insets.top + (isKeyboardVisible ? spacing[2] : spacing[6]),
-          paddingBottom: insets.bottom + spacing[8],
-          justifyContent: isKeyboardVisible ? 'flex-start' : 'center',
-        }]}
-        keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag"
-        showsVerticalScrollIndicator={false} bounces={false}
-      >
-        <View style={styles.decor1} /><View style={styles.decor2} /><View style={styles.decor3} />
-        <View style={[styles.brandSection, isKeyboardVisible && { marginBottom: spacing[3] }]}>
-          {!isKeyboardVisible ? <View style={styles.logoWrap}><Ionicons name="heart" size={36} color={colors.primary} /></View> : null}
-          <Text style={[styles.brandTitle, isKeyboardVisible && { fontSize: 24, lineHeight: 28 }]}>MOMO Corn</Text>
-          <Text style={styles.brandSubtitle}>momo和苞米的小世界</Text>
-        </View>
-        <View style={styles.formCard}>
-          <Text style={styles.formTitle}>欢迎回来</Text>
-          <AppInput label="昵称" placeholder="输入你的昵称" value={nickname} onChangeText={(v) => { setNickname(v); setErrorMsg(''); }} autoCapitalize="none" autoCorrect={false} />
-          <AppInput label="密码" placeholder="输入密码" value={password} onChangeText={(v) => { setPassword(v); setErrorMsg(''); }} secureTextEntry returnKeyType="go" onSubmitEditing={handleLogin} />
-          {errorMsg ? <View style={styles.errorRow}><Ionicons name="alert-circle-outline" size={16} color={colors.error || '#F05A4F'} /><Text style={styles.errorText}>{errorMsg}</Text></View> : null}
-          <Button
-            variant="primary"
-            size="large"
-            fullWidth
-            loading={loading}
-            disabled={loading}
-            onPress={handleLogin}
-            style={{
-              marginTop: spacing[3],
-              height: 52,
-              borderRadius: 14,
-              backgroundColor: colors.primaryAction || colors.primary || '#8B5FC7',
-            }}
-            textStyle={{ color: '#FFFFFF', fontSize: 16, fontWeight: '700' }}
-          >
-            登录
-          </Button>
-          <Text style={styles.hintText}>专属账号，仅限两人使用</Text>
-        </View>
-      </ScrollView>
-    </KeyboardAvoidingView>
+    {Platform.OS === 'ios' ? (
+      <KeyboardAvoidingView style={staticStyles.flex} behavior="padding" keyboardVerticalOffset={0}>
+        {formScroll}
+      </KeyboardAvoidingView>
+    ) : (
+      // Android 使用 app.json 的 softwareKeyboardLayoutMode: "resize"，系统压缩窗口即可；
+      // 再叠加 KeyboardAvoidingView 会二次补偿，产生键盘与内容之间的空白区。
+      <View style={staticStyles.flex}>{formScroll}</View>
+    )}
   </View>;
 }
 
@@ -132,7 +143,8 @@ const BottomTabBar = memo(function BottomTabBar({ currentTab, onTabChange, unrea
   const insets = useSafeAreaInsets();
   const { colors } = useTheme();
   const styles = useMemo(() => createTabStyles(colors), [colors]);
-  const keyboardHeight = useKeyboardHeight();
+  // 用原始键盘高度：无论 pan/resize 模式，键盘弹起时都隐藏底部 Tab
+  const keyboardHeight = useRawKeyboardHeight();
   if (keyboardHeight > 0) return null;
   return <View style={[styles.container, { paddingBottom: insets.bottom + 4 }]}>
     {TAB_CONFIG.map((tab) => {
