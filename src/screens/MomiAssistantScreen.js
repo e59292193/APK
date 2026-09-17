@@ -2,7 +2,7 @@
 // V4：隐藏顶栏「小本本」入口（功能与路由完整保留，可从 momi 设置进入）
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator, Alert, FlatList, Image,
+  ActivityIndicator, Alert, FlatList, Image, Platform,
   StyleSheet, Text, TextInput, TouchableOpacity, View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -13,6 +13,7 @@ import {
   chatWithMomi,
   uploadMomiChatImages,
   ensureIdentitySeeds,
+  stripPromptArtifacts,
 } from '../lib/momiAssistant';
 import {
   assistantMessageStableKey,
@@ -50,6 +51,60 @@ function nextExp(state) {
 function messageImages(item) {
   return Array.isArray(item?.image_urls) ? item.image_urls.filter(Boolean) : [];
 }
+
+const AssistantMessageItem = React.memo(function AssistantMessageItem({
+  item,
+  userId,
+  avatars,
+  colors,
+  styles,
+  rememberText,
+}) {
+  const isMomi = item.sender === 'momi';
+  const isMe = item.sender === userId;
+  const images = messageImages(item);
+  const syncLabel = item.status === 'pending' ? '待同步' : (item.status === 'failed' ? '同步失败' : '');
+  const displayContent = stripPromptArtifacts(item.content);
+
+  return (
+    <TouchableOpacity activeOpacity={0.9} onLongPress={() => rememberText(item)} delayLongPress={450}>
+      <View style={[styles.messageRow, isMe && styles.messageRowMe]}>
+        {!isMe ? (
+          <Avatar
+            uri={isMomi ? avatars.momi : avatars[item.sender]}
+            fallback={isMomi ? '🐾' : item.sender === 'momo' ? 'M' : '苞'}
+            size={36}
+          />
+        ) : null}
+        <View style={[styles.messageBody, isMe && styles.messageBodyMe]}>
+          <View style={[styles.metaRow, isMe && styles.metaRowMe]}>
+            <Text style={[styles.sender, isMomi && { color: colors.primary }]}>{isMe ? '我' : item.sender}</Text>
+            {item.is_proactive ? (
+              <Text style={styles.proactiveBadge}>
+                {item.trigger_source === 'scheduled_reminder' ? '提醒' : '主动来找你'}
+              </Text>
+            ) : null}
+            {syncLabel ? <Text style={styles.syncBadge}>{syncLabel}</Text> : null}
+            <Text style={styles.time}>{formatLocalTime(item.created_at)}</Text>
+          </View>
+          <View style={[styles.bubble, isMe ? styles.myBubble : isMomi ? styles.momiBubble : styles.otherBubble]}>
+            {images.length ? (
+              <View style={styles.bubbleImages}>
+                {images.map((url, index) => (
+                  <Image key={`${url}-${index}`} source={{ uri: url }} style={styles.bubbleImage} resizeMode="cover" />
+                ))}
+              </View>
+            ) : null}
+            {displayContent ? (
+              <Text style={[styles.bubbleText, isMe && styles.myBubbleText]}>{displayContent}</Text>
+            ) : null}
+          </View>
+        </View>
+        {isMe ? <Avatar uri={avatars[userId]} fallback={userId === 'momo' ? 'M' : '苞'} size={36} /> : null}
+      </View>
+    </TouchableOpacity>
+  );
+});
 
 export default function MomiAssistantScreen({ userId, onBack, onNavigateSettings, onOpenAISettings }) {
   const insets = useSafeAreaInsets();
@@ -254,50 +309,16 @@ export default function MomiAssistantScreen({ userId, onBack, onNavigateSettings
     }
   };
 
-  const renderImages = (urls) => urls.length ? (
-    <View style={styles.bubbleImages}>
-      {urls.map((url, index) => (
-        <Image key={`${url}-${index}`} source={{ uri: url }} style={styles.bubbleImage} resizeMode="cover" />
-      ))}
-    </View>
-  ) : null;
-
-  const renderItem = ({ item }) => {
-    const isMomi = item.sender === 'momi';
-    const isMe = item.sender === userId;
-    const images = messageImages(item);
-    const syncLabel = item.status === 'pending' ? '待同步' : (item.status === 'failed' ? '同步失败' : '');
-    return (
-      <TouchableOpacity activeOpacity={0.9} onLongPress={() => rememberText(item)} delayLongPress={450}>
-        <View style={[styles.messageRow, isMe && styles.messageRowMe]}>
-          {!isMe ? (
-            <Avatar
-              uri={isMomi ? avatars.momi : avatars[item.sender]}
-              fallback={isMomi ? '🐾' : item.sender === 'momo' ? 'M' : '苞'}
-              size={36}
-            />
-          ) : null}
-          <View style={[styles.messageBody, isMe && styles.messageBodyMe]}>
-            <View style={[styles.metaRow, isMe && styles.metaRowMe]}>
-              <Text style={[styles.sender, isMomi && { color: colors.primary }]}>{isMe ? '我' : item.sender}</Text>
-              {item.is_proactive ? (
-                <Text style={styles.proactiveBadge}>
-                  {item.trigger_source === 'scheduled_reminder' ? '提醒' : '主动来找你'}
-                </Text>
-              ) : null}
-              {syncLabel ? <Text style={styles.syncBadge}>{syncLabel}</Text> : null}
-              <Text style={styles.time}>{formatLocalTime(item.created_at)}</Text>
-            </View>
-            <View style={[styles.bubble, isMe ? styles.myBubble : isMomi ? styles.momiBubble : styles.otherBubble]}>
-              {renderImages(images)}
-              {item.content ? <Text style={[styles.bubbleText, isMe && styles.myBubbleText]}>{item.content}</Text> : null}
-            </View>
-          </View>
-          {isMe ? <Avatar uri={avatars[userId]} fallback={userId === 'momo' ? 'M' : '苞'} size={36} /> : null}
-        </View>
-      </TouchableOpacity>
-    );
-  };
+  const renderItem = useCallback(({ item }) => (
+    <AssistantMessageItem
+      item={item}
+      userId={userId}
+      avatars={avatars}
+      colors={colors}
+      styles={styles}
+      rememberText={rememberText}
+    />
+  ), [userId, avatars, colors, styles]);
 
   const maxExp = nextExp(state || {});
   const expRatio = Math.min(1, (state?.growth_exp || 0) / Math.max(1, maxExp));
@@ -357,7 +378,10 @@ export default function MomiAssistantScreen({ userId, onBack, onNavigateSettings
             renderItem={renderItem}
             contentContainerStyle={[styles.listContent, { paddingBottom: 16 }]}
             {...CHAT_LIST_KEYBOARD_PROPS}
-            onContentSizeChange={() => flatListRef.current?.scrollToEnd({ animated: false })}
+            initialNumToRender={15}
+            maxToRenderPerBatch={10}
+            windowSize={7}
+            removeClippedSubviews={Platform.OS === 'android'}
             onLayout={() => {
               setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
             }}

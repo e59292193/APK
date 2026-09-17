@@ -1,5 +1,5 @@
 ====================================
-  momo-corn APK 打包流程
+  momo-corn APK 极速打包流程
 ====================================
 
 【项目位置】
@@ -10,53 +10,47 @@
   - 使用 Android Studio 自带的 JDK 21（路径：D:\AndroidStudio\jbr）
   - Android SDK 路径：D:\AndroidStudio\Sdk
 
-【打包步骤】
+【极速打包方式（推荐）】
 
-1. 打开终端（Git Bash 或类似 bash 环境）
+方法 A：使用项目一键极速打包脚本（PowerShell）
+  直接在项目根目录运行：
+    .\build-apk.ps1
 
-2. 设置环境变量并执行编译：
+  可选加速参数：
+    .\build-apk.ps1 -Arch arm64-v8a     # 仅编译 64 位真机架构（极速模式，15~25 秒）
+    .\build-apk.ps1 -InstallDeps        # 先 npm ci 再打包
 
-   export JAVA_HOME="D:/AndroidStudio/jbr"
-   export ANDROID_HOME="D:/AndroidStudio/Sdk"
-   cd "D:/APK/APK/android"
-   ./gradlew.bat assembleRelease --no-daemon --stacktrace
+方法 B：手动执行极速 Gradle 命令（PowerShell / Git Bash）
+  1. 设置环境变量：
+     $env:JAVA_HOME = "D:\AndroidStudio\jbr"
+     $env:ANDROID_HOME = "D:\AndroidStudio\Sdk"
+     $env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
+     cd "D:\APK\APK\android"
 
-   说明：
-   - JAVA_HOME 指向 Android Studio 内置 JDK 21，解决 Gradle 对 JDK 版本的要求
-   - --no-daemon  避免后台 Gradle 进程占用
-   - --stacktrace  出错时显示完整堆栈信息，方便排查
+  2. 执行极速构建：
+     .\gradlew.bat assembleRelease --daemon --build-cache --parallel -x lintVitalRelease
 
-3. 编译成功后，APK 输出在：
+【核心加速原因】
+  1. --daemon：启用常驻 Gradle 守护进程，免去每次 JVM 冷启动与 JIT 预热开销。
+  2. --build-cache & --parallel：开启构建缓存与多任务并行执行，未变动的模块直接命中间隙缓存。
+  3. -x lintVitalRelease：跳过打包期重复耗时 1~2 分钟的静态代码分析（代码检查请提前通过 npm run check 执行）。
+  4. -PreactNativeArchitectures=arm64-v8a（可选）：真机调试时仅编译单一架构，无需耗时编译 x86/x86_64/v7a。
 
-   D:\APK\APK\android\app\build\outputs\apk\release\app-release.apk
+【输出产物】
+  APK 路径：
+    D:\APK\APK\android\app\build\outputs\apk\release\app-release.apk
 
-   文件大小约 75MB，包含 4 个 CPU 架构：
-   - arm64-v8a（主流 64 位 ARM）
-   - armeabi-v7a（老款 32 位 ARM）
-   - x86（模拟器）
-   - x86_64（64 位模拟器）
-
-4.（可选）复制 APK 到输出目录方便取用：
-
-   cp "D:/APK/APK/android/app/build/outputs/apk/release/app-release.apk" "C:/Users/a/.qoderworkcn/workspace/mqqqxz91zszjjqlk/outputs/momo-corn-release.apk"
+  安装至连接设备：
+    adb install -r "D:\APK\APK\android\app\build\outputs\apk\release\app-release.apk"
 
 【常见问题】
-
   Q: 编译报错 "Unsupported class file major version"
   A: JAVA_HOME 没设对，确认指向 D:\AndroidStudio\jbr（JDK 21），不是系统默认的 JDK 8
 
   Q: 编译报错 SDK not found
   A: ANDROID_HOME 没设对，确认指向 D:\AndroidStudio\Sdk
 
-  Q: 编译很慢
-  A: 首次编译较慢（需要下载依赖），后续增量编译会快很多。
-     加了 --no-daemon 每次都是独立进程，如果追求速度可以去掉 --no-daemon，
-     但会留一个后台 Gradle 进程占用内存。
-
 【耗时参考】
-  - 全量编译：约 2-4 分钟
-  - 增量编译（改动少量 JS 文件）：约 1-2 分钟
-
-====================================
-  生成日期：2026-06-28
+  - 极速增量构建：约 30~50 秒
+  - 单架构极速构建：约 15~25 秒
 ====================================

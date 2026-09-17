@@ -13,7 +13,7 @@ import { Button, AppInput } from './src/components/ui';
 import { typography, spacing, radius, ThemeProvider, useTheme, prefetchThemeId } from './src/theme';
 import { lazyScreen } from './src/lib/lazyScreen';
 import { signIn, restoreSession, signOutSupabase } from './src/lib/auth';
-import { createNotificationAdapter } from './src/lib/notificationAdapter';
+import { createNotificationAdapter, requestNotificationPermission } from './src/lib/notificationAdapter';
 import { createWeatherLocationProvider } from './src/lib/weatherLocationProvider';
 import { setNotificationAdapter } from './src/lib/proactiveScheduler';
 import { setWeatherLocationProvider } from './src/lib/weatherService';
@@ -212,6 +212,7 @@ function MainApp() {
     let cancelled = false;
     const task = InteractionManager.runAfterInteractions(() => {
       if (cancelled) return;
+      requestNotificationPermission().catch((e) => console.warn('[App] 通知权限申请失败:', e.message));
       require('./src/lib/wakeUpSupabase').wakeUpSupabase().catch((e) => console.warn('[App] 后台唤醒失败:', e.message));
       const { TIM_SDKAPPID } = require('./src/lib/timConfig');
       if (TIM_SDKAPPID) require('./src/lib/realtimeSignal').initSignal(userId).catch((e) => console.warn('[App] IM 初始化失败:', e.message));

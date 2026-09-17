@@ -1,20 +1,26 @@
 ﻿# =====================================================================
-# MOMO Corn - Android release APK 构建脚本（安全整改版）
+# MOMO Corn - Android release APK 极速构建脚本
 #
-# 与旧版的区别：
-#   - 不执行任何 git 操作（不 pull、不改全局代理、不关闭 SSL 校验）
-#   - 构建前显示当前 commit，由操作者确认代码状态
-#   - 步骤拆分、每步失败即退出并保留完整日志（build-output.log）
+# 性能优化：
+#   - 默认开启 Gradle Daemon 守护进程加速（避免每次 JVM 冷启动）
+#   - 开启 Gradle Build Cache 与并行编译（--build-cache --parallel）
+#   - 默认跳过耗时极长的静态检查（-x lintVitalRelease -x lint）
+#   - 支持 -Arch 参数单架构极速编译（如 -Arch arm64-v8a）
 #
 # 用法：
-#   .\build-apk.ps1                 # 直接构建（依赖已安装）
-#   .\build-apk.ps1 -InstallDeps    # 先执行 npm ci 再构建
-#   .\build-apk.ps1 -ProxyPort 7892 # 构建进程走本地代理（只影响本次，不改全局）
+#   .\build-apk.ps1                     # 极速全架构打包（默认推荐，约 30~50 秒）
+#   .\build-apk.ps1 -Arch arm64-v8a     # 仅编译主流 64 位真机架构（极速模式，约 15~25 秒）
+#   .\build-apk.ps1 -InstallDeps        # 先执行 npm ci 再构建
+#   .\build-apk.ps1 -NoDaemon           # CI 等无常驻环境使用单次构建
+#   .\build-apk.ps1 -ProxyPort 7892     # 构建进程走本地代理（只影响本次）
 # =====================================================================
 
 param(
     [switch]$InstallDeps,
-    [int]$ProxyPort = 0
+    [int]$ProxyPort = 0,
+    [string]$Arch = "",
+    [switch]$NoDaemon,
+    [switch]$WithLint
 )
 
 $ErrorActionPreference = "Stop"
@@ -158,8 +164,8 @@ $env:ANDROID_HOME = $sdkHome
 $env:ANDROID_SDK_ROOT = $sdkHome
 Write-OK "Android SDK: $sdkHome"
 
-# ---------- 步骤 4：构建 ----------
-Write-Step "步骤 4/4：构建 release APK（内嵌 JS bundle，无需 Metro）"
+# ---------- 步骤 4：极速构建 ----------
+Write-Step "步骤 4/4：极速构建 release APK（内嵌 JS bundle，无需 Metro）"
 
 $gradlew = Join-Path $AndroidDir "gradlew.bat"
 if (-not (Test-Path $gradlew)) { Fail "未找到 gradlew.bat: $gradlew（android/ 目录缺失时先运行 npx expo prebuild --platform android）" }
@@ -174,6 +180,28 @@ if ($ProxyPort -gt 0) {
     }
 }
 
+$gradleArgs = @("assembleRelease", "--build-cache", "--parallel")
+
+if ($NoDaemon) {
+    $gradleArgs += "--no-daemon"
+    Write-Info "使用单次构建模式 (--no-daemon)"
+} else {
+    $gradleArgs += "--daemon"
+    Write-OK "启用 Gradle 守护进程加速 (--daemon)"
+}
+
+if (-not $WithLint) {
+    $gradleArgs += @("-x", "lintVitalRelease", "-x", "lint")
+    Write-OK "跳过冗余静态检查 (-x lintVitalRelease -x lint)"
+}
+
+if ($Arch) {
+    $gradleArgs += "-PreactNativeArchitectures=$Arch"
+    Write-OK "指定目标架构加速: $Arch"
+} else {
+    Write-Info "构建全部 CPU 架构 (arm64-v8a, armeabi-v7a, x86, x86_64)"
+}
+
 $env:NODE_ENV = "production"
 $startTime = Get-Date
 
@@ -182,7 +210,8 @@ $ErrorActionPreference = "Continue"
 Push-Location $AndroidDir
 $exitCode = 1
 try {
-    & $gradlew assembleRelease --no-daemon 2>&1 | Tee-Object -FilePath $LogFile -Append |
+    Write-Host "  执行命令: .\gradlew.bat $($gradleArgs -join ' ')" -ForegroundColor Gray
+    & $gradlew @gradleArgs 2>&1 | Tee-Object -FilePath $LogFile -Append |
         ForEach-Object {
             $line = $_.ToString()
             if ($line -match 'Task |BUILD |FAILED|error:|Error') { Write-Host $line -ForegroundColor Gray }

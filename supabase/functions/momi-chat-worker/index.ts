@@ -432,9 +432,13 @@ ${grounding.block}
   const messages: Array<Record<string, unknown>> = [{ role: "system", content: system }];
   for (const message of history) {
     if (message.sender_type === "assistant") {
+      const pure = String(message.content ?? "")
+        .replace(/^(\s*\[\s*(?:历史\s*assistant\s*文案[，；\s]*|事实权重\s*=\s*0[，；\s]*|仅供(?:语气)?连续(?:性)?[，；\s]*)+\]\s*)+/gi, "")
+        .replace(/\[(?:历史\s*assistant\s*文案|事实权重\s*=\s*0|仅供(?:语气)?连续)[^\]]*\]/gi, "")
+        .trim();
       messages.push({
         role: "assistant",
-        content: `[历史 assistant 文案，仅供连续性；事实权重=0] ${message.content ?? ""}`,
+        content: pure,
       });
     } else {
       messages.push({
@@ -496,6 +500,8 @@ async function callModel(messages: Array<Record<string, unknown>>): Promise<stri
     }
     return content
       .replace(/\s*<momi_meta>[\s\S]*?<\/momi_meta>\s*/gi, "")
+      .replace(/^(\s*\[\s*(?:历史\s*assistant\s*文案[，；\s]*|事实权重\s*=\s*0[，；\s]*|仅供(?:语气)?连续(?:性)?[，；\s]*)+\]\s*)+/gi, "")
+      .replace(/\[(?:历史\s*assistant\s*文案|事实权重\s*=\s*0|仅供(?:语气)?连续)[^\]]*\]/gi, "")
       .trim()
       .slice(0, 4000);
   } catch (error) {

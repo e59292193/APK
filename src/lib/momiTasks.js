@@ -53,6 +53,29 @@ export function parseReminderLocally(text, now = new Date()) {
   if (!timing) return null;
   title = title.replace(/^[，,：:\s]*(我)?/, '').trim() || '你设置的提醒';
 
+const CHINESE_DIGIT_MAP = {
+  零: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10,
+};
+
+function parseChineseNumber(str) {
+  if (!str) return null;
+  const s = String(str).trim();
+  if (/^\d+$/.test(s)) return parseInt(s, 10);
+  if (s === '半') return 0.5;
+  if (s.length === 1 && CHINESE_DIGIT_MAP[s] != null) return CHINESE_DIGIT_MAP[s];
+  if (s === '十') return 10;
+  if (s.startsWith('十') && s.length === 2 && CHINESE_DIGIT_MAP[s[1]] != null) {
+    return 10 + CHINESE_DIGIT_MAP[s[1]];
+  }
+  if (s.endsWith('十') && s.length === 2 && CHINESE_DIGIT_MAP[s[0]] != null) {
+    return CHINESE_DIGIT_MAP[s[0]] * 10;
+  }
+  if (s.length === 3 && s[1] === '十') {
+    return (CHINESE_DIGIT_MAP[s[0]] || 0) * 10 + (CHINESE_DIGIT_MAP[s[2]] || 0);
+  }
+  return null;
+}
+
   let due = new Date(now);
 
   // 1. 半小时后 / 一小时后
@@ -65,13 +88,15 @@ export function parseReminderLocally(text, now = new Date()) {
     return { title, dueAt: due.toISOString(), sourceText: raw };
   }
 
-  // 2. N分钟后 / N小时后 / N天后
-  const relative = timing.match(/(\d+)\s*(分钟|小时|天)后/);
+  // 2. N分钟后 / N小时后 / N天后（支持阿拉伯数字与中文数字，如“一分钟后”、“两小时后”）
+  const relative = timing.match(/([0-9]+|[一二两三四五六七八九十]+|半)\s*(分钟|小时|天)后/);
   if (relative) {
-    const amount = Number(relative[1]);
-    const unitMs = relative[2] === '分钟' ? 60000 : relative[2] === '小时' ? 3600000 : 86400000;
-    due = new Date(now.getTime() + amount * unitMs);
-    return { title, dueAt: due.toISOString(), sourceText: raw };
+    const amount = parseChineseNumber(relative[1]);
+    if (amount != null && amount > 0) {
+      const unitMs = relative[2] === '分钟' ? 60000 : relative[2] === '小时' ? 3600000 : 86400000;
+      due = new Date(now.getTime() + amount * unitMs);
+      return { title, dueAt: due.toISOString(), sourceText: raw };
+    }
   }
 
   // 3. 后天 / 明天 / 今天
@@ -115,8 +140,13 @@ export function parseReminderLocally(text, now = new Date()) {
  */
 const TASK_INTENT_GATE = /(提醒我|提醒一下|记得提醒|提醒我一下|叫我|定个|设置[一个]?|设个|闹钟|定时|待办|备忘|任务|每天|每日|每周|工作日|到点|分钟后|小时后|天后|取消.*(提醒|任务|闹钟)|别提醒我|不用提醒|别再提醒)/;
 
+// 疑问/质问/抱怨语句（例如“你还是没有提醒我”、“为什么没提醒”、“怎么没提醒”），属于用户反馈，并非新建任务
+const NOT_TASK_INTENT = /(你?还是?没有提醒|没提醒|未提醒|为什么不提醒|怎么没提醒|怎么还没提醒|并没有提醒|你都没提醒|忘记提醒我了|忘了提醒)/;
+
 export function looksLikeTaskIntent(message) {
-  return TASK_INTENT_GATE.test(String(message || ''));
+  const str = String(message || '');
+  if (NOT_TASK_INTENT.test(str)) return false;
+  return TASK_INTENT_GATE.test(str);
 }
 
 function extractJsonObject(text) {

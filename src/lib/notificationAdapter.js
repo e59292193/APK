@@ -128,7 +128,11 @@ export function createNotificationAdapter() {
             sound: true,
             ...(Platform.OS === 'android' ? { channelId: CHANNEL_ID } : {}),
           },
-          trigger: targetDate,
+          trigger: {
+            type: Notifications.SchedulableTriggerInputTypes?.DATE || 'date',
+            date: targetDate,
+            ...(Platform.OS === 'android' ? { channelId: CHANNEL_ID } : {}),
+          },
         });
 
         if (taskId && id) {

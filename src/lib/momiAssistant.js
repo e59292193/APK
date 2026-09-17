@@ -231,6 +231,14 @@ export async function fetchAssistantContext(message = '', userId = null) {
   };
 }
 
+export function stripPromptArtifacts(text) {
+  if (!text) return '';
+  return String(text)
+    .replace(/^(\s*\[\s*(?:历史\s*assistant\s*文案[，；\s]*|事实权重\s*=\s*0[，；\s]*|仅供(?:语气)?连续(?:性)?[，；\s]*)+\]\s*)+/gi, '')
+    .replace(/\[(?:历史\s*assistant\s*文案|事实权重\s*=\s*0|仅供(?:语气)?连续)[^\]]*\]/gi, '')
+    .trim();
+}
+
 function parseAssistantOutput(text) {
   const raw = String(text || '');
   const match = raw.match(/<momi_meta>([\s\S]*?)<\/momi_meta>/i);
@@ -243,8 +251,9 @@ function parseAssistantOutput(text) {
       console.warn('[momiAssistant] 模型元数据解析失败:', safeErrorCode(error));
     }
   }
+  const strippedMeta = raw.replace(/\s*<momi_meta>[\s\S]*?<\/momi_meta>\s*/gi, '').trim();
   return {
-    content: raw.replace(/\s*<momi_meta>[\s\S]*?<\/momi_meta>\s*/gi, '').trim(),
+    content: stripPromptArtifacts(strippedMeta),
     rudeness,
   };
 }
@@ -268,7 +277,7 @@ export function historyToMessages(history, { maxMessages = 16, maxImages = 2 } =
     if (isMomi) {
       out.push({
         role: 'assistant',
-        content: `[历史 assistant 文案，仅供语气连续；事实权重=0] ${item.content || ''}`,
+        content: stripPromptArtifacts(item.content || ''),
       });
       continue;
     }

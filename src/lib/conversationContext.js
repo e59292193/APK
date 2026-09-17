@@ -239,9 +239,13 @@ export async function buildConversationContext({
     const isMomi = item.sender_type === 'assistant' || item.sender === 'momi';
     const tag = item.source === 'main_chat' ? `[情侣主聊天/${item.sender}]` : `[momi助手/${item.sender}]`;
     if (isMomi) {
+      const pure = String(item.content || '')
+        .replace(/^(\s*\[\s*(?:历史\s*assistant\s*文案[，；\s]*|事实权重\s*=\s*0[，；\s]*|仅供(?:语气)?连续(?:性)?[，；\s]*)+\]\s*)+/gi, '')
+        .replace(/\[(?:历史\s*assistant\s*文案|事实权重\s*=\s*0|仅供(?:语气)?连续)[^\]]*\]/gi, '')
+        .trim();
       return {
         role: 'assistant',
-        content: `[历史 assistant 文案；仅供连续性；事实权重=0] ${item.content}`,
+        content: pure,
       };
     }
     return { role: 'user', content: `${tag}: ${item.content}` };
