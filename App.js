@@ -273,7 +273,7 @@ function MainApp() {
         {full.screen === 'EphemeralNote' ? <EphemeralNoteScreen userId={userId} onBack={closeFullscreen} /> : null}
         {full.screen === 'VoiceMailbox' ? <VoiceMailboxScreen userId={userId} onBack={closeFullscreen} /> : null}
         {full.screen === 'MomiKitchen' ? <MomiKitchenScreen userId={userId} onBack={closeFullscreen} onNavigateMomiAssistant={() => openFullscreen('MomiAssistant')} /> : null}
-        {full.screen === 'MomiAssistant' ? <MomiAssistantScreen userId={userId} onBack={closeFullscreen} onOpenAISettings={() => openFullscreen('MomiAISettings', { from: 'MomiAssistant' })} onOpenNotebook={() => openFullscreen('MomiNotebook')} /> : null}
+        {full.screen === 'MomiAssistant' ? <MomiAssistantScreen userId={userId} onBack={closeFullscreen} onOpenAISettings={() => openFullscreen('MomiAISettings', { from: 'MomiAssistant' })} /> : null}
         {full.screen === 'MomiNotebook' ? <MomiNotebookScreen userId={userId} onBack={() => openFullscreen('MomiAssistant')} /> : null}
         {(full.screen === 'MomiAISettings' || full.screen === 'MomiSettings') ? <MomiAISettingsScreen userId={userId} onBack={() => openFullscreen(params?.from === 'MomiAssistant' ? 'MomiAssistant' : 'Settings')} onOpenNotebook={() => openFullscreen('MomiNotebook')} /> : null}
         {full.screen === 'Settings' ? <SettingsScreen userId={userId} onBack={closeFullscreen} onLogout={handleLogout} onNavigateThemeSelector={() => openFullscreen('ThemeSelector')} onNavigateAISettings={() => openFullscreen('MomiAISettings', { from: 'Settings' })} /> : null}
