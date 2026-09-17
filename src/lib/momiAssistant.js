@@ -184,7 +184,7 @@ export function buildSystemPrompt(context = {}) {
     : '';
 
   const newsResult = context.preciseData?.intent?.intent === 'news' ? context.preciseData.intent.data : null;
-  const newsBlock = context.preciseData?.intent?.intent === 'news'
+  const newsBlock = newsResult
     ? (newsResult.success && Array.isArray(newsResult.items) && newsResult.items.length > 0
       ? `\n\n【实时新闻热榜（本轮刚联网抓取的真实数据）】\n${newsResult.formattedText}\n【回答硬性约束】本轮上下文包含刚联网抓取的真实热榜！请用 momi 自己的语气挑出 3-6 条重点做简要总结，并说明来源与抓取时间；热榜是实时数据，若用户问的是“昨天/过去某天”，如实说明这是最新热榜；绝对禁止说“我查不到新闻”“我没有联网能力”，也禁止编造榜单之外的新闻。`
       : `\n\n【新闻热榜拉取失败】\n${newsResult.formattedText || '网络暂时不通'}\n【回答硬性约束】诚实告知“刚刚联网拉取失败了，稍后再问我一次哦 🐾”，绝对禁止编造新闻内容，也绝对禁止说“我没有联网能力”。`)
