@@ -349,4 +349,9 @@ REVOKE EXECUTE ON FUNCTION public.claim_momi_chat_job(text, integer) FROM PUBLIC
 REVOKE EXECUTE ON FUNCTION public.complete_momi_chat_job(uuid, text, text, text) FROM PUBLIC, anon, authenticated;
 REVOKE EXECUTE ON FUNCTION public.fail_momi_chat_job(uuid, text, text, boolean, integer) FROM PUBLIC, anon, authenticated;
 
+-- 撤销 PUBLIC 默认权限后，必须显式允许服务端 worker 的 service_role 调用。
+GRANT EXECUTE ON FUNCTION public.claim_momi_chat_job(text, integer) TO service_role;
+GRANT EXECUTE ON FUNCTION public.complete_momi_chat_job(uuid, text, text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.fail_momi_chat_job(uuid, text, text, boolean, integer) TO service_role;
+
 NOTIFY pgrst, 'reload schema';
