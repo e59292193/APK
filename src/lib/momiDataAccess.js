@@ -13,6 +13,9 @@
 //
 // 表名字段名均已核对 src/lib/*_schema.sql（checkin/kitchen/momi/gomoku/drawGuess/ephemeral，
 // trips/trip_entries 见 checkin_schema.sql 第 6/7 节）。
+//
+// V4：新增 news 意图（实时新闻热榜联网查询）；
+//     修正 capsules 规则误吞“新闻”（“新闻”含“信”字，旧规则会错路由到时光胶囊）。
 // ═══════════════════════════════════════════════════════
 
 import { supabase } from './supabase';
@@ -580,6 +583,9 @@ export async function getDataDigest({ forceRefresh = false } = {}) {
 
 /**
  * 意图路由关键词规则：命中则先查库再把结果注入本轮上下文（不必每次调 LLM）。
+ * 注意规则顺序：news 必须放在 capsules 与 chat_history 之前 ——
+ * “昨天发生的时事新闻” 既含“信”（旧 capsules 规则）又命中“昨天…发”（chat_history 规则），
+ * 不前置会被错误路由成查信件/查聊天记录。
  */
 export const INTENT_RULES = [
   { intent: 'checkin_recent', pattern: /最近.*(打卡|记录)/, run: () => getRecentCheckins(10) },
@@ -592,8 +598,17 @@ export const INTENT_RULES = [
   { intent: 'trips', pattern: /足迹|旅行|旅游|去过|出行|手账|游记/, run: () => getTripsSummary() },
   { intent: 'ephemeral', pattern: /小纸条|纸条|语音信箱/, run: () => getEphemeralSummary() },
   {
+    intent: 'news',
+    pattern: /新闻|时事|热搜|头条|热点|大事|发生了什么|最近发生|天下事|资讯/,
+    run: async () => {
+      const { getLatestNews } = require('./webSearchService');
+      return getLatestNews({ maxItems: 12 });
+    },
+  },
+  {
     intent: 'capsules',
-    pattern: /信|胶囊|时光/,
+    // 注意：不能再单独匹配“信”字 —— “新闻/相信/信心”等词都含“信”，会误路由
+    pattern: /胶囊|时光|信件|书信|情书|写信|拆信|未拆|已拆/,
     run: async () => ({
       opened: await getOpenedCapsulesSummary(5),
       unopenedCount: await getUnopenedCapsuleCount(),
