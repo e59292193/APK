@@ -1,4 +1,5 @@
 // momi 独立陪伴界面 V2：识图 / 情绪养成 / 主动消息 / 长按记忆 / 聊天内发布任务
+// V4：隐藏顶栏「小本本」入口（功能与路由完整保留，可从 momi 设置进入）
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator, Alert, FlatList, Image,
@@ -34,7 +35,7 @@ function messageImages(item) {
   return Array.isArray(item?.image_urls) ? item.image_urls.filter(Boolean) : [];
 }
 
-export default function MomiAssistantScreen({ userId, onBack, onNavigateSettings, onOpenAISettings, onOpenNotebook }) {
+export default function MomiAssistantScreen({ userId, onBack, onNavigateSettings, onOpenAISettings }) {
   const insets = useSafeAreaInsets();
   // 用原始键盘高度判断「键盘是否弹起」（决定输入框底部内边距）；
   // 自适应补偿值在 resize 模式下约为 0，不能用于该判断。
@@ -197,7 +198,6 @@ export default function MomiAssistantScreen({ userId, onBack, onNavigateSettings
         subtitle={`陪伴第 ${companionDays} 天 · ${MOOD_EMOJI[state?.mood] || '😌'} ${state?.mood || 'calm'}`}
         showBack onBack={onBack}
         rightAction={<View style={styles.headerActions}>
-          {onOpenNotebook ? <TouchableOpacity style={styles.headerButton} onPress={onOpenNotebook}><Ionicons name="book-outline" size={20} color={colors.primary} /></TouchableOpacity> : null}
           {handleOpenSettings ? <TouchableOpacity style={styles.headerButton} onPress={handleOpenSettings}><Ionicons name="settings-outline" size={20} color={colors.textSecondary} /></TouchableOpacity> : null}
         </View>}
       />
