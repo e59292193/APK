@@ -5,13 +5,15 @@
 // V5：所有回复路径共享 memoryGrounding；只有已持久化 user message 可写长期记忆。
 // ═══════════════════════════════════════════════════════
 
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { File } from 'expo-file-system';
 import { supabase } from './supabase';
-import { fetchWithTimeout } from './fetchWithTimeout';
 import { sendChatCompletion, localUriToDataUrl, compressImageForAI } from './aiProvider';
 import { queryByIntent, queryRecipeIfAsked, getDataDigest } from './momiDataAccess';
 import { buildConversationContext } from './conversationContext';
+import {
+  loadDurableAssistantMessages,
+  saveDurableAssistantMessage,
+} from './momiAssistantMessageStore';
 import {
   MOMI_PERSONA_CORE,
   DATA_CAPABILITIES_BLOCK,
@@ -34,7 +36,6 @@ import {
 
 export const COUPLE_ID = 'momo_and_baomi';
 export const MOMI_CHAT_BUCKET = 'momi-chat';
-const ASSISTANT_LOCAL_CACHE_KEY = '@momi_assistant_messages_local';
 const EMPTY_MEMORY_GROUNDING = Object.freeze({
   state: 'none',
   usedCount: 0,
@@ -43,28 +44,6 @@ const EMPTY_MEMORY_GROUNDING = Object.freeze({
 
 function safeErrorCode(error) {
   return String(error?.code || error?.name || 'UNKNOWN').slice(0, 80);
-}
-
-async function getLocalAssistantMessages() {
-  try {
-    const raw = await AsyncStorage.getItem(ASSISTANT_LOCAL_CACHE_KEY);
-    return raw ? JSON.parse(raw) : [];
-  } catch (error) {
-    console.warn('[momiAssistant] 读取本地消息失败:', safeErrorCode(error));
-    return [];
-  }
-}
-
-async function appendLocalAssistantMessage(msg) {
-  if (!msg) return;
-  try {
-    const list = await getLocalAssistantMessages();
-    if (list.some((m) => m.id === msg.id)) return;
-    list.push(msg);
-    await AsyncStorage.setItem(ASSISTANT_LOCAL_CACHE_KEY, JSON.stringify(list.slice(-200)));
-  } catch (error) {
-    console.warn('[momiAssistant] 缓存本地消息异常:', safeErrorCode(error));
-  }
 }
 
 /**
@@ -205,7 +184,7 @@ export function buildSystemPrompt(context = {}) {
     : '';
 
   const newsResult = context.preciseData?.intent?.intent === 'news' ? context.preciseData.intent.data : null;
-  const newsBlock = newsResult
+  const newsBlock = context.preciseData?.intent?.intent === 'news'
     ? (newsResult.success && Array.isArray(newsResult.items) && newsResult.items.length > 0
       ? `\n\n【实时新闻热榜（本轮刚联网抓取的真实数据）】\n${newsResult.formattedText}\n【回答硬性约束】本轮上下文包含刚联网抓取的真实热榜！请用 momi 自己的语气挑出 3-6 条重点做简要总结，并说明来源与抓取时间；热榜是实时数据，若用户问的是“昨天/过去某天”，如实说明这是最新热榜；绝对禁止说“我查不到新闻”“我没有联网能力”，也禁止编造榜单之外的新闻。`
       : `\n\n【新闻热榜拉取失败】\n${newsResult.formattedText || '网络暂时不通'}\n【回答硬性约束】诚实告知“刚刚联网拉取失败了，稍后再问我一次哦 🐾”，绝对禁止编造新闻内容，也绝对禁止说“我没有联网能力”。`)
@@ -585,80 +564,14 @@ export async function chatWithMomi({
 }
 
 /**
- * 读取 momi 独立聊天历史（云端优先，异常时本地缓存）。
- * V5 的离线队列、稳定合并与 server_sequence 将由消息存储提交单独完成。
+ * 兼容旧 API：统一委托 durable store，保留调用方签名。
  */
 export async function fetchAssistantMessages(limit = 80) {
-  try {
-    const { data, error } = await fetchWithTimeout(() =>
-      supabase
-        .from('momi_assistant_messages')
-        .select('*')
-        .eq('couple_id', COUPLE_ID)
-        .order('created_at', { ascending: true })
-        .limit(limit)
-    );
-    if (!error && data) {
-      try {
-        await AsyncStorage.setItem(ASSISTANT_LOCAL_CACHE_KEY, JSON.stringify(data));
-      } catch (storageError) {
-        console.warn('[momiAssistant] 保存云端历史缓存失败:', safeErrorCode(storageError));
-      }
-      return data;
-    }
-    if (error) throw error;
-  } catch (error) {
-    console.warn('[momiAssistant] 云端拉取历史失败，切换本地:', safeErrorCode(error));
-  }
-  return (await getLocalAssistantMessages()).slice(-limit);
+  return loadDurableAssistantMessages(limit);
 }
 
-/**
- * 云端 + 本地双写；支持图片、多图、主动消息及触发源。
- * 云端失败时本地保存，但会明确 console.warn，不再静默。
- */
-export async function saveAssistantMessage({
-  sender,
-  content = '',
-  imageUrls = [],
-  imagePaths = [],
-  isProactive = false,
-  triggerSource = 'assistant',
-}) {
-  const now = new Date().toISOString();
-  const contentType = imageUrls.length ? (content ? 'mixed' : 'image') : 'text';
-  const localId = `momi_msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  const payload = {
-    couple_id: COUPLE_ID,
-    sender,
-    content,
-    image_urls: imageUrls,
-    image_paths: imagePaths.filter(Boolean),
-    content_type: contentType,
-    is_proactive: Boolean(isProactive),
-    trigger_source: triggerSource,
-  };
-  const fallback = { id: localId, ...payload, created_at: now };
-
-  try {
-    const { data, error } = await fetchWithTimeout(() =>
-      supabase.from('momi_assistant_messages').insert([payload]).select()
-    );
-    if (!error && data?.[0]) {
-      await appendLocalAssistantMessage(data[0]);
-      return data[0];
-    }
-    if (error) {
-      if (error.code === '42703' || error.code === '42P01') {
-        console.error('[momiAssistant] 请先执行 momi_upgrade_schema.sql（消息新字段/表尚不存在）');
-      }
-      console.warn('[momiAssistant] 云端保存消息失败，已保存在本地:', safeErrorCode(error));
-    }
-  } catch (error) {
-    console.warn('[momiAssistant] 保存消息网络异常，已保存在本地:', safeErrorCode(error));
-  }
-  await appendLocalAssistantMessage(fallback);
-  return fallback;
+export async function saveAssistantMessage(input = {}) {
+  return saveDurableAssistantMessage(input);
 }
 
 // 保留旧导出名，内部转给新的结构化记忆模块。
