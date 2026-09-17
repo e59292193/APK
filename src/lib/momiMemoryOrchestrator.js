@@ -43,7 +43,7 @@ const VALID_SCOPES = new Set(['private', 'couple']);
 const AUTHORITATIVE_WITHOUT_MESSAGE = new Set(['structured_data', 'seed', 'verified_system_event']);
 const USER_EVIDENCE_SOURCES = new Set(['user_message', 'explicit_command']);
 const HARD_SENSITIVE_PATTERN = /(密码|验证码|口令|token|密钥|secret|银行卡|信用卡|支付信息|身份证号|精确位置|实时位置)/i;
-const HYPOTHETICAL_PATTERN = /(^|[，,。\s])(如果|假如|要是|万一|也许|可能|开玩笑|假设)([，,。\s]|$)/;
+const HYPOTHETICAL_PATTERN = /(如果|假如|要是|万一|也许|可能|开玩笑|假设)/;
 const THIRD_PARTY_PATTERN = /(momo|苞米|他|她|ta)\s*(说|提过|告诉我)/i;
 
 const SYNONYM_RULES = [
@@ -184,10 +184,10 @@ export function extractMemoryOperations(message, context = {}) {
 
   const isCouple = /^我们/.test(evidence) || /^我们/.test(rawMessage);
   const category = inferMemoryCategory(evidence);
-  let keySource = evidence;
+  let memoryKey = buildMemoryKey(evidence, category);
   if (correctionMatch) {
     const previousEntity = inferMemoryEntity(correctionMatch[1]);
-    keySource = `${correctionMatch[2]}${previousEntity === 'general' ? '' : previousEntity}`;
+    memoryKey = `${category}:${previousEntity}`;
   }
 
   return [{
@@ -196,7 +196,7 @@ export function extractMemoryOperations(message, context = {}) {
     subject_user_id: isCouple ? null : actorId,
     visibility_scope: isCouple ? 'couple' : 'private',
     category,
-    memory_key: buildMemoryKey(keySource, category),
+    memory_key: memoryKey,
     memory_value: correctionMatch ? correctionMatch[2].trim() : evidence,
     confidence: explicitMatch ? 0.98 : 0.88,
     importance: explicitMatch ? 5 : 3,
