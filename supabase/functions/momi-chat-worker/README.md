@@ -7,7 +7,7 @@
 
 `momi-chat-worker` 从 `momi_chat_jobs` 原子领取任务，在 App 页面关闭或进程被杀后继续生成 momi 回复：
 
-1. `claim_momi_chat_job`：`SKIP LOCKED` + lease 领取一条任务。
+1. `claim_momi_chat_job`：`SKIP LOCKED` + lease 领取一条任务；过期 `processing` lease 可由下一次 claim 回收。
 2. 回查同一 couple 的 canonical user message。
 3. 读取短期历史与经过硬过滤的可信记忆；历史 assistant 文案事实权重为 0。
 4. 调用服务端配置的 OpenAI-compatible HTTPS 接口。
@@ -18,12 +18,12 @@
 
 ## 前置条件
 
-先备份数据库，再在 Supabase SQL Editor **按顺序**执行：
+正式迁移以 `supabase/migrations` 为唯一部署来源。先备份数据库，再**按顺序**执行：
 
-1. `src/lib/momi_v5_migration.sql`
-2. `src/lib/momi_v5_rpc_migration.sql`
+1. `supabase/migrations/0007_momi_v5_memory_history.sql`
+2. `supabase/migrations/0008_momi_v5_atomic_rpc.sql`
 
-两份 SQL 当前都只是仓库文件；没有自动应用到线上。
+全新或迁移历史完整的环境可由 Supabase CLI 应用待执行迁移；已有手工迁移历史的项目，应先核对记录，再在 SQL Editor 逐份执行上述文件。`src/lib/momi_v5_*.sql` 是旧兼容副本，不得替代正式迁移。两份正式 SQL 当前仍只是仓库文件；没有自动应用到线上。
 
 只做结构检查（不输出消息正文）：
 
@@ -128,7 +128,7 @@ from (
 
 ## 失败与回滚
 
-- 模型超时、429、5xx：任务进入 `retryable`，退避最长 15 分钟。
+- 模型超时、429、5xx：任务进入 `retryable`，退避最长 15 分钟；worker 崩溃后的过期 `processing` lease 会被下一次 claim 回收。
 - 非重试 4xx、无效 actor、源消息不存在：任务进入 `failed`。
 - 紧急停用：先关闭 scheduler，再删除/停用 Edge Function；数据库消息、outbox 与 job 均不会被删除。
 - 不要手工把失败任务批量改成 `completed`。修复配置后，仅对确认可重试的任务改回 `retryable`。
