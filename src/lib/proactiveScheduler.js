@@ -490,9 +490,9 @@ export function startForegroundProactiveScheduler({ userId, onMessage }) {
             lastRunTime = nowMs;
             run();
           }
-        });
-      }
-    });
+        }
+      });
+    }
   } catch {}
 
   return () => {
