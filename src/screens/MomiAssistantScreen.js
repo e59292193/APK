@@ -1,5 +1,10 @@
-// momi 独立陪伴界面 V5：可信记忆 / 幂等历史 / 离线恢复 / 聊天内任务
-// V4：隐藏顶栏「小本本」入口（功能与路由完整保留，可从 momi 设置进入）
+// momi 独立陪伴界面 V6：乐观渲染 / 流式回复 / 可信记忆 / 幂等历史 / 离线恢复 / 聊天内任务
+// V6 变更：
+//   1) 发送后立即渲染自己的气泡，不等云端/本地写入（乐观 UI）
+//   2) momi 回复流式逐字上屏（50ms 节流，避免频繁 setState）
+//   3) 首屏先画本地持久历史，状态/头像/记忆维护全部后台化
+//   4) 彻底移除长按「写进 momi 的小本本」入口
+//      （小本本页面、路由与设置页入口完整保留）
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator, Alert, FlatList, Image, Platform,
@@ -25,7 +30,7 @@ import {
 } from '../lib/momiAssistantMessageStore';
 import { resolveCurrentActor } from '../lib/auth';
 import { getMomiState, MOOD_EMOJI, GROWTH_THRESHOLDS } from '../lib/momiState';
-import { createManualMemory, runMemoryMaintenance } from '../lib/momiMemory';
+import { runMemoryMaintenance } from '../lib/momiMemory';
 import { formatTaskReceipt } from '../lib/momiTasks';
 import { pickImage } from '../lib/imagePicker';
 import { fetchAllAvatars } from '../lib/avatarService';
@@ -39,6 +44,12 @@ import {
 import { useRawKeyboardHeight } from '../hooks/useKeyboardHeight';
 
 const COUPLE_ID = 'momo_and_baomi';
+/** 流式渲染节流：每 50ms 最多一次 setState */
+const STREAM_FLUSH_MS = 50;
+/** 首屏历史条数（原 80，减少首帧渲染开销） */
+const HISTORY_LIMIT = 60;
+/** 送给模型的上下文条数（原 16） */
+const CONTEXT_LIMIT = 12;
 
 function safeErrorCode(error) {
   return String(error?.code || error?.name || 'UNKNOWN').slice(0, 80);
@@ -52,57 +63,64 @@ function messageImages(item) {
   return Array.isArray(item?.image_urls) ? item.image_urls.filter(Boolean) : [];
 }
 
+function syncLabelOf(item) {
+  if (item?.status === 'sending') return '发送中';
+  if (item?.status === 'pending') return '待同步';
+  if (item?.status === 'failed') return '同步失败';
+  return '';
+}
+
 const AssistantMessageItem = React.memo(function AssistantMessageItem({
   item,
   userId,
   avatars,
   colors,
   styles,
-  rememberText,
 }) {
   const isMomi = item.sender === 'momi';
   const isMe = item.sender === userId;
   const images = messageImages(item);
-  const syncLabel = item.status === 'pending' ? '待同步' : (item.status === 'failed' ? '同步失败' : '');
+  const syncLabel = syncLabelOf(item);
   const displayContent = stripPromptArtifacts(item.content);
 
   return (
-    <TouchableOpacity activeOpacity={0.9} onLongPress={() => rememberText(item)} delayLongPress={450}>
-      <View style={[styles.messageRow, isMe && styles.messageRowMe]}>
-        {!isMe ? (
-          <Avatar
-            uri={isMomi ? avatars.momi : avatars[item.sender]}
-            fallback={isMomi ? '🐾' : item.sender === 'momo' ? 'M' : '苞'}
-            size={36}
-          />
-        ) : null}
-        <View style={[styles.messageBody, isMe && styles.messageBodyMe]}>
-          <View style={[styles.metaRow, isMe && styles.metaRowMe]}>
-            <Text style={[styles.sender, isMomi && { color: colors.primary }]}>{isMe ? '我' : item.sender}</Text>
-            {item.is_proactive ? (
-              <Text style={styles.proactiveBadge}>
-                {item.trigger_source === 'scheduled_reminder' ? '提醒' : '主动来找你'}
-              </Text>
-            ) : null}
-            {syncLabel ? <Text style={styles.syncBadge}>{syncLabel}</Text> : null}
-            <Text style={styles.time}>{formatLocalTime(item.created_at)}</Text>
-          </View>
-          <View style={[styles.bubble, isMe ? styles.myBubble : isMomi ? styles.momiBubble : styles.otherBubble]}>
-            {images.length ? (
-              <View style={styles.bubbleImages}>
-                {images.map((url, index) => (
-                  <Image key={`${url}-${index}`} source={{ uri: url }} style={styles.bubbleImage} resizeMode="cover" />
-                ))}
-              </View>
-            ) : null}
-            {displayContent ? (
-              <Text style={[styles.bubbleText, isMe && styles.myBubbleText]}>{displayContent}</Text>
-            ) : null}
-          </View>
+    <View style={[styles.messageRow, isMe && styles.messageRowMe]}>
+      {!isMe ? (
+        <Avatar
+          uri={isMomi ? avatars.momi : avatars[item.sender]}
+          fallback={isMomi ? '🐾' : item.sender === 'momo' ? 'M' : '苞'}
+          size={36}
+        />
+      ) : null}
+      <View style={[styles.messageBody, isMe && styles.messageBodyMe]}>
+        <View style={[styles.metaRow, isMe && styles.metaRowMe]}>
+          <Text style={[styles.sender, isMomi && { color: colors.primary }]}>{isMe ? '我' : item.sender}</Text>
+          {item.is_proactive ? (
+            <Text style={styles.proactiveBadge}>
+              {item.trigger_source === 'scheduled_reminder' ? '提醒' : '主动来找你'}
+            </Text>
+          ) : null}
+          {syncLabel ? <Text style={styles.syncBadge}>{syncLabel}</Text> : null}
+          <Text style={styles.time}>{formatLocalTime(item.created_at)}</Text>
         </View>
-        {isMe ? <Avatar uri={avatars[userId]} fallback={userId === 'momo' ? 'M' : '苞'} size={36} /> : null}
+        <View style={[styles.bubble, isMe ? styles.myBubble : isMomi ? styles.momiBubble : styles.otherBubble]}>
+          {images.length ? (
+            <View style={styles.bubbleImages}>
+              {images.map((url, index) => (
+                <Image key={`${url}-${index}`} source={{ uri: url }} style={styles.bubbleImage} resizeMode="cover" />
+              ))}
+            </View>
+          ) : null}
+          {displayContent ? (
+            <Text style={[styles.bubbleText, isMe && styles.myBubbleText]}>
+              {displayContent}
+              {item.__streaming ? <Text style={styles.caret}> ▌</Text> : null}
+            </Text>
+          ) : null}
+        </View>
       </View>
-    </TouchableOpacity>
+      {isMe ? <Avatar uri={avatars[userId]} fallback={userId === 'momo' ? 'M' : '苞'} size={36} /> : null}
+    </View>
   );
 });
 
@@ -124,30 +142,64 @@ export default function MomiAssistantScreen({ userId, onBack, onNavigateSettings
   const [sending, setSending] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [toast, setToast] = useState('');
+  // 乐观渲染：本地草稿气泡 + 流式回复
+  const [draftMessage, setDraftMessage] = useState(null);
+  const [streamingReply, setStreamingReply] = useState('');
+  const streamBufferRef = useRef('');
+  const streamTimerRef = useRef(null);
+
+  const scrollToEnd = useCallback((delay = 60) => {
+    setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), delay);
+  }, []);
 
   const appendMerged = useCallback((row) => {
     if (!row) return;
     setMessages((previous) => mergeAssistantMessages(previous, [row]));
-    setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 80);
+    scrollToEnd(80);
+  }, [scrollToEnd]);
+
+  const resetStream = useCallback(() => {
+    if (streamTimerRef.current) {
+      clearTimeout(streamTimerRef.current);
+      streamTimerRef.current = null;
+    }
+    streamBufferRef.current = '';
+    setStreamingReply('');
+  }, []);
+
+  // 流式 token 入口：累加到 buffer，每 50ms 最多刷一次，避免逐字 setState 掉帧
+  const pushStreamToken = useCallback((chunk) => {
+    if (!chunk) return;
+    streamBufferRef.current += String(chunk);
+    if (streamTimerRef.current) return;
+    streamTimerRef.current = setTimeout(() => {
+      streamTimerRef.current = null;
+      setStreamingReply(streamBufferRef.current);
+    }, STREAM_FLUSH_MS);
+  }, []);
+
+  useEffect(() => () => {
+    if (streamTimerRef.current) clearTimeout(streamTimerRef.current);
   }, []);
 
   const refreshHistory = useCallback(async () => {
-    const history = await loadDurableAssistantMessages(80);
+    const history = await loadDurableAssistantMessages(HISTORY_LIMIT);
     setMessages(history);
     return history;
   }, []);
 
+  // 首屏：先用本地持久历史画出来（毫秒级），其余全部后台补
   const load = useCallback(async () => {
-    const [history, currentState, currentAvatars] = await Promise.all([
-      loadDurableAssistantMessages(80),
-      getMomiState(),
-      fetchAllAvatars(),
-    ]);
+    const history = await loadDurableAssistantMessages(HISTORY_LIMIT);
     setMessages(history);
-    setState(currentState);
-    setAvatars(currentAvatars);
     setLoading(false);
 
+    getMomiState()
+      .then(setState)
+      .catch((error) => console.warn('[MomiAssistantScreen] 状态加载失败:', safeErrorCode(error)));
+    fetchAllAvatars()
+      .then(setAvatars)
+      .catch((error) => console.warn('[MomiAssistantScreen] 头像加载失败:', safeErrorCode(error)));
     ensureIdentitySeeds().catch((error) => {
       console.warn('[MomiAssistantScreen] 人格种子后台同步失败:', safeErrorCode(error));
     });
@@ -208,34 +260,28 @@ export default function MomiAssistantScreen({ userId, onBack, onNavigateSettings
     setSelectedImages((previous) => [...previous, ...assets.map((asset) => asset.uri)].slice(0, 4));
   };
 
-  const rememberText = (item) => {
-    if (!item.content) return;
-    Alert.alert('写进 momi 的小本本？', `“${item.content.slice(0, 80)}”`, [
-      { text: '取消', style: 'cancel' },
-      {
-        text: '记住',
-        onPress: async () => {
-          const row = await createManualMemory({
-            subject: item.sender === 'momi' ? 'both' : item.sender,
-            memory_type: 'fact',
-            content: item.content,
-            importance: 5,
-            source_ref: item.id || null,
-          });
-          setToast(row ? '已经写进小本本啦 🐾' : '写入失败，请确认数据库迁移已执行');
-        },
-      },
-    ]);
-  };
-
   const handleSend = async () => {
     const text = inputText.trim();
     const localImages = [...selectedImages];
     if ((!text && !localImages.length) || sending) return;
+
     setSending(true);
     setInputText('');
     setSelectedImages([]);
     setUploadProgress(localImages.length ? 0.02 : 0);
+    resetStream();
+
+    // 乐观渲染：自己的气泡立即上屏，不等图片上传/持久化/云端往返
+    setDraftMessage({
+      id: `draft_${Date.now()}`,
+      __local: true,
+      sender: userId,
+      content: text,
+      image_urls: localImages,
+      created_at: new Date().toISOString(),
+      status: 'sending',
+    });
+    scrollToEnd(30);
 
     try {
       const actorId = await resolveCurrentActor(userId);
@@ -254,8 +300,9 @@ export default function MomiAssistantScreen({ userId, onBack, onNavigateSettings
         triggerSource: 'assistant',
       });
       appendMerged(userMessage);
+      setDraftMessage(null);
 
-      const recent = mergeAssistantMessages(messages, [userMessage]).slice(-16);
+      const recent = mergeAssistantMessages(messages, [userMessage]).slice(-CONTEXT_LIMIT);
       const sourceMessageId = userMessage.cloud_persisted === true ? userMessage.id : null;
       const response = await chatWithMomi({
         userId: actorId,
@@ -264,6 +311,7 @@ export default function MomiAssistantScreen({ userId, onBack, onNavigateSettings
         recentChatHistory: recent,
         triggerSource: 'assistant',
         sourceMessageId,
+        onToken: pushStreamToken,
       });
 
       let reply = response.content || response.reply;
@@ -272,11 +320,17 @@ export default function MomiAssistantScreen({ userId, onBack, onNavigateSettings
       } else if (response.taskCancelled && response.taskCancelled.count > 0) {
         const titles = (response.taskCancelled.titles || []).map((title) => `「${title}」`).join('、');
         reply = `🗑️ 已取消 ${response.taskCancelled.count} 条提醒：${titles}\n${reply || ''}`.trim();
+      } else if (response.taskNeedsTime && !reply) {
+        reply = `这件事我记下了～你想让我几点提醒你「${response.taskNeedsTime.title || '你交给我的事'}」呢？`;
+      } else if (response.taskList && !reply) {
+        reply = `当前的定时任务：\n${response.taskList.summary || ''}`.trim();
       }
       if (!response.success) {
         const action = response.errorCode === 'VISION_UNSUPPORTED' ? '请换支持识图的模型' : '可到右上角设置检查 API';
         reply = `🐾 ${response.reply || 'momi 刚才没连上'}（${action}，错误码 ${response.errorCode || 'UNKNOWN'}）`;
       }
+
+      resetStream();
 
       const generationKey = response.success && userMessage.client_message_id
         ? `momi-chat:${userMessage.client_message_id}`
@@ -300,10 +354,12 @@ export default function MomiAssistantScreen({ userId, onBack, onNavigateSettings
         setToast('消息已保存在本地，联网后会自动同步');
       }
     } catch (error) {
+      setDraftMessage(null);
       setInputText(text);
       setSelectedImages(localImages);
       Alert.alert('发送失败', `${error.message}\n\n文字和图片已保留，可重试。`);
     } finally {
+      resetStream();
       setSending(false);
       setUploadProgress(0);
     }
@@ -316,9 +372,31 @@ export default function MomiAssistantScreen({ userId, onBack, onNavigateSettings
       avatars={avatars}
       colors={colors}
       styles={styles}
-      rememberText={rememberText}
     />
   ), [userId, avatars, colors, styles]);
+
+  // 列表数据 = 已持久消息 + 乐观草稿 + 正在流式输出的 momi 气泡
+  const listData = useMemo(() => {
+    if (!draftMessage && !streamingReply) return messages;
+    const extra = [];
+    if (draftMessage) extra.push(draftMessage);
+    if (streamingReply) {
+      extra.push({
+        id: 'streaming_momi',
+        __local: true,
+        __streaming: true,
+        sender: 'momi',
+        content: streamingReply,
+        created_at: new Date().toISOString(),
+      });
+    }
+    return [...messages, ...extra];
+  }, [messages, draftMessage, streamingReply]);
+
+  const keyExtractor = useCallback(
+    (item) => (item.__local ? String(item.id) : assistantMessageStableKey(item)),
+    [],
+  );
 
   const maxExp = nextExp(state || {});
   const expRatio = Math.min(1, (state?.growth_exp || 0) / Math.max(1, maxExp));
@@ -373,13 +451,13 @@ export default function MomiAssistantScreen({ userId, onBack, onNavigateSettings
         ) : (
           <FlatList
             ref={flatListRef}
-            data={messages}
-            keyExtractor={(item) => assistantMessageStableKey(item)}
+            data={listData}
+            keyExtractor={keyExtractor}
             renderItem={renderItem}
             contentContainerStyle={[styles.listContent, { paddingBottom: 16 }]}
             {...CHAT_LIST_KEYBOARD_PROPS}
-            initialNumToRender={15}
-            maxToRenderPerBatch={10}
+            initialNumToRender={12}
+            maxToRenderPerBatch={8}
             windowSize={7}
             removeClippedSubviews={Platform.OS === 'android'}
             onLayout={() => {
@@ -392,7 +470,7 @@ export default function MomiAssistantScreen({ userId, onBack, onNavigateSettings
                 <Text style={styles.muted}>发张照片给我看，或者问问我你们的共同记录吧～</Text>
               </View>
             )}
-            ListFooterComponent={sending ? (
+            ListFooterComponent={sending && !streamingReply ? (
               <View style={styles.typing}>
                 <Text style={styles.typingText}>
                   {uploadProgress > 0 && uploadProgress < 1
@@ -498,6 +576,7 @@ const createStyles = (colors) => StyleSheet.create({
   metaRowMe: { justifyContent: 'flex-end' },
   sender: { fontSize: 11, color: colors.textSecondary, fontWeight: '600' },
   time: { fontSize: 10, color: colors.textMuted },
+  caret: { color: colors.textMuted },
   proactiveBadge: {
     fontSize: 9,
     color: colors.primary,
