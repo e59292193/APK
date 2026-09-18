@@ -2,6 +2,7 @@
 // momi AI 统一调用层 (aiProvider.js)
 // OpenAI 兼容封装 + 识图能力判定 + 分级超时 + 结构化错误码
 // V6：新增 SSE 流式输出（onToken），首字延迟从「等整段生成完」降到「首个 token」
+// 注意：XHR 必须通过 global 取用，项目 eslint env 不含 browser，直接写 XMLHttpRequest 会 no-undef
 // ═══════════════════════════════════════════════════════
 
 import { Image } from 'react-native';
@@ -46,6 +47,13 @@ function failure(errorCode, error) {
     errorCode,
     error: error || AI_ERRORS[errorCode] || '未知错误',
   };
+}
+
+/** 取当前运行环境的 XHR 构造器；不可用时返回 null，由调用方回落非流式 */
+function getXhrCtor() {
+  const scope = typeof globalThis !== 'undefined' ? globalThis : null;
+  if (scope && typeof scope.XMLHttpRequest === 'function') return scope.XMLHttpRequest;
+  return null;
 }
 
 /**
@@ -225,10 +233,16 @@ export function parseSseLine(rawLine) {
  */
 function streamChatCompletionViaXHR({ endpoint, headers, payload, timeoutMs, onToken }) {
   return new Promise((resolve) => {
+    const XhrCtor = getXhrCtor();
+    if (!XhrCtor) {
+      resolve({ unsupported: true });
+      return;
+    }
+
     let xhr = null;
     try {
-      xhr = new XMLHttpRequest();
-    } catch (err) {
+      xhr = new XhrCtor();
+    } catch {
       resolve({ unsupported: true });
       return;
     }
@@ -249,7 +263,7 @@ function streamChatCompletionViaXHR({ endpoint, headers, payload, timeoutMs, onT
       clearTimeout(timer);
       try {
         if (xhr.readyState !== 4) xhr.abort();
-      } catch (err) {
+      } catch {
         // 忽略 abort 异常
       }
       resolve(result);
@@ -272,7 +286,7 @@ function streamChatCompletionViaXHR({ endpoint, headers, payload, timeoutMs, onT
           if (onToken) {
             try {
               onToken(delta);
-            } catch (err) {
+            } catch {
               // UI 回调异常不能影响取数
             }
           }
@@ -297,7 +311,7 @@ function streamChatCompletionViaXHR({ endpoint, headers, payload, timeoutMs, onT
               if (onToken) {
                 try {
                   onToken(tail);
-                } catch (err) {
+                } catch {
                   // 忽略
                 }
               }
