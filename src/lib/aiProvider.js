@@ -1,6 +1,7 @@
 // ═══════════════════════════════════════════════════════
 // momi AI 统一调用层 (aiProvider.js)
 // OpenAI 兼容封装 + 识图能力判定 + 分级超时 + 结构化错误码
+// V6：新增 SSE 流式输出（onToken），首字延迟从「等整段生成完」降到「首个 token」
 // ═══════════════════════════════════════════════════════
 
 import { Image } from 'react-native';
@@ -157,6 +158,182 @@ function isModelNotFoundError(status, errText) {
   return false;
 }
 
+/** HTTP 失败 → 结构化错误码（流式与非流式共用同一套映射） */
+function mapHttpFailure(status, errText) {
+  const errLower = String(errText || '').toLowerCase();
+  if (
+    status === 401 ||
+    status === 403 ||
+    status === 402 ||
+    errLower.includes('insufficient_quota') ||
+    errLower.includes('quota') ||
+    errLower.includes('arrearage') ||
+    errLower.includes('balance') ||
+    errLower.includes('欠费')
+  ) {
+    return failure(AI_ERROR_CODES.AUTH_OR_BALANCE);
+  }
+  if (status === 429) {
+    return failure(AI_ERROR_CODES.RATE_LIMIT);
+  }
+  if (
+    status === 400 &&
+    (errLower.includes('image_url') ||
+      errLower.includes('multimodal') ||
+      errLower.includes('image') ||
+      errLower.includes('vision') ||
+      errLower.includes('picture'))
+  ) {
+    return failure(AI_ERROR_CODES.VISION_UNSUPPORTED);
+  }
+  if (status >= 500) {
+    return failure(AI_ERROR_CODES.SERVER_ERROR, `AI 服务异常 (${status})，请稍后再试`);
+  }
+  return failure(AI_ERROR_CODES.SERVER_ERROR, `调用失败 (${status})，请稍后再试`);
+}
+
+/**
+ * 从一行 SSE 文本里取出增量内容。
+ * OpenAI 兼容格式：data: {"choices":[{"delta":{"content":"你"}}]}
+ */
+export function parseSseLine(rawLine) {
+  const line = String(rawLine || '').trim();
+  if (!line || line.startsWith(':')) return '';
+  if (!line.startsWith('data:')) return '';
+  const payload = line.slice(5).trim();
+  if (!payload || payload === '[DONE]') return '';
+  try {
+    const json = JSON.parse(payload);
+    const choice = (json.choices && json.choices[0]) || {};
+    const delta = choice.delta || {};
+    if (typeof delta.content === 'string' && delta.content) return delta.content;
+    if (choice.message && typeof choice.message.content === 'string') return choice.message.content;
+    return '';
+  } catch {
+    // 分片还没拼完整，等下一段
+    return '';
+  }
+}
+
+/**
+ * SSE 流式请求。RN 的 fetch 不支持增量读取 body，这里用 XHR 的增量 responseText。
+ * 返回：
+ *   { ok, text }                       —— 正常读完
+ *   { timeout, text }                  —— 超时（text 可能已有部分内容）
+ *   { httpError, status, errText }     —— 服务端错误
+ *   { unsupported }                    —— 环境不支持流式，交由非流式兜底
+ */
+function streamChatCompletionViaXHR({ endpoint, headers, payload, timeoutMs, onToken }) {
+  return new Promise((resolve) => {
+    let xhr = null;
+    try {
+      xhr = new XMLHttpRequest();
+    } catch (err) {
+      resolve({ unsupported: true });
+      return;
+    }
+    if (!xhr) {
+      resolve({ unsupported: true });
+      return;
+    }
+
+    let settled = false;
+    let consumed = 0;
+    let buffer = '';
+    let full = '';
+    let sawAnyChunk = false;
+
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        if (xhr.readyState !== 4) xhr.abort();
+      } catch (err) {
+        // 忽略 abort 异常
+      }
+      resolve(result);
+    };
+
+    const timer = setTimeout(() => finish({ timeout: true, text: full }), timeoutMs);
+
+    const consume = () => {
+      const text = xhr.responseText || '';
+      if (text.length <= consumed) return;
+      buffer += text.slice(consumed);
+      consumed = text.length;
+      sawAnyChunk = true;
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (let i = 0; i < lines.length; i += 1) {
+        const delta = parseSseLine(lines[i]);
+        if (delta) {
+          full += delta;
+          if (onToken) {
+            try {
+              onToken(delta);
+            } catch (err) {
+              // UI 回调异常不能影响取数
+            }
+          }
+        }
+      }
+    };
+
+    xhr.onreadystatechange = () => {
+      if (settled) return;
+      if (xhr.readyState === 3 && xhr.status === 200) {
+        consume();
+        return;
+      }
+      if (xhr.readyState === 4) {
+        const status = xhr.status || 0;
+        if (status === 200) {
+          consume();
+          if (buffer) {
+            const tail = parseSseLine(buffer);
+            if (tail) {
+              full += tail;
+              if (onToken) {
+                try {
+                  onToken(tail);
+                } catch (err) {
+                  // 忽略
+                }
+              }
+            }
+          }
+          if (!full && !sawAnyChunk) {
+            finish({ unsupported: true });
+            return;
+          }
+          finish({ ok: true, text: full });
+          return;
+        }
+        if (status === 0) {
+          finish(full ? { timeout: true, text: full } : { unsupported: true });
+          return;
+        }
+        finish({ httpError: true, status, errText: xhr.responseText || '' });
+      }
+    };
+
+    xhr.onerror = () => finish(full ? { timeout: true, text: full } : { unsupported: true });
+    xhr.ontimeout = () => finish({ timeout: true, text: full });
+
+    try {
+      xhr.open('POST', endpoint, true);
+      Object.keys(headers).forEach((key) => xhr.setRequestHeader(key, headers[key]));
+      xhr.setRequestHeader('Accept', 'text/event-stream');
+      xhr.timeout = timeoutMs;
+      xhr.send(JSON.stringify({ ...payload, stream: true }));
+    } catch (err) {
+      console.warn('[aiProvider] 流式请求发起失败，回落非流式:', err.message);
+      finish({ unsupported: true });
+    }
+  });
+}
+
 /**
  * 执行统一的 OpenAI 兼容 Chat Completions 请求
  * @param {object} params
@@ -165,7 +342,8 @@ function isModelNotFoundError(status, errText) {
  * @param {number} [params.max_tokens=1024]
  * @param {object} [params.overrideConfig] - 用于测试连接或临时覆盖配置
  * @param {boolean} [params.requiresVision=false] - 本轮请求必须支持识图
- * @returns {Promise<{ success: boolean, text: string, error?: string, errorCode?: string, usedFallbackModel?: boolean, modelUsed?: string }>}
+ * @param {function} [params.onToken] - 传入即启用 SSE 流式，每收到一段增量文本回调一次
+ * @returns {Promise<{ success: boolean, text: string, error?: string, errorCode?: string, usedFallbackModel?: boolean, modelUsed?: string, streamed?: boolean }>}
  */
 export async function sendChatCompletion({
   messages,
@@ -174,6 +352,7 @@ export async function sendChatCompletion({
   max_tokens = 1024,
   overrideConfig = null,
   requiresVision = false,
+  onToken = null,
 }) {
   const config = overrideConfig || (await getAIConfig());
   const provider = config.provider === 'qwen' ? 'qwen' : 'deepseek';
@@ -204,28 +383,28 @@ export async function sendChatCompletion({
 
   const actualModel = resolveApiModel(provider, configuredModel, needsVision);
 
+  const buildHeaders = () => ({
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${apiKey}`,
+  });
+
+  const buildPayload = (targetModel) => ({
+    model: targetModel,
+    messages,
+    temperature,
+    top_p,
+    max_tokens,
+  });
+
   async function executeRequest(targetModel) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-      const headers = {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-      };
-
-      const payload = {
-        model: targetModel,
-        messages,
-        temperature,
-        top_p,
-        max_tokens,
-      };
-
       const res = await fetch(endpoint, {
         method: 'POST',
-        headers,
-        body: JSON.stringify(payload),
+        headers: buildHeaders(),
+        body: JSON.stringify(buildPayload(targetModel)),
         signal: controller.signal,
       });
 
@@ -238,37 +417,7 @@ export async function sendChatCompletion({
         if (isModelNotFoundError(res.status, errText)) {
           return { modelNotFound: true, status: res.status, errText };
         }
-
-        const errLower = errText.toLowerCase();
-        if (
-          res.status === 401 ||
-          res.status === 403 ||
-          res.status === 402 ||
-          errLower.includes('insufficient_quota') ||
-          errLower.includes('quota') ||
-          errLower.includes('arrearage') ||
-          errLower.includes('balance') ||
-          errLower.includes('欠费')
-        ) {
-          return failure(AI_ERROR_CODES.AUTH_OR_BALANCE);
-        }
-        if (res.status === 429) {
-          return failure(AI_ERROR_CODES.RATE_LIMIT);
-        }
-        if (
-          res.status === 400 &&
-          (errLower.includes('image_url') ||
-            errLower.includes('multimodal') ||
-            errLower.includes('image') ||
-            errLower.includes('vision') ||
-            errLower.includes('picture'))
-        ) {
-          return failure(AI_ERROR_CODES.VISION_UNSUPPORTED);
-        }
-        if (res.status >= 500) {
-          return failure(AI_ERROR_CODES.SERVER_ERROR, `AI 服务异常 (${res.status})，请稍后再试`);
-        }
-        return failure(AI_ERROR_CODES.SERVER_ERROR, `调用失败 (${res.status})，请稍后再试`);
+        return mapHttpFailure(res.status, errText);
       }
 
       const data = await res.json();
@@ -295,7 +444,56 @@ export async function sendChatCompletion({
     }
   }
 
-  let result = await executeRequest(actualModel);
+  // 流式优先：首字可见时间显著低于整段等待；失败时静默回落非流式。
+  async function executeStreamRequest(targetModel) {
+    const streamResult = await streamChatCompletionViaXHR({
+      endpoint,
+      headers: buildHeaders(),
+      payload: buildPayload(targetModel),
+      timeoutMs,
+      onToken,
+    }).catch((err) => {
+      console.warn('[aiProvider] 流式请求异常:', err.message);
+      return { unsupported: true };
+    });
+
+    if (streamResult.ok && streamResult.text) {
+      return {
+        success: true,
+        text: streamResult.text.trim(),
+        usedFallbackModel,
+        modelUsed: targetModel,
+        streamed: true,
+      };
+    }
+    if (streamResult.httpError) {
+      if (isModelNotFoundError(streamResult.status, streamResult.errText)) {
+        return { modelNotFound: true, status: streamResult.status, errText: streamResult.errText };
+      }
+      console.warn(`[aiProvider] ${provider} 流式响应异常 [${streamResult.status}]`);
+      return mapHttpFailure(streamResult.status, streamResult.errText);
+    }
+    if (streamResult.timeout && streamResult.text) {
+      // 已经有内容就不算失败，按已收到的部分回复返回
+      return {
+        success: true,
+        text: streamResult.text.trim(),
+        usedFallbackModel,
+        modelUsed: targetModel,
+        streamed: true,
+        truncated: true,
+      };
+    }
+    return null;
+  }
+
+  let result = null;
+  if (typeof onToken === 'function') {
+    result = await executeStreamRequest(actualModel);
+  }
+  if (!result) {
+    result = await executeRequest(actualModel);
+  }
 
   // 若服务端提示模型不存在，自动降级至平台标配基底模型重试一次
   if (result.modelNotFound) {
