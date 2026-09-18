@@ -1,4 +1,4 @@
-// ══════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════
 // momi 主动消息调度核心 (proactiveScheduler.js) — V6
 // 触发器矩阵 / 可降级去重 / 前台轮询 / AppState 唤醒 / 诊断与手动触发
 //
@@ -9,7 +9,9 @@
 //   3. 前台轮询 5 分钟 → 60 秒；AppState 唤醒节流 60 秒 → 10 秒。
 //   4. 冷启动补发同时覆盖云端与本地降级任务。
 //   5. 启动时重新预约未来 48 小时内的原生通知，杀进程/重启后闹钟不丢。
-// ══════════════════════════════════════════════════════
+//   6. 周期任务推进直接依赖 momiTimeParser.computeNextOccurrence，不再经由
+//      momiTasks 再导出（避免导出缺失时周期提醒只响一次就停）。
+// ═══════════════════════════════════════════════════
 
 import { supabase } from './supabase';
 import { fetchWithTimeout } from './fetchWithTimeout';
@@ -19,6 +21,7 @@ import { getProactiveSettings, getEffectiveProactiveSettings } from './momiProac
 import { getWeather, getWeatherAlert } from './weatherService';
 import { hasSentEvent, recordSentEvent } from './proactiveLog';
 import { recordProactiveDebug } from './proactiveDebug';
+import { computeNextOccurrence } from './momiTimeParser';
 
 /** 前台轮询间隔：到点提醒的最大延迟不应超过 1 分钟 */
 export const POLL_INTERVAL_MS = 60 * 1000;
@@ -133,9 +136,10 @@ async function markTaskFired(task, now) {
       await supabase.from('momi_tasks').update({ notified_at: now.toISOString(), status: 'done' }).eq('id', task.id);
       return;
     }
-    // eslint-disable-next-line global-require
-    const { computeNextOccurrence } = require('./momiTasks');
-    const next = computeNextOccurrence({ recurrence, dueAt: task.due_at }, now);
+    const next = computeNextOccurrence(
+      { recurrence, dueAt: task.due_at, weekday: task.weekday ?? null },
+      now
+    );
     if (!next) {
       await supabase.from('momi_tasks').update({ notified_at: now.toISOString(), status: 'done' }).eq('id', task.id);
       return;
