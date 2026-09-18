@@ -1,10 +1,15 @@
-// ═══════════════════════════════════════════════════════
-// momi 主动消息调度核心 (proactiveScheduler.js)
-// 触发器矩阵 / 可降级去重 / 前台 5 分钟轮询 / AppState 唤醒 / 诊断与手动触发
-// V4：云端 + 本地降级任务统一到期触发；周期任务触发后自动推进到下一次；
-//     带 ai_prompt 的任务到点时由 momi 实时生成内容；去重键按触发次维度，
-//     周期任务不会被去重拦截。
-// ═══════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════
+// momi 主动消息调度核心 (proactiveScheduler.js) — V6
+// 触发器矩阵 / 可降级去重 / 前台轮询 / AppState 唤醒 / 诊断与手动触发
+//
+// V6 关键修复：
+//   1. 到期提醒在「任何门禁之前」投递。主动消息总开关、免打扰时段、每日条数
+//      上限不再吞掉用户亲口布置的提醒（这是「定时任务从来不响」的直接原因）。
+//   2. 提醒不计入每日主动消息配额（markProactiveSent 只用于闲聊型主动消息）。
+//   3. 前台轮询 5 分钟 → 60 秒；AppState 唤醒节流 60 秒 → 10 秒。
+//   4. 冷启动补发同时覆盖云端与本地降级任务。
+//   5. 启动时重新预约未来 48 小时内的原生通知，杀进程/重启后闹钟不丢。
+// ══════════════════════════════════════════════════════
 
 import { supabase } from './supabase';
 import { fetchWithTimeout } from './fetchWithTimeout';
@@ -14,6 +19,13 @@ import { getProactiveSettings, getEffectiveProactiveSettings } from './momiProac
 import { getWeather, getWeatherAlert } from './weatherService';
 import { hasSentEvent, recordSentEvent } from './proactiveLog';
 import { recordProactiveDebug } from './proactiveDebug';
+
+/** 前台轮询间隔：到点提醒的最大延迟不应超过 1 分钟 */
+export const POLL_INTERVAL_MS = 60 * 1000;
+/** 启动时重约原生通知的时间窗 */
+export const ALARM_HORIZON_MS = 48 * 3600 * 1000;
+/** 冷启动补发窗口 */
+export const BACKFILL_WINDOW_MS = 12 * 3600 * 1000;
 
 let notificationAdapter = null;
 export function setNotificationAdapter(adapter) {
@@ -28,6 +40,9 @@ function toHHMM(d) {
 }
 function toDateStr(d) {
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+function isLocalTaskId(id) {
+  return String(id).startsWith('local_task_');
 }
 
 async function deliver({ message, eventKey, eventType, onMessage, data = {} }) {
@@ -63,7 +78,7 @@ async function deliver({ message, eventKey, eventType, onMessage, data = {} }) {
 
 /**
  * 到期任务触发：云端 momi_tasks 与本地降级任务（云端表缺失/写入失败时保存）
- * 统一按 due_at 排序取最早一条，本地任务绝不允许静默丢失。
+ * 统一按 due_at 排序取最早一条，本地任务绕不允许静默丢失。
  */
 async function dueTaskTrigger(now) {
   let cloudTask = null;
@@ -101,7 +116,7 @@ async function dueTaskTrigger(now) {
   if (!task) return null;
   return {
     task,
-    isLocal: String(task.id).startsWith('local_task_'),
+    isLocal: isLocalTaskId(task.id),
     message: `叮～你让我提醒的「${task.title}」到时间啦！别忘记哦 🐾`,
   };
 }
@@ -136,6 +151,62 @@ async function markTaskFired(task, now) {
   } catch (err) {
     console.warn('[proactiveScheduler] 标记任务触发结果异常:', err.message);
   }
+}
+
+/**
+ * 【V6 新增】到期提醒投递：在所有门禁之前执行。
+ * 用户亲口布置的提醒属于「承诺」，不属于「骚扰」，因此：
+ *   - 不受 proactiveEnabled / quiet_hours / 每日上限限制
+ *   - 不调 markProactiveSent，不占用当日主动消息配额
+ */
+async function deliverDueTasks({ userId, onMessage, now }) {
+  let due = null;
+  try {
+    due = await dueTaskTrigger(now);
+  } catch (err) {
+    console.warn('[proactiveScheduler] 到期任务判定异常:', err.message);
+  }
+  if (!due) return { sent: false, reason: 'no_due_task' };
+
+  let message = due.message;
+  // 自定义任务（如“每天早上给我发一句英语”）到点时由 momi 实时生成内容，失败回退模板文案
+  if (due.task.ai_prompt) {
+    try {
+      const generated = await chatWithMomi({
+        userId,
+        message: `（定时任务到点执行）${due.task.ai_prompt}`,
+        recentChatHistory: [],
+        triggerSource: 'scheduled',
+      });
+      if (generated?.success && generated.content) message = generated.content;
+    } catch (err) {
+      console.warn('[proactiveScheduler] 任务内容生成失败，使用模板文案:', err.message);
+    }
+  }
+
+  const row = await deliver({
+    message,
+    // 去重键带触发时间：周期任务每次触发都是新事件，不会被去重拦截
+    eventKey: `task:${due.task.id}:${String(due.task.due_at).slice(0, 16)}`,
+    eventType: 'scheduled_reminder',
+    onMessage,
+    data: { taskId: due.task.id },
+  });
+  if (!row) return { sent: false, reason: 'deduped' };
+
+  if (due.isLocal) {
+    try {
+      // eslint-disable-next-line global-require
+      const { markLocalTaskFired } = require('./momiTasks');
+      await markLocalTaskFired(due.task, now);
+    } catch (err) {
+      console.warn('[proactiveScheduler] 本地任务标记触发失败:', err.message);
+    }
+  } else {
+    await markTaskFired(due.task, now);
+  }
+
+  return { sent: true, row, task: due.task };
 }
 
 async function anniversaryTrigger(now, settings) {
@@ -209,29 +280,50 @@ function comebackTrigger(silentHours, now) {
   return null;
 }
 
+/** 冷启动补发：V6 同时覆盖云端与本地降级任务 */
 export async function checkColdStartTaskBackfill(now = new Date(), onMessage) {
   try {
-    const twelveHoursAgo = new Date(now.getTime() - 12 * 3600 * 1000).toISOString();
-    const { data, error } = await fetchWithTimeout(() =>
-      supabase
-        .from('momi_tasks')
-        .select('*')
-        .eq('couple_id', COUPLE_ID)
-        .eq('status', 'active')
-        .is('notified_at', null)
-        .gte('due_at', twelveHoursAgo)
-        .lte('due_at', now.toISOString())
-        .order('due_at', { ascending: true })
-    );
-    if (error || !Array.isArray(data) || data.length === 0) return null;
+    const windowStart = new Date(now.getTime() - BACKFILL_WINDOW_MS);
+    const tasks = [];
 
-    const eventKey = `task_backfill:${data.map((t) => t.id).sort().join('_')}`;
+    try {
+      const { data, error } = await fetchWithTimeout(() =>
+        supabase
+          .from('momi_tasks')
+          .select('*')
+          .eq('couple_id', COUPLE_ID)
+          .eq('status', 'active')
+          .is('notified_at', null)
+          .gte('due_at', windowStart.toISOString())
+          .lte('due_at', now.toISOString())
+          .order('due_at', { ascending: true })
+      );
+      if (!error && Array.isArray(data)) tasks.push(...data);
+    } catch (err) {
+      console.warn('[proactiveScheduler] 云端补发查询异常:', err.message);
+    }
+
+    let markLocalTaskFired = null;
+    try {
+      // eslint-disable-next-line global-require
+      const momiTasks = require('./momiTasks');
+      markLocalTaskFired = momiTasks.markLocalTaskFired;
+      const locals = await momiTasks.getDueLocalTasks(now);
+      tasks.push(...locals.filter((t) => new Date(t.due_at).getTime() >= windowStart.getTime()));
+    } catch (err) {
+      console.warn('[proactiveScheduler] 本地补发查询异常:', err.message);
+    }
+
+    if (tasks.length === 0) return null;
+    tasks.sort((a, b) => new Date(a.due_at) - new Date(b.due_at));
+
+    const eventKey = `task_backfill:${tasks.map((t) => t.id).sort().join('_')}`;
     let msg = '';
-    if (data.length === 1) {
-      msg = `叮～你之前让我提醒的「${data[0].title}」到时间啦！别忘记哦 🐾`;
+    if (tasks.length === 1) {
+      msg = `叮～你之前让我提醒的「${tasks[0].title}」到时间啦！别忘记哦 🐾`;
     } else {
-      const titles = data.slice(0, 3).map((t) => `「${t.title}」`).join('、');
-      msg = `有 ${data.length} 件你让我提醒的事到时间了，包括 ${titles} 等，别忘记查看哦 🐾`;
+      const titles = tasks.slice(0, 3).map((t) => `「${t.title}」`).join('、');
+      msg = `有 ${tasks.length} 件你让我提醒的事到时间了，包括 ${titles} 等，别忘记查看哦 🐾`;
     }
 
     const row = await deliver({
@@ -239,12 +331,20 @@ export async function checkColdStartTaskBackfill(now = new Date(), onMessage) {
       eventKey,
       eventType: 'scheduled_reminder',
       onMessage,
-      data: { taskIds: data.map((t) => t.id) },
+      data: { taskIds: tasks.map((t) => t.id) },
     });
 
     if (row) {
       // 一次性任务标记完成；周期任务推进到下一次（不能直接置 done，否则周期任务失效）
-      await Promise.all(data.map((t) => markTaskFired(t, now)));
+      for (const t of tasks) {
+        if (isLocalTaskId(t.id)) {
+          // eslint-disable-next-line no-await-in-loop
+          if (markLocalTaskFired) await markLocalTaskFired(t, now);
+        } else {
+          // eslint-disable-next-line no-await-in-loop
+          await markTaskFired(t, now);
+        }
+      }
       return row;
     }
   } catch (err) {
@@ -255,6 +355,16 @@ export async function checkColdStartTaskBackfill(now = new Date(), onMessage) {
 
 export async function tickProactiveScheduler({ userId, onMessage, now = new Date(), force = false }) {
   const checked = [];
+
+  // 0) scheduled_reminder：最高优先级，先于所有门禁（V6）
+  const dueResult = await deliverDueTasks({ userId, onMessage, now });
+  if (dueResult.sent) {
+    checked.push({ type: 'scheduled_reminder', hit: true });
+    await recordProactiveDebug({ sent: true, type: 'scheduled_reminder', checked });
+    return { sent: true, type: 'scheduled_reminder', row: dueResult.row };
+  }
+  checked.push({ type: 'scheduled_reminder', hit: false, reason: dueResult.reason });
+
   const settingsGetter = getEffectiveProactiveSettings || getProactiveSettings;
   const settings = await settingsGetter(userId);
 
@@ -266,57 +376,10 @@ export async function tickProactiveScheduler({ userId, onMessage, now = new Date
   const state = await getMomiState();
   const gate = canSendProactive(state, { ...settings, now });
 
-  // 门禁检查（force 模式跳过）
+  // 门禁检查（force 模式跳过）—— 只限制闲聊型主动消息，不影响上方的到期提醒
   if (!force && !gate.allowed) {
     await recordProactiveDebug({ sent: false, reason: gate.reason, gate, checked });
     return { sent: false, reason: gate.reason };
-  }
-
-  // 1) scheduled_reminder：到期提醒优先判定（云端 + 本地降级任务）
-  const due = await dueTaskTrigger(now);
-  if (due) {
-    checked.push({ type: 'scheduled_reminder', hit: true });
-    let message = due.message;
-    // 自定义任务（如“每天早上给我发一句英语”）到点时由 momi 实时生成内容，失败回退模板文案
-    if (due.task.ai_prompt) {
-      try {
-        const generated = await chatWithMomi({
-          userId,
-          message: `（定时任务到点执行）${due.task.ai_prompt}`,
-          recentChatHistory: [],
-          triggerSource: 'scheduled',
-        });
-        if (generated?.success && generated.content) message = generated.content;
-      } catch (err) {
-        console.warn('[proactiveScheduler] 任务内容生成失败，使用模板文案:', err.message);
-      }
-    }
-    const row = await deliver({
-      message,
-      // 去重键带触发时间：周期任务每次触发都是新事件，不会被去重拦截
-      eventKey: `task:${due.task.id}:${String(due.task.due_at).slice(0, 16)}`,
-      eventType: 'scheduled_reminder',
-      onMessage,
-      data: { taskId: due.task.id },
-    });
-    if (row) {
-      if (due.isLocal) {
-        try {
-          // eslint-disable-next-line global-require
-          const { markLocalTaskFired } = require('./momiTasks');
-          await markLocalTaskFired(due.task, now);
-        } catch (err) {
-          console.warn('[proactiveScheduler] 本地任务标记触发失败:', err.message);
-        }
-      } else {
-        await markTaskFired(due.task, now);
-      }
-      await markProactiveSent(state, gate.today);
-      await recordProactiveDebug({ sent: true, type: 'scheduled_reminder', gate, checked });
-      return { sent: true, type: 'scheduled_reminder', row };
-    }
-  } else {
-    checked.push({ type: 'scheduled_reminder', hit: false, reason: 'no_due_task' });
   }
 
   // 2) weather：降雨概率 >= 60% 或 12 小时降温 >= 6 度
@@ -460,24 +523,25 @@ export function startForegroundProactiveScheduler({ userId, onMessage }) {
 
   const run = () => {
     if (!disposed) {
+      lastRunTime = Date.now();
       tickProactiveScheduler({ userId, onMessage }).catch((err) =>
         console.warn('[proactiveScheduler] tick 失败:', err.message)
       );
     }
   };
 
-  // 1.5 秒后首跑并检查冷启动补发
+  // 1.2 秒后首跑：重约原生闹钟 + 冷启动补发 + 到期检查
   const startupTimer = setTimeout(() => {
-    if (!disposed) {
-      checkColdStartTaskBackfill(new Date(), onMessage).catch(() => {});
-      run();
-    }
-  }, 1500);
+    if (disposed) return;
+    rearmUpcomingTaskNotifications(new Date()).catch(() => {});
+    checkColdStartTaskBackfill(new Date(), onMessage).catch(() => {});
+    run();
+  }, 1200);
 
-  // 5 分钟轮询（原 15 分钟）
-  const timer = setInterval(run, 5 * 60 * 1000);
+  // 60 秒轮询（原 5 分钟）：到点提醒最多延迟 1 分钟
+  const timer = setInterval(run, POLL_INTERVAL_MS);
 
-  // AppState 回到 active 时立即触发（60 秒节流）
+  // AppState 回到 active 时立即触发（10 秒节流）
   let appStateSub = null;
   try {
     // eslint-disable-next-line global-require
@@ -485,11 +549,7 @@ export function startForegroundProactiveScheduler({ userId, onMessage }) {
     if (rn?.AppState?.addEventListener) {
       appStateSub = rn.AppState.addEventListener('change', (nextState) => {
         if (nextState === 'active' && !disposed) {
-          const nowMs = Date.now();
-          if (nowMs - lastRunTime >= 60000) {
-            lastRunTime = nowMs;
-            run();
-          }
+          if (Date.now() - lastRunTime >= 10000) run();
         }
       });
     }
@@ -503,15 +563,53 @@ export function startForegroundProactiveScheduler({ userId, onMessage }) {
   };
 }
 
+/**
+ * 【V6 新增】启动时重新预约未来 48 小时内的原生通知。
+ * 卸载重装、系统重启、被杀后系统清理都会丢弃已预约的闹钟，
+ * adapter 内部按 taskId 去重（duplicate_task），重复调用不会双发通知。
+ */
+export async function rearmUpcomingTaskNotifications(now = new Date()) {
+  if (!notificationAdapter?.schedule) return { rearmed: 0, reason: 'adapter_missing' };
+  try {
+    // eslint-disable-next-line global-require
+    const { listMomiTasks } = require('./momiTasks');
+    const tasks = await listMomiTasks({ status: 'active', limit: 100 });
+    const horizon = now.getTime() + ALARM_HORIZON_MS;
+    const upcoming = (Array.isArray(tasks) ? tasks : []).filter((t) => {
+      if (!t || t.notified_at) return false;
+      const ts = new Date(t.due_at).getTime();
+      return Number.isFinite(ts) && ts > now.getTime() && ts <= horizon;
+    });
+    let rearmed = 0;
+    for (const t of upcoming) {
+      // eslint-disable-next-line no-await-in-loop
+      const res = await scheduleNativeTaskNotification(t);
+      if (res?.scheduled) rearmed += 1;
+    }
+    return { rearmed, total: upcoming.length };
+  } catch (err) {
+    console.warn('[proactiveScheduler] 重新预约本地提醒失败:', err.message);
+    return { rearmed: 0, error: err.message };
+  }
+}
+
 export async function scheduleNativeTaskNotification(task) {
   if (!notificationAdapter?.schedule || !task?.due_at) return { scheduled: false, reason: 'adapter_missing' };
-  await notificationAdapter.schedule({
-    title: 'momi 提醒你 🐾',
-    body: task.title,
-    date: new Date(task.due_at),
-    data: { taskId: task.id },
-  });
-  return { scheduled: true };
+  const date = new Date(task.due_at);
+  if (Number.isNaN(date.getTime())) return { scheduled: false, reason: 'invalid_due_at' };
+  try {
+    const res = await notificationAdapter.schedule({
+      title: 'momi 提醒你 🐾',
+      body: task.title,
+      date,
+      data: { taskId: task.id },
+    });
+    if (res && res.scheduled === false) return res;
+    return { scheduled: true };
+  } catch (err) {
+    console.warn('[proactiveScheduler] 预约本地提醒失败:', err.message);
+    return { scheduled: false, reason: 'schedule_failed', error: err.message };
+  }
 }
 
 /** 取消指定任务已预约的本地通知（聊天内取消任务时同步调用） */
