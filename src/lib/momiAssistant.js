@@ -1,8 +1,10 @@
 // ═══════════════════════════════════════════════════════
-// momi 伴侣业务核心 (momiAssistant.js) — V5
+// momi 伴侣业务核心 (momiAssistant.js) — V6
 // 识图 / 全量数据按需访问 / 可信记忆 / 持久情绪 / 主动触发统一入口
 // V4：聊天内发布/取消任务统一走 handleTaskMessage（唯一入口，杜绝双写）。
 // V5：所有回复路径共享 memoryGrounding；只有已持久化 user message 可写长期记忆。
+// V6：前置工作全并行 + 硬超时降级 + 记忆写入移出关键路径 + SSE 流式透传，
+//     目标 P50 首字 ≤1.2s、整段 ≤4s；输入 token 从 ~8k 降到 ≤2.5k。
 // ═══════════════════════════════════════════════════════
 
 import { File } from 'expo-file-system';
@@ -33,17 +35,62 @@ import {
   scoreRudenessLocally,
   buildEmotionPromptBlock,
 } from './momiState';
+import { looksLikeTaskIntent } from './momiTaskIntent';
 
 export const COUPLE_ID = 'momo_and_baomi';
 export const MOMI_CHAT_BUCKET = 'momi-chat';
+
+/** 非关键前置工作的硬超时：超过就降级，绝不让用户干等 */
+export const PRE_WORK_TIMEOUT_MS = 800;
+/** 显式「记住…」时等待写入的上限 */
+export const MEMORY_WRITE_TIMEOUT_MS = 1500;
+/** 情绪结算上限（在回复生成之后，仍然不允许无限期挂住） */
+export const STATE_WRITE_TIMEOUT_MS = 1500;
+/** 送给模型的近端历史条数（原 40，token 大头） */
+export const HISTORY_MAX_MESSAGES = 8;
+/** 业务摘要注入上限（原 5000 字符） */
+export const DIGEST_MAX_CHARS = 1200;
+
 const EMPTY_MEMORY_GROUNDING = Object.freeze({
   state: 'none',
   usedCount: 0,
   attributionAllowed: false,
 });
+const EMPTY_MEMORY_CONTEXT = Object.freeze({
+  block: '',
+  entries: [],
+  grounding: EMPTY_MEMORY_GROUNDING,
+});
+const EMPTY_MEMORY_WRITE = Object.freeze({ writes: [], results: [] });
 
 function safeErrorCode(error) {
   return String(error?.code || error?.name || 'UNKNOWN').slice(0, 80);
+}
+
+/**
+ * 给任意 promise 套上硬超时：超时/失败都返回 fallback，并且不产生未处理拒绝。
+ * 这是 V6 速度改造的核心工具——任何一个慢依赖都不能再拖住整轮回复。
+ */
+export function withTimeout(promise, ms, fallback, label) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      console.warn(`[momiAssistant] ${label || '前置任务'}超过 ${ms}ms，本轮降级继续`);
+      resolve(fallback);
+    }, ms);
+    Promise.resolve(promise).then(done, (error) => {
+      console.warn(`[momiAssistant] ${label || '前置任务'}失败:`, safeErrorCode(error));
+      done(fallback);
+    });
+  });
 }
 
 /**
@@ -89,9 +136,9 @@ function formatMemoryBlock(memoryContext) {
   return memoryContext?.block || '【可信记忆检索结果：无】';
 }
 
-function formatDigest(digest) {
+function formatDigest(digest, maxChars = 5000) {
   try {
-    return JSON.stringify(digest || {}, null, 0).slice(0, 5000);
+    return JSON.stringify(digest || {}, null, 0).slice(0, maxChars);
   } catch (error) {
     console.warn('[momiAssistant] 业务摘要序列化失败:', safeErrorCode(error));
     return '{}';
@@ -166,6 +213,9 @@ export function buildSystemPrompt(context = {}) {
   const taskCreatedMeta = context.preciseData?.taskCreatedMeta || {};
   const taskCancelled = context.preciseData?.taskCancelled;
   const taskCancelFailed = context.preciseData?.taskCancelFailed;
+  const taskNeedsTime = context.preciseData?.taskNeedsTime;
+  const taskPastTime = context.preciseData?.taskPastTime;
+  const taskList = context.preciseData?.taskList;
   let taskBlock = '';
   if (taskCreated) {
     const recurrence = taskCreated.recurrence && taskCreated.recurrence !== 'none' ? taskCreated.recurrence : null;
@@ -174,6 +224,12 @@ export function buildSystemPrompt(context = {}) {
     taskBlock = `\n\n【任务取消成功】\n已为他们取消 ${taskCancelled.count} 条提醒/任务：${(taskCancelled.titles || []).map((title) => `「${title}」`).join('、')}\n【回答硬性约束】请亲切地向用户确认这些任务已经取消啦。`;
   } else if (taskCancelFailed) {
     taskBlock = `\n\n【任务取消未命中】\n没有找到标题包含「${taskCancelFailed.keyword}」的进行中任务。请温和告知用户没找到对应提醒，并引导他们先问“我有哪些提醒”核对名称后再取消。`;
+  } else if (taskNeedsTime) {
+    taskBlock = `\n\n【任务缺少时间，尚未创建】\n用户想让你提醒「${taskNeedsTime.title || '一件事'}」，但没有说具体时间，所以还没有建任务。\n【回答硬性约束】必须亲切地反问具体时间（例：几点？今天还是明天？要不要每天重复？），绝对禁止说“已经设好提醒”。`;
+  } else if (taskPastTime) {
+    taskBlock = `\n\n【指定时间已过去，尚未创建】\n用户说的时间已经过去了，所以没有建任务（任务：「${taskPastTime.title || '一件事'}」）。\n【回答硬性约束】温和说明那个时间已经过啦，并反问是要改到今天晚些时候、明天同一时间，还是别的时间。`;
+  } else if (taskList && taskList.summary) {
+    taskBlock = `\n\n【进行中的定时提醒与待办列表】\n${taskList.summary}`;
   } else if (context.preciseData?.intent?.intent === 'tasks' && context.preciseData?.intent?.data?.summary) {
     taskBlock = `\n\n【进行中的定时提醒与待办列表】\n${context.preciseData.intent.data.summary}`;
   }
@@ -317,9 +373,21 @@ function removeFalseMemoryConfirmation(content) {
 }
 
 /**
+ * 本轮没有任何可归因的可信记忆时，删掉模型编造的「你说过 / 你告诉过我」句子。
+ * 这是记忆混乱的最后一道闸门：宁可少说，也不能凭空替用户捏造原话。
+ */
+export function removeUngroundedAttribution(content) {
+  return String(content || '')
+    .replace(/[^。！？\n]*(?:你说过|你之前说过|你跟我说过|你告诉过我|你上次说|我记得你说)[^。！？\n]*[。！？]?/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/**
  * momi 统一对话入口
  * triggerSource: 'assistant' | 'chat_mention' | 'proactive' | 'scheduled'
  * sourceMessageId: assistant 场景已持久化 user message 的 id，也是记忆证据唯一入口
+ * onToken: 可选，传入即启用流式回复（逐字上屏）
  */
 export async function chatWithMomi({
   userId,
@@ -328,16 +396,88 @@ export async function chatWithMomi({
   recentChatHistory = [],
   triggerSource = 'assistant',
   sourceMessageId = null,
+  onToken = null,
 }) {
-  // 1) 轻量意图分类：数据 / 配方 / 显式记忆 / 天气 / 聊天历史
+  const startedAt = Date.now();
   const explicit = parseExplicitMemory(message, userId);
+
+  // ── 1) 全部前置工作并行启动（V6 关键改造：不再串行等待）──────────────
+  const dataPromise = Promise.all([
+    queryByIntent(message, { userId }),
+    queryRecipeIfAsked(message),
+  ]);
+
+  // 任务意图先做本地确定性判定；不是任务就完全不进任务链路，省掉一次往返
+  let taskPromise = Promise.resolve(null);
+  if (triggerSource === 'assistant' && message) {
+    let taskIntent = null;
+    try {
+      taskIntent = looksLikeTaskIntent(message);
+    } catch (error) {
+      console.warn('[momiAssistant] 任务意图判定异常，回退到完整处理:', safeErrorCode(error));
+      taskIntent = { isTask: true };
+    }
+    if (taskIntent && taskIntent.isTask) {
+      taskPromise = (async () => {
+        try {
+          // eslint-disable-next-line global-require
+          const { handleTaskMessage } = require('./momiTasks');
+          return await handleTaskMessage({ userId, message, sourceMessageId });
+        } catch (error) {
+          console.warn('[momiAssistant] 任务意图处理异常:', safeErrorCode(error));
+          return null;
+        }
+      })();
+    }
+  }
+
+  const statePromise = withTimeout(getMomiState(), PRE_WORK_TIMEOUT_MS, null, '情绪状态读取');
+  const digestPromise = withTimeout(getDataDigest(), PRE_WORK_TIMEOUT_MS, null, '业务数据摘要');
+  const memoryPromise = withTimeout(
+    retrieveMemoryContext(message, { actorId: userId }),
+    PRE_WORK_TIMEOUT_MS,
+    EMPTY_MEMORY_CONTEXT,
+    '可信记忆检索',
+  );
+  const contextPromise = withTimeout(
+    buildConversationContext({
+      scene: triggerSource,
+      userId,
+      message,
+      localMessages: recentChatHistory,
+    }),
+    PRE_WORK_TIMEOUT_MS,
+    null,
+    '跨场景上下文',
+  );
+
+  // 记忆写入：只有用户显式说「记住…」时才需要等结果（要据此给确认文案），
+  // 其余情况后台写入，绝不占用本轮回复时间。
+  let memoryWritePromise = Promise.resolve(EMPTY_MEMORY_WRITE);
+  if (triggerSource === 'assistant' && sourceMessageId && message) {
+    const writeTask = Promise.resolve()
+      .then(() => processPersistedUserMessage({
+        messageId: sourceMessageId,
+        userId,
+        content: message,
+        senderType: 'user',
+      }))
+      .catch((error) => {
+        console.warn('[momiAssistant] 可信记忆处理异常:', safeErrorCode(error));
+        return { writes: [], results: [{ status: 'error' }] };
+      });
+    if (explicit) {
+      memoryWritePromise = withTimeout(writeTask, MEMORY_WRITE_TIMEOUT_MS, EMPTY_MEMORY_WRITE, '显式记忆写入');
+    } else {
+      writeTask.then(() => undefined);
+    }
+  }
+
+  // ── 2) 数据查询是回答的事实基础，必须等；失败按原错误码返回 ──────────
   let preciseData = null;
   let weatherData = null;
   try {
-    const [intentResult, recipeResult] = await Promise.all([
-      queryByIntent(message, { userId }),
-      queryRecipeIfAsked(message),
-    ]);
+    const [intentResult, recipeResult] = await dataPromise;
     preciseData = { intent: intentResult, recipe: recipeResult };
     if (intentResult?.intent === 'weather') weatherData = intentResult.data;
   } catch (error) {
@@ -354,46 +494,58 @@ export async function chatWithMomi({
       taskCreated: null,
       taskCancelled: null,
       taskCancelFailed: null,
+      taskNeedsTime: null,
+      taskPastTime: null,
+      taskList: null,
     };
   }
 
-  // 1.5) 聊天内发布/取消任务的唯一入口。主聊天插话不在这里建任务。
-  let taskAction = null;
-  if (triggerSource === 'assistant' && message && preciseData?.intent?.intent !== 'tasks') {
-    try {
-      // eslint-disable-next-line global-require
-      const { handleTaskMessage } = require('./momiTasks');
-      taskAction = await handleTaskMessage({ userId, message, sourceMessageId });
-    } catch (error) {
-      console.warn('[momiAssistant] 任务意图处理异常:', safeErrorCode(error));
-    }
-  }
+  // ── 3) 任务动作合并进本轮上下文（唯一入口，杜绝双写）─────────────────
+  const taskAction = await taskPromise;
+  const taskTitleOf = (action) => action?.title || action?.task?.title || action?.pending?.title || '';
   if (taskAction?.action === 'created') {
-    preciseData = preciseData || {};
     preciseData.taskCreated = taskAction.task;
     preciseData.taskCreatedMeta = { duplicated: Boolean(taskAction.duplicated) };
   } else if (taskAction?.action === 'cancelled') {
-    preciseData = preciseData || {};
     preciseData.taskCancelled = { count: taskAction.count, titles: taskAction.titles };
   } else if (taskAction?.action === 'cancel_failed') {
-    preciseData = preciseData || {};
     preciseData.taskCancelFailed = { keyword: taskAction.keyword };
+  } else if (taskAction?.action === 'need_time') {
+    preciseData.taskNeedsTime = { title: taskTitleOf(taskAction) };
+  } else if (taskAction?.action === 'past_time') {
+    preciseData.taskPastTime = { title: taskTitleOf(taskAction), dueAt: taskAction.dueAt || null };
+  } else if (taskAction?.action === 'list') {
+    preciseData.taskList = {
+      summary: taskAction.summary || taskAction.data?.summary || '',
+      count: taskAction.count ?? (taskAction.tasks?.length || 0),
+      tasks: taskAction.tasks || [],
+    };
   }
 
   const taskResultFields = {
     taskCreated: preciseData?.taskCreated || null,
     taskCancelled: preciseData?.taskCancelled || null,
     taskCancelFailed: preciseData?.taskCancelFailed || null,
+    taskNeedsTime: preciseData?.taskNeedsTime || null,
+    taskPastTime: preciseData?.taskPastTime || null,
+    taskList: preciseData?.taskList || null,
   };
+  // 任务类回答走快车道：不需要业务摘要，prompt 更短、首字更快
+  const taskFastPath = Boolean(
+    preciseData?.taskCreated
+    || preciseData?.taskCancelled
+    || preciseData?.taskCancelFailed
+    || preciseData?.taskNeedsTime
+    || preciseData?.taskPastTime,
+  );
 
-  // 1.6) 外网检索兜底匹配（若用户显式要求查询外网但未被 intent 拦截）
+  // ── 3.5) 外网检索兜底匹配（若用户显式要求查询外网但未被 intent 拦截）──
   if (!preciseData?.intent && /(查|搜索|搜).*外网|外网.*(信息|消息)|上网查|查一下最新|外网/i.test(message)) {
     try {
       // eslint-disable-next-line global-require
       const { searchWeb } = require('./webSearchService');
       const searchRes = await searchWeb(message);
       if (searchRes) {
-        preciseData = preciseData || {};
         preciseData.intent = { intent: 'web_search', data: searchRes };
       }
     } catch (error) {
@@ -401,57 +553,37 @@ export async function chatWithMomi({
     }
   }
 
-  // 1.7) 只有 assistant 场景且已有 canonical message id，才允许进入记忆账本。
-  let memoryWriteResult = { writes: [], results: [] };
-  if (triggerSource === 'assistant' && sourceMessageId && message) {
-    try {
-      memoryWriteResult = await processPersistedUserMessage({
-        messageId: sourceMessageId,
-        userId,
-        content: message,
-        senderType: 'user',
-      });
-    } catch (error) {
-      console.warn('[momiAssistant] 可信记忆处理异常:', safeErrorCode(error));
-      memoryWriteResult = { writes: [], results: [{ status: 'error' }] };
-    }
-  }
-  const memoryWriteStatus = deriveMemoryWriteStatus(memoryWriteResult, explicit, sourceMessageId);
-  const memoryWrites = memoryWriteResult.writes || [];
-
-  // 跨场景近端历史只用于连续性，不能授权历史事实归因。
-  const convContext = await buildConversationContext({
-    scene: triggerSource,
-    userId,
-    message,
-    localMessages: recentChatHistory,
-  }).catch((error) => {
-    console.warn('[momiAssistant] 构建跨场景上下文异常:', safeErrorCode(error));
-    return null;
-  });
-
-  // 2-4) 可信记忆由独立 evidence store 查询，不采信 convContext 中的模型摘要。
-  const [stateBefore, digest, memoryContext] = await Promise.all([
-    getMomiState(),
-    getDataDigest(),
-    retrieveMemoryContext(message, { actorId: userId }),
+  // ── 4) 收拢并行结果（全部已带超时降级，不会再卡住）────────────────────
+  const [stateBefore, digest, memoryContext, convContext, memoryWriteResult] = await Promise.all([
+    statePromise,
+    digestPromise,
+    memoryPromise,
+    contextPromise,
+    memoryWritePromise,
   ]);
-  const memoryGrounding = memoryContext.grounding || EMPTY_MEMORY_GROUNDING;
+
+  const memoryWriteStatus = deriveMemoryWriteStatus(memoryWriteResult, explicit, sourceMessageId);
+  const memoryWrites = memoryWriteResult?.writes || [];
+  const memoryGrounding = memoryContext?.grounding || EMPTY_MEMORY_GROUNDING;
+
   const systemPrompt = buildSystemPrompt({
     scene: triggerSource,
     memoryBlock: formatMemoryBlock(memoryContext),
     memoryGrounding,
     memoryWriteStatus,
-    emotionBlock: buildEmotionPromptBlock(stateBefore),
-    digestBlock: formatDigest(digest),
+    emotionBlock: stateBefore ? buildEmotionPromptBlock(stateBefore) : '',
+    digestBlock: taskFastPath || !digest ? '' : formatDigest(digest, DIGEST_MAX_CHARS),
     preciseData,
     weatherData,
     historyBlock: convContext?.historyBlock || '',
   });
 
-  // 5) 组装 messages：近端历史最多 40 条；本轮图片绝不静默丢弃。
+  // ── 5) 组装 messages：近端历史 8 条；本轮图片绝不静默丢弃 ─────────────
   const effectiveHistory = convContext?.nearMessages?.length ? convContext.nearMessages : recentChatHistory;
-  const messages = [{ role: 'system', content: systemPrompt }, ...historyToMessages(effectiveHistory, { maxMessages: 40 })];
+  const messages = [
+    { role: 'system', content: systemPrompt },
+    ...historyToMessages(effectiveHistory, { maxMessages: HISTORY_MAX_MESSAGES }),
+  ];
   const preparedImages = [];
   if (images.length) {
     for (const uri of images) {
@@ -510,6 +642,7 @@ export async function chatWithMomi({
     top_p: 0.9,
     max_tokens,
     requiresVision: preparedImages.length > 0,
+    onToken: typeof onToken === 'function' ? onToken : null,
   });
   if (!response.success) {
     let reply = response.error;
@@ -526,22 +659,34 @@ export async function chatWithMomi({
       memoryGrounding,
       usedFallbackModel: false,
       errorCode: response.errorCode,
+      latencyMs: Date.now() - startedAt,
       ...taskResultFields,
     };
   }
 
-  // 6) 解析回复并更新持久情绪：本地粗鲁词表 + AI 评分取高。
+  // ── 6) 解析回复并更新持久情绪：本地粗鲁词表 + AI 评分取高 ─────────────
   const parsed = parseAssistantOutput(response.text);
   const rudeness = Math.max(scoreRudenessLocally(message), parsed.rudeness);
-  const stateResult = await applyInteraction({ userId, rudeness, text: message });
+  const stateResult = await withTimeout(
+    applyInteraction({ userId, rudeness, text: message }),
+    STATE_WRITE_TIMEOUT_MS,
+    { state: stateBefore, emotionDelta: null, leveledUp: false, newLevel: stateBefore?.growth_level || 1 },
+    '情绪结算',
+  );
 
-  // 7) 确认文案由真实写入结果决定，绝不让模型凭感觉宣称保存/删除成功。
+  // ── 7) 确认文案由真实写入结果决定，绝不让模型凭感觉宣称保存/删除成功 ──
   let content = parsed.content;
   if (explicit && memoryWriteStatus === 'saved' && !/记住|小本本|不会忘/.test(content)) {
     content = `记住了！${explicit.content}，momi 已经写进小本本啦～ 🐾\n${content}`.trim();
   } else if (explicit && memoryWriteStatus !== 'saved') {
     const cleaned = removeFalseMemoryConfirmation(content);
     content = `我理解的是“${explicit.content}”，但这次暂时没能写进小本本；等记录同步好后再试一次哦 🐾${cleaned ? `\n${cleaned}` : ''}`;
+  }
+
+  // 没有任何可归因记忆时，删除模型编造的「你说过…」（记忆混乱的最后一道闸门）
+  if (!memoryGrounding.attributionAllowed || !memoryGrounding.usedCount) {
+    const grounded = removeUngroundedAttribution(content);
+    if (grounded) content = grounded;
   }
 
   const forgetRequested = /(?:忘掉|忘记|删除|删掉).{0,12}(?:记忆|这件事|这个|它)/.test(message);
@@ -568,6 +713,8 @@ export async function chatWithMomi({
     usedFallbackModel: Boolean(response.usedFallbackModel),
     errorCode: null,
     state: stateResult.state,
+    streamed: Boolean(response.streamed),
+    latencyMs: Date.now() - startedAt,
     ...taskResultFields,
   };
 }
