@@ -1,12 +1,16 @@
-// ══════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════
 // momi 中文时间解析器 (momiTimeParser.js) — V6
 // 纯函数、无副作用、不依赖 AI、可单测。
 // 目标：把「等下两点钟」「明天早上八点半」「10分钟后」「每天晚上九点」
 // 「每个工作日早上7点」「9月20日下午三点」这类真实中文表达，
-// 稳定解析成绝对时间 + 重复规则；解析不出来就明确报错，绝不猜时间。
-// ══════════════════════════════════════════════════════════
+// 稳定解析成绕对时间 + 重复规则；解析不出来就明确报错，绕不猜时间。
+//
+// V6.1 行为修正（对齐仓库现有 Jest 断言）：
+//   - 「N 天后 / N 周后」没说钟点时保持精确相对偏移，不套默认 9 点
+//   - 明确说了「今天/今晚/当天」但时间已过 → past_time（不擅自顺延到明天）
+// ═════════════════════════════════════════════════════════
 
-export const NUM_CHARS = '0-9零〇○一壹二贰两俩三仨四五六七八九十';
+export const NUM_CHARS = '0-9零〇○一壹二贰两俩三付四五六七八九十';
 export const MIN_LEAD_MS = 30 * 1000;
 export const RECURRENCE_LABEL = {
   none: '一次性',
@@ -19,7 +23,7 @@ const WEEKDAY_CN = ['日', '一', '二', '三', '四', '五', '六'];
 const WEEKDAY_MAP = { 日: 0, 天: 0, 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6 };
 const DIGIT = {
   零: 0, 〇: 0, '○': 0, 一: 1, 壹: 1, 二: 2, 贰: 2, 两: 2, 俩: 2,
-  三: 3, 仨: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9,
+  三: 3, 付: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9,
 };
 const PERIOD_RE = /(凌晨|清晨|早晨|大早|早上|上午|中午|下午|午后|傍晚|晚上|今晚|明晚|夜里|半夜|夜间)/;
 const PERIOD_DEFAULT_HOUR = {
@@ -141,10 +145,10 @@ export function detectRecurrence(input) {
 
 /**
  * 解析日期线索。返回：
- *   { kind: 'relative', ms }                 —— 10分钟后 / 半小时后
- *   { kind: 'date', date, fromWeekday? }     —— 今天 / 明天 / 周三 / 9月20日 / 3天后
- *   { kind: 'soon', ms }                     —— 等下 / 一会儿（无钟点时才用）
- *   null                                     —— 没有任何日期线索
+ *   { kind: 'relative', ms }                       —— 10分钟后 / 半小时后
+ *   { kind: 'date', date, ms?, fromWeekday? }      —— 今天 / 明天 / 周三 / 9月20日 / 3天后
+ *   { kind: 'soon', ms }                           —— 等下 / 一会儿（无钟点时才用）
+ *   null                                           —— 没有任何日期线索
  */
 export function parseDateOffset(input, now = new Date()) {
   const text = normalizeText(input);
@@ -158,14 +162,18 @@ export function parseDateOffset(input, now = new Date()) {
     const amount = cnToNumber(rel[1]);
     const unitMs = UNIT_MS[rel[2]];
     if (amount != null && amount > 0 && unitMs) {
+      const ms = Math.round(amount * unitMs);
       if (rel[2] === '天' || rel[2] === '周' || rel[2] === '星期') {
+        // 带钟点时用这个日期作为基准（「3天后早上8点」）；
+        // 不带钟点时用 ms 保持精确偏移（「3天后」= 正好 72 小时后）。
         return {
           kind: 'date',
-          date: startOfDay(new Date(now.getTime() + amount * unitMs)),
+          date: startOfDay(new Date(now.getTime() + ms)),
+          ms,
           fromRelativeDay: true,
         };
       }
-      return { kind: 'relative', ms: Math.round(amount * unitMs) };
+      return { kind: 'relative', ms };
     }
   }
 
@@ -249,12 +257,16 @@ function firstRecurringOccurrence({ recurrence, hour, minute, weekday }, now) {
   return null;
 }
 
+function pastTime(due) {
+  return { ok: false, error: 'past_time', dueAt: due.toISOString() };
+}
+
 function finalize(due, now, extra = {}) {
   if (!(due instanceof Date) || Number.isNaN(due.getTime())) {
     return { ok: false, error: 'no_time' };
   }
   if (due.getTime() <= now.getTime() + MIN_LEAD_MS) {
-    return { ok: false, error: 'past_time', dueAt: due.toISOString() };
+    return pastTime(due);
   }
   return { ok: true, dueAt: due.toISOString(), recurrence: 'none', weekday: null, ...extra };
 }
@@ -299,13 +311,17 @@ export function resolveDueAt(input, now = new Date()) {
     const base = hasDate ? dateHint.date : startOfDay(now);
     let due = withTime(base, clock.hour, clock.minute);
     if (due.getTime() <= now.getTime() + MIN_LEAD_MS) {
+      if (hasDate && dateHint.isToday) {
+        // 明确说了「今天/今晚」却已经过点：不能擅自顺延到明天，交由上层反问
+        return pastTime(due);
+      }
       if (!hasDate && !clock.period && clock.hour <= 11) {
         // 「两点钟」在 13:51 说出口，指的是 14:00，而不是明天凌晨 2 点
         const pm = withTime(base, clock.hour + 12, clock.minute);
         due = pm.getTime() > now.getTime() + MIN_LEAD_MS
           ? pm
           : new Date(due.getTime() + 86400000);
-      } else if (!hasDate || dateHint.isToday) {
+      } else if (!hasDate) {
         due = new Date(due.getTime() + 86400000);
       } else if (dateHint.fromWeekday) {
         due = new Date(due.getTime() + 7 * 86400000);
@@ -314,14 +330,20 @@ export function resolveDueAt(input, now = new Date()) {
     return finalize(due, now);
   }
 
-  // D) 只有时段或只有日期：用该时段的默认时间
+  // D) 只有时段或只有日期
   if ((clock && clock.period) || (dateHint && dateHint.kind === 'date')) {
     const hasDate = !!dateHint && dateHint.kind === 'date';
+    const hasPeriod = !!(clock && clock.period);
+    // 「3天后」「一周后」没说钟点：保持精确相对偏移，不套默认 9 点
+    if (hasDate && dateHint.fromRelativeDay && !hasPeriod && dateHint.ms) {
+      return finalize(new Date(now.getTime() + dateHint.ms), now);
+    }
     const base = hasDate ? dateHint.date : startOfDay(now);
-    const hour = clock && clock.period ? PERIOD_DEFAULT_HOUR[clock.period] : 9;
+    const hour = hasPeriod ? PERIOD_DEFAULT_HOUR[clock.period] : 9;
     let due = withTime(base, hour, 0);
     if (due.getTime() <= now.getTime() + MIN_LEAD_MS) {
-      if (!hasDate || dateHint.isToday) due = new Date(due.getTime() + 86400000);
+      if (hasDate && dateHint.isToday) return pastTime(due);
+      if (!hasDate) due = new Date(due.getTime() + 86400000);
       else if (dateHint.fromWeekday) due = new Date(due.getTime() + 7 * 86400000);
     }
     return finalize(due, now);
